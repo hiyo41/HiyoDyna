@@ -14,7 +14,10 @@ $LegacyWatcher = Join-Path $InstallDir "watch-update.ps1"
 function Stop-LegacyWatcher {
     if (Test-Path -LiteralPath $LegacyPid) {
         $watcherPid = 0
-        [void][int]::TryParse((Get-Content -LiteralPath $LegacyPid -Raw).Trim(), [ref]$watcherPid)
+        $rawPid = Get-Content -LiteralPath $LegacyPid -Raw -ErrorAction SilentlyContinue
+        if (-not [string]::IsNullOrWhiteSpace($rawPid)) {
+            [void][int]::TryParse($rawPid.Trim(), [ref]$watcherPid)
+        }
         if ($watcherPid -gt 0) {
             $process = Get-CimInstance Win32_Process -Filter "ProcessId = $watcherPid" -ErrorAction SilentlyContinue
             if ($process -and $process.CommandLine -and

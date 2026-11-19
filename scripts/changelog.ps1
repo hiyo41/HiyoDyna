@@ -1,6 +1,7 @@
 param(
     [string]$FromTag = "",
     [string]$ToTag = "HEAD",
+    [string]$CompareTag = "",
     [string]$Output = "release-notes.md"
 )
 
@@ -8,7 +9,7 @@ $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 
 $repo = if ($env:GITHUB_REPOSITORY) { $env:GITHUB_REPOSITORY } else { "hiyo41/HiyoDyna" }
-$range = if ($FromTag) { "$FromTag..HEAD" } else { "HEAD" }
+$range = if ($FromTag) { "$FromTag..$ToTag" } else { $ToTag }
 
 $raw = git log $range --no-merges --pretty=format:"%h%x09%s"
 if ($LASTEXITCODE -ne 0) {
@@ -70,7 +71,8 @@ if ($commits.Count -eq 0) {
         }
     }
     if ($FromTag) {
-        $lines += "**Full Changelog**: https://github.com/$repo/compare/$FromTag...$ToTag"
+        $linkTag = if ($CompareTag) { $CompareTag } else { $ToTag }
+        $lines += "**Full Changelog**: https://github.com/$repo/compare/$FromTag...$linkTag"
     }
 }
 

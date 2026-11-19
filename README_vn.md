@@ -13,7 +13,8 @@ Một overlay kiểu Dynamic Island viết bằng Rust native cho Windows. Bản
 - Typography Inter đi kèm, góc squircle, bóng mềm và quầng sáng khi rê chuột
 - Bảng mở rộng hiển thị thứ và ngày phía trên giờ lớn
 - Win32 native + render phần mềm — không dùng webview, HTML hay JavaScript
-- Biểu tượng khay hệ thống và menu chuột phải cho Motion, Bounce, Shadow, Accent, Seconds, Position và Clock
+- Biểu tượng khay hệ thống và menu chuột phải cho Motion, Bounce, Shadow, Accent, Seconds, Position, Clock và Update
+- Bộ cập nhật trong app với kênh Build và Stable, xác minh SHA-256, kiểm tra lúc khởi động và mỗi 30 phút
 - Tùy chọn khởi động cùng Windows, cùng các mục khởi động lại, mở thư mục cài đặt và giới thiệu
 - Cài đặt lưu tại `%APPDATA%\HiyoDyna\settings.ini`
 - Mặc định sát mép trên, căn giữa, không xuất hiện trên taskbar và không kích hoạt khi nhấp

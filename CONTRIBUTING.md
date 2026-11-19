@@ -34,7 +34,7 @@ The app is Windows-only: Win32 + GDI, with no webview or JavaScript. Keep change
 | `src/tray.rs` | Tray icon and context menus |
 | `src/tray_icon.rs` | Custom tray icon pixels and HICON lifecycle |
 | `src/autostart.rs` | HKCU Run-key autostart |
-| `scripts/` | Per-user setup, auto-update watcher, and uninstaller |
+| `scripts/` | Per-user setup and uninstaller |
 
 ## Pull requests
 

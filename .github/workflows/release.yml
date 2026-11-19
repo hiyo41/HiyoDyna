@@ -35,6 +35,8 @@ jobs:
           })
           $max = if ($numbers.Count -gt 0) { ($numbers | Measure-Object -Maximum).Maximum } else { 0 }
           $latestTag = if ($max -gt 0) { "pre-$max" } else { "" }
+          $previousNumber = $numbers | Where-Object { $_ -lt $max } | Sort-Object -Descending | Select-Object -First 1
+          $previousTag = if ($null -ne $previousNumber) { "pre-$previousNumber" } else { "" }
 
           $needsBuild = $true
           if ($latestTag) {
@@ -60,6 +62,7 @@ jobs:
           Add-Content -Path $env:GITHUB_ENV -Value "RELEASE_UPDATE_ONLY=$updateOnly"
           Add-Content -Path $env:GITHUB_ENV -Value "RELEASE_TAG=$tag"
           Add-Content -Path $env:GITHUB_ENV -Value "RELEASE_TITLE=$title"
+          Add-Content -Path $env:GITHUB_ENV -Value "RELEASE_PREVIOUS_TAG=$previousTag"
           Add-Content -Path $env:GITHUB_ENV -Value "RELEASE_COMPARE_REF=$compareRef"
 
       - name: Resolve official release
@@ -74,6 +77,13 @@ jobs:
           }
           if ($version -notmatch '^v\d+\.\d+\.\d+-\d+$') {
             throw "Cargo.toml version must be semver, for example 0.0.1; the tag becomes v0.0.1-<build>."
+          }
+          $existingBuilds = @(git tag --list "v*" | ForEach-Object {
+            if ($_ -match '^v\d+\.\d+\.\d+-(\d+)$') { [int]$Matches[1] }
+          })
+          $maxBuild = if ($existingBuilds.Count -gt 0) { ($existingBuilds | Measure-Object -Maximum).Maximum } else { 0 }
+          if ([int]$build -le $maxBuild) {
+            throw "Build number $build is not newer than existing official tag build $maxBuild. Re-run the original release workflow instead of publishing a lower tag."
           }
           if (git rev-parse -q --verify "refs/tags/$version") {
             throw "Tag $version already exists."
@@ -122,8 +132,12 @@ jobs:
         run: |
           $releases = @(gh api "repos/$env:GITHUB_REPOSITORY/releases?per_page=100" | ConvertFrom-Json)
           $lastOfficial = $releases | Where-Object { $_ -and -not $_.prerelease } | Select-Object -First 1
-          $fromTag = if ($lastOfficial) { $lastOfficial.tag_name } else { "" }
-          .\scripts\changelog.ps1 -FromTag $fromTag -ToTag $env:RELEASE_COMPARE_REF -Output release-notes.md
+          if ($env:RELEASE_OFFICIAL -eq "true") {
+            $fromTag = if ($lastOfficial) { $lastOfficial.tag_name } else { "" }
+          } else {
+            $fromTag = $env:RELEASE_PREVIOUS_TAG
+          }
+          .\scripts\changelog.ps1 -FromTag $fromTag -ToTag HEAD -CompareTag $env:RELEASE_COMPARE_REF -Output release-notes.md
           if ($env:RELEASE_OFFICIAL -eq "true") {
             Add-Content -Path release-notes.md -Value ""
             Add-Content -Path release-notes.md -Value "This changelog covers every commit since the previous official release, including changes shipped in pre-release builds."

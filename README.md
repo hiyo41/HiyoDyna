@@ -13,7 +13,8 @@ A native Rust Dynamic Island-style overlay for Windows. The current build provid
 - Bundled Inter typography, squircle corners, soft shadow, and a hover glow
 - Expanded panel adds the weekday and date above the larger time
 - Native Win32 + software rendering — no webview, HTML, or JavaScript
-- Tray icon and right-click menu for Motion, Bounce, Shadow, Accent, Seconds, Position, and Clock
+- Tray icon and right-click menu for Motion, Bounce, Shadow, Accent, Seconds, Position, Clock, and Update
+- In-app updater with Build and Stable channels, SHA-256 verification, and startup plus 30-minute checks
 - Optional Start with Windows, plus restart, settings folder, and about actions
 - Settings persist to `%APPDATA%\HiyoDyna\settings.ini`
 - Flush to the top edge by default, centered, absent from the taskbar, and never activates when clicked
