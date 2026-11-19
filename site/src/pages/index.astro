@@ -7,7 +7,9 @@ import Faq from '../components/Faq.astro';
 import DownloadButton from '../components/DownloadButton.astro';
 import { DEFAULT_SETTINGS } from '../lib/settings';
 
-const base = import.meta.env.BASE_URL;
+const base = import.meta.env.BASE_URL.endsWith('/')
+  ? import.meta.env.BASE_URL
+  : `${import.meta.env.BASE_URL}/`;
 const releases = 'https://github.com/hiyo41/HiyoDyna/releases';
 const source = 'https://github.com/hiyo41/HiyoDyna';
 ---

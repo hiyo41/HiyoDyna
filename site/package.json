@@ -11,6 +11,7 @@
     "build": "astro build",
     "preview": "astro preview",
     "check": "astro check",
+    "check:build": "node tests/check-build.mjs",
     "test": "vitest run",
     "astro": "astro"
   },

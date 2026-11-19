@@ -1,0 +1,70 @@
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { join } from 'node:path';
+import { gzipSync } from 'node:zlib';
+
+const root = process.cwd();
+const failures = [];
+let checks = 0;
+
+function check(name, condition) {
+  checks += 1;
+  if (!condition) failures.push(name);
+}
+
+function read(path) {
+  return readFileSync(join(root, path), 'utf8');
+}
+
+if (!existsSync(join(root, 'dist', 'index.html'))) {
+  console.error('Run this from site/ after `npm run build`.');
+  process.exit(1);
+}
+
+const html = read('dist/index.html');
+const notFound = read('dist/404.html');
+const base = process.env.PAGES_BASE || '/';
+const basePrefix = base.endsWith('/') ? base : `${base}/`;
+
+check('title mentions HiyoDyna', /<title>[^<]*HiyoDyna/.test(html));
+check('canonical uses the project URL', /rel="canonical" href="https:\/\/hiyo41\.github\.io\/HiyoDyna\/"/.test(html));
+check('Open Graph image is absolute', /property="og:image" content="https:\/\/hiyo41\.github\.io\/HiyoDyna\/og\.png"/.test(html));
+check('static Releases fallback is present', html.includes('https://github.com/hiyo41/HiyoDyna/releases'));
+check('SoftwareApplication JSON-LD is present', html.includes('"@type":"SoftwareApplication"'));
+check('404 is generated', existsSync(join(root, 'dist', '404.html')));
+check('404 is noindex', /name="robots" content="noindex"/.test(notFound));
+check('robots.txt is copied', existsSync(join(root, 'dist', 'robots.txt')));
+check('Open Graph image is copied', existsSync(join(root, 'dist', 'og.png')));
+check('OFL is copied', existsSync(join(root, 'dist', 'fonts', 'OFL.txt')));
+
+const assets = readdirSync(join(root, 'dist', '_astro'));
+check('Inter Medium is emitted', assets.some((name) => /^Inter-Medium\..*\.woff2$/.test(name)));
+check('Inter Display is emitted', assets.some((name) => /^InterDisplay-SemiBold\..*\.woff2$/.test(name)));
+
+const jsFiles = assets.filter((name) => name.endsWith('.js'));
+const jsBytes = jsFiles.reduce((total, name) => total + statSync(join(root, 'dist', '_astro', name)).size, 0);
+const jsGzip = jsFiles.reduce(
+  (total, name) => total + gzipSync(readFileSync(join(root, 'dist', '_astro', name))).length,
+  0,
+);
+check(`JS bundle stays under 15KB gzipped (${jsGzip} bytes)`, jsGzip < 15 * 1024);
+check(`JS source is not empty (${jsFiles.length} files, ${jsBytes} bytes)`, jsFiles.length > 0);
+
+const rootAbsolute = /(?:src|href)="\/(?!HiyoDyna(?:\/|"))[^"]*"/g;
+check('no root-absolute links outside the base path', !rootAbsolute.test(html));
+
+const cssFiles = assets.filter((name) => name.endsWith('.css'));
+for (const name of cssFiles) {
+  const css = readFileSync(join(root, 'dist', '_astro', name), 'utf8');
+  check(`CSS ${name} uses the base path`, !/url\(\/(?!HiyoDyna\/)/.test(css));
+}
+
+check('the favicon is copied', existsSync(join(root, 'dist', 'favicon.svg')));
+check('the base path is applied to icons', html.includes(`href="${basePrefix}favicon.svg"`));
+
+if (failures.length > 0) {
+  console.error(`Build check failed (${failures.length}/${checks}):`);
+  for (const failure of failures) console.error(`- ${failure}`);
+  process.exit(1);
+}
+
+console.log(`Build check passed (${checks} checks, ${jsGzip} bytes JS gzipped).`);
