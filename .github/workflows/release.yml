@@ -38,7 +38,7 @@ jobs:
 
           $needsBuild = $true
           if ($latestTag) {
-            $buildPaths = '^(src/|Cargo\.toml$|Cargo\.lock$|build\.rs$|rust-toolchain(\.toml)?$)'
+            $buildPaths = '^(src/|assets/|Cargo\.toml$|Cargo\.lock$|build\.rs$|rust-toolchain(\.toml)?$)'
             $changed = @(git diff --name-only "$latestTag..HEAD")
             $needsBuild = @($changed | Where-Object { $_ -match $buildPaths }).Count -gt 0
           }
@@ -107,6 +107,7 @@ jobs:
           New-Item -ItemType Directory -Force dist/package | Out-Null
           Copy-Item target/release/hiyodyna.exe dist/package/
           Copy-Item README.md, README_vn.md, LICENSE dist/package/
+          Copy-Item assets/fonts/OFL.txt dist/package/OFL.txt
           $zip = "dist/HiyoDyna-$env:RELEASE_TAG-windows-x64.zip"
           Compress-Archive -Path dist/package/* -DestinationPath $zip -Force
           Add-Content -Path $env:GITHUB_ENV -Value "RELEASE_ASSET=$zip"
