@@ -3,16 +3,18 @@ use std::ptr::null_mut;
 
 use windows_sys::Win32::Foundation::{HWND, POINT};
 use windows_sys::Win32::UI::Shell::{
-    NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW, Shell_NotifyIconW,
+    NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW,
+    Shell_NotifyIconW,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, IDI_APPLICATION, LoadIconW,
-    MF_CHECKED, MF_POPUP, MF_SEPARATOR, MF_STRING, PostMessageW, SetForegroundWindow, TPM_NONOTIFY,
-    TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, WM_APP,
+    AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, MF_CHECKED, MF_POPUP, MF_SEPARATOR,
+    MF_STRING, PostMessageW, SetForegroundWindow, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON,
+    TrackPopupMenu, WM_APP,
 };
 
 use crate::clock::ClockFormat;
-use crate::settings::{BouncePreset, MotionPreset, Settings};
+use crate::settings::{AccentPreset, BouncePreset, MotionPreset, Settings};
+use crate::tray_icon::TrayIcon;
 
 pub(crate) const TRAY_CALLBACK_MESSAGE: u32 = WM_APP + 2;
 const TRAY_ICON_ID: u32 = 1;
@@ -29,8 +31,17 @@ const CMD_TOP_GAP_8: usize = 131;
 const CMD_TOP_GAP_16: usize = 132;
 const CMD_CLOCK_24: usize = 150;
 const CMD_CLOCK_12: usize = 151;
+const CMD_ACCENT_ICE: usize = 160;
+const CMD_ACCENT_AMBER: usize = 161;
+const CMD_ACCENT_MINT: usize = 162;
+const CMD_SECONDS_ON: usize = 170;
+const CMD_SECONDS_OFF: usize = 171;
+const CMD_AUTOSTART: usize = 180;
 const CMD_RESET: usize = 140;
 const CMD_EXIT: usize = 141;
+const CMD_RESTART: usize = 190;
+const CMD_OPEN_SETTINGS: usize = 191;
+const CMD_ABOUT: usize = 192;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum TrayCommand {
@@ -39,20 +50,26 @@ pub(crate) enum TrayCommand {
     Shadow(bool),
     TopGap(f32),
     Clock(ClockFormat),
+    Accent(AccentPreset),
+    ShowSeconds(bool),
+    ToggleAutostart,
+    Restart,
+    OpenSettingsFolder,
+    About,
     Reset,
     Exit,
 }
 
 pub(crate) struct Tray {
     data: NOTIFYICONDATAW,
+    _icon: TrayIcon,
 }
 
 impl Tray {
-    pub(crate) fn create(hwnd: HWND) -> Result<Self, String> {
-        let icon = unsafe { LoadIconW(null_mut(), IDI_APPLICATION) };
-        if icon.is_null() {
-            return Err("LoadIconW failed".to_string());
-        }
+    pub(crate) fn create(hwnd: HWND, accent: AccentPreset) -> Result<Self, String> {
+        let icon = TrayIcon::create(32, accent.bgra())
+            .or_else(TrayIcon::system)
+            .ok_or("could not create the tray icon")?;
 
         let mut data: NOTIFYICONDATAW = unsafe { std::mem::zeroed() };
         data.cbSize = size_of::<NOTIFYICONDATAW>() as u32;
@@ -60,7 +77,7 @@ impl Tray {
         data.uID = TRAY_ICON_ID;
         data.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
         data.uCallbackMessage = TRAY_CALLBACK_MESSAGE;
-        data.hIcon = icon;
+        data.hIcon = icon.handle();
         let tip: Vec<u16> = "HiyoDyna".encode_utf16().chain(Some(0)).collect();
         let tip_len = tip.len().min(data.szTip.len());
         data.szTip[..tip_len].copy_from_slice(&tip[..tip_len]);
@@ -69,7 +86,18 @@ impl Tray {
             return Err("Shell_NotifyIconW(NIM_ADD) failed".to_string());
         }
 
-        Ok(Self { data })
+        Ok(Self { data, _icon: icon })
+    }
+
+    pub(crate) fn set_accent(&mut self, accent: AccentPreset) {
+        let Some(icon) = TrayIcon::create(32, accent.bgra()) else {
+            return;
+        };
+        self.data.hIcon = icon.handle();
+        self._icon = icon;
+        unsafe {
+            Shell_NotifyIconW(NIM_MODIFY, &self.data);
+        }
     }
 
     pub(crate) fn show_menu(&self, settings: &Settings) -> Option<TrayCommand> {
@@ -83,11 +111,15 @@ impl Tray {
         let shadow = unsafe { CreatePopupMenu() };
         let position = unsafe { CreatePopupMenu() };
         let clock = unsafe { CreatePopupMenu() };
+        let accent = unsafe { CreatePopupMenu() };
+        let seconds = unsafe { CreatePopupMenu() };
         if motion.is_null()
             || bounce.is_null()
             || shadow.is_null()
             || position.is_null()
             || clock.is_null()
+            || accent.is_null()
+            || seconds.is_null()
         {
             unsafe {
                 DestroyMenu(menu);
@@ -105,6 +137,12 @@ impl Tray {
                 }
                 if !clock.is_null() {
                     DestroyMenu(clock);
+                }
+                if !accent.is_null() {
+                    DestroyMenu(accent);
+                }
+                if !seconds.is_null() {
+                    DestroyMenu(seconds);
                 }
             }
             return None;
@@ -168,12 +206,44 @@ impl Tray {
             "12-hour",
             settings.clock == ClockFormat::TwelveHour,
         );
+        append_checked(
+            accent,
+            CMD_ACCENT_ICE,
+            AccentPreset::Ice.label(),
+            settings.accent == AccentPreset::Ice,
+        );
+        append_checked(
+            accent,
+            CMD_ACCENT_AMBER,
+            AccentPreset::Amber.label(),
+            settings.accent == AccentPreset::Amber,
+        );
+        append_checked(
+            accent,
+            CMD_ACCENT_MINT,
+            AccentPreset::Mint.label(),
+            settings.accent == AccentPreset::Mint,
+        );
+        append_checked(seconds, CMD_SECONDS_ON, "On", settings.show_seconds);
+        append_checked(seconds, CMD_SECONDS_OFF, "Off", !settings.show_seconds);
 
         append_submenu(menu, motion, "Motion");
         append_submenu(menu, bounce, "Bounce");
         append_submenu(menu, shadow, "Shadow");
+        append_submenu(menu, accent, "Accent");
+        append_submenu(menu, seconds, "Seconds");
         append_submenu(menu, position, "Position");
         append_submenu(menu, clock, "Clock");
+        append_item(menu, MF_SEPARATOR, 0, "");
+        append_checked(
+            menu,
+            CMD_AUTOSTART,
+            "Start with Windows",
+            crate::autostart::is_enabled(),
+        );
+        append_item(menu, MF_STRING, CMD_RESTART, "Restart");
+        append_item(menu, MF_STRING, CMD_OPEN_SETTINGS, "Open settings folder");
+        append_item(menu, MF_STRING, CMD_ABOUT, "About HiyoDyna");
         append_item(menu, MF_SEPARATOR, 0, "");
         append_item(menu, MF_STRING, CMD_RESET, "Reset to defaults");
         append_item(menu, MF_STRING, CMD_EXIT, "Exit");
@@ -228,6 +298,15 @@ fn command_from_id(id: usize) -> Option<TrayCommand> {
         CMD_TOP_GAP_16 => Some(TrayCommand::TopGap(16.0)),
         CMD_CLOCK_24 => Some(TrayCommand::Clock(ClockFormat::TwentyFourHour)),
         CMD_CLOCK_12 => Some(TrayCommand::Clock(ClockFormat::TwelveHour)),
+        CMD_ACCENT_ICE => Some(TrayCommand::Accent(AccentPreset::Ice)),
+        CMD_ACCENT_AMBER => Some(TrayCommand::Accent(AccentPreset::Amber)),
+        CMD_ACCENT_MINT => Some(TrayCommand::Accent(AccentPreset::Mint)),
+        CMD_SECONDS_ON => Some(TrayCommand::ShowSeconds(true)),
+        CMD_SECONDS_OFF => Some(TrayCommand::ShowSeconds(false)),
+        CMD_AUTOSTART => Some(TrayCommand::ToggleAutostart),
+        CMD_RESTART => Some(TrayCommand::Restart),
+        CMD_OPEN_SETTINGS => Some(TrayCommand::OpenSettingsFolder),
+        CMD_ABOUT => Some(TrayCommand::About),
         CMD_RESET => Some(TrayCommand::Reset),
         CMD_EXIT => Some(TrayCommand::Exit),
         _ => None,
@@ -280,7 +359,7 @@ fn append_item(
 mod tests {
     use super::{TrayCommand, command_from_id};
     use crate::clock::ClockFormat;
-    use crate::settings::{BouncePreset, MotionPreset};
+    use crate::settings::{AccentPreset, BouncePreset, MotionPreset};
 
     #[test]
     fn maps_motion_menu_ids() {
@@ -328,5 +407,27 @@ mod tests {
         assert_eq!(command_from_id(140), Some(TrayCommand::Reset));
         assert_eq!(command_from_id(141), Some(TrayCommand::Exit));
         assert_eq!(command_from_id(999), None);
+    }
+
+    #[test]
+    fn maps_accent_seconds_and_utility_menu_ids() {
+        assert_eq!(
+            command_from_id(160),
+            Some(TrayCommand::Accent(AccentPreset::Ice))
+        );
+        assert_eq!(
+            command_from_id(161),
+            Some(TrayCommand::Accent(AccentPreset::Amber))
+        );
+        assert_eq!(
+            command_from_id(162),
+            Some(TrayCommand::Accent(AccentPreset::Mint))
+        );
+        assert_eq!(command_from_id(170), Some(TrayCommand::ShowSeconds(true)));
+        assert_eq!(command_from_id(171), Some(TrayCommand::ShowSeconds(false)));
+        assert_eq!(command_from_id(180), Some(TrayCommand::ToggleAutostart));
+        assert_eq!(command_from_id(190), Some(TrayCommand::Restart));
+        assert_eq!(command_from_id(191), Some(TrayCommand::OpenSettingsFolder));
+        assert_eq!(command_from_id(192), Some(TrayCommand::About));
     }
 }

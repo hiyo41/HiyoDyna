@@ -3,6 +3,8 @@
 #[cfg(any(windows, test))]
 mod animation;
 #[cfg(any(windows, test))]
+mod autostart;
+#[cfg(any(windows, test))]
 mod clock;
 #[cfg(any(windows, test))]
 mod geometry;
@@ -16,6 +18,8 @@ mod settings;
 mod text;
 #[cfg(any(windows, test))]
 mod tray;
+#[cfg(any(windows, test))]
+mod tray_icon;
 #[cfg(windows)]
 mod window;
 

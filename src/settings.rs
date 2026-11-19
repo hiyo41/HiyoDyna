@@ -210,7 +210,6 @@ impl AccentPreset {
         }
     }
 
-    #[allow(dead_code)]
     pub fn label(self) -> &'static str {
         match self {
             Self::Ice => "Ice",
@@ -246,7 +245,7 @@ fn parse_top_gap(value: &str) -> Option<f32> {
     }
 }
 
-fn config_path() -> Option<PathBuf> {
+pub(crate) fn config_path() -> Option<PathBuf> {
     std::env::var_os("APPDATA")
         .map(|base| PathBuf::from(base).join("HiyoDyna").join("settings.ini"))
 }

@@ -145,7 +145,7 @@ fn run_loop(hwnd: HWND) -> Result<(), String> {
     let mut trace_max_draw_ms = 0.0_f64;
     let mut trace_total_present_ms = 0.0_f64;
     let mut trace_max_present_ms = 0.0_f64;
-    let tray = match Tray::create(hwnd) {
+    let mut tray = match Tray::create(hwnd, settings.accent) {
         Ok(tray) => Some(tray),
         Err(error) => {
             eprintln!("HiyoDyna tray unavailable: {error}");
@@ -197,7 +197,7 @@ fn run_loop(hwnd: HWND) -> Result<(), String> {
             WM_RBUTTONUP if message.hwnd == hwnd => {
                 show_settings_menu(
                     hwnd,
-                    tray.as_ref(),
+                    tray.as_mut(),
                     &mut settings,
                     &mut animation,
                     &mut surface,
@@ -340,7 +340,7 @@ fn run_loop(hwnd: HWND) -> Result<(), String> {
                 if event == WM_RBUTTONUP || event == WM_CONTEXTMENU {
                     show_settings_menu(
                         hwnd,
-                        tray.as_ref(),
+                        tray.as_mut(),
                         &mut settings,
                         &mut animation,
                         &mut surface,
@@ -868,7 +868,7 @@ fn update_clock(clock: &mut ClockSnapshot, updated: ClockSnapshot, ticking: bool
 #[allow(clippy::too_many_arguments)]
 fn show_settings_menu(
     hwnd: HWND,
-    tray: Option<&Tray>,
+    tray: Option<&mut Tray>,
     settings: &mut Settings,
     animation: &mut Animation,
     surface: &mut Surface,
@@ -883,7 +883,15 @@ fn show_settings_menu(
         return Ok(());
     };
     apply_tray_command(
-        hwnd, command, settings, animation, surface, scale, position, clock,
+        hwnd,
+        command,
+        settings,
+        animation,
+        surface,
+        Some(tray),
+        scale,
+        position,
+        clock,
     )
 }
 
@@ -894,6 +902,7 @@ fn apply_tray_command(
     settings: &mut Settings,
     animation: &mut Animation,
     surface: &mut Surface,
+    mut tray: Option<&mut Tray>,
     scale: f32,
     position: &mut POINT,
     clock: &ClockSnapshot,
@@ -904,6 +913,54 @@ fn apply_tray_command(
         TrayCommand::Shadow(enabled) => settings.shadow = enabled,
         TrayCommand::TopGap(gap) => settings.top_gap = gap,
         TrayCommand::Clock(format) => settings.clock = format,
+        TrayCommand::Accent(accent) => settings.accent = accent,
+        TrayCommand::ShowSeconds(enabled) => settings.show_seconds = enabled,
+        TrayCommand::ToggleAutostart => {
+            if let Err(error) = crate::autostart::toggle() {
+                eprintln!("HiyoDyna autostart: {error}");
+            }
+            return Ok(());
+        }
+        TrayCommand::Restart => {
+            if let Ok(executable) = std::env::current_exe() {
+                let _ = std::process::Command::new(executable).spawn();
+            }
+            unsafe { PostMessageW(hwnd, WM_CLOSE, 0, 0) };
+            return Ok(());
+        }
+        TrayCommand::OpenSettingsFolder => {
+            if let Some(path) = crate::settings::config_path()
+                && let Some(directory) = path.parent()
+            {
+                let _ = std::fs::create_dir_all(directory);
+                let _ = std::process::Command::new("explorer")
+                    .arg(directory)
+                    .spawn();
+            }
+            return Ok(());
+        }
+        TrayCommand::About => {
+            let settings_path = crate::settings::config_path()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "unavailable".to_string());
+            let log_path = std::env::var_os("LOCALAPPDATA")
+                .map(|base| {
+                    std::path::PathBuf::from(base)
+                        .join("HiyoDyna")
+                        .join("auto-update.log")
+                        .display()
+                        .to_string()
+                })
+                .unwrap_or_else(|| "unavailable".to_string());
+            show_about(
+                hwnd,
+                &format!(
+                    "HiyoDyna {}\n\nSettings: {settings_path}\nUpdate log: {log_path}",
+                    env!("CARGO_PKG_VERSION")
+                ),
+            );
+            return Ok(());
+        }
         TrayCommand::Reset => *settings = Settings::default(),
         TrayCommand::Exit => {
             unsafe { PostMessageW(hwnd, WM_CLOSE, 0, 0) };
@@ -911,6 +968,9 @@ fn apply_tray_command(
         }
     }
 
+    if let Some(tray) = tray.as_mut() {
+        tray.set_accent(settings.accent);
+    }
     animation.set_tuning(settings.tuning());
     *position = primary_position(surface.size, settings.top_gap)?;
     if unsafe {
@@ -931,6 +991,20 @@ fn apply_tray_command(
     surface.present(hwnd, *position)?;
     settings.save();
     Ok(())
+}
+
+fn show_about(hwnd: HWND, text: &str) {
+    let message: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
+    let title = wide("About HiyoDyna");
+    // SAFETY: hwnd is live and both wide strings are NUL-terminated.
+    unsafe {
+        MessageBoxW(
+            hwnd,
+            message.as_ptr(),
+            title.as_ptr(),
+            MB_OK | MB_ICONINFORMATION,
+        );
+    }
 }
 
 fn last_error(operation: &str) -> String {
