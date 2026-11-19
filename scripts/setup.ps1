@@ -1,7 +1,6 @@
 param(
     [string]$RepoPath = (Split-Path -Parent $PSScriptRoot),
-    [switch]$NoAutostart,
-    [switch]$NoWatcher
+    [switch]$NoAutostart
 )
 
 $ErrorActionPreference = "Stop"
@@ -11,24 +10,37 @@ $InstallDir = Join-Path $env:LOCALAPPDATA "Programs\HiyoDyna"
 $DataDir = Join-Path $env:LOCALAPPDATA "HiyoDyna"
 $ExePath = Join-Path $InstallDir "HiyoDyna.exe"
 $BuiltExe = Join-Path $RepoPath "target\release\hiyodyna.exe"
-$WatcherPath = Join-Path $InstallDir "watch-update.ps1"
+$LegacyShortcut = Join-Path ([Environment]::GetFolderPath("Startup")) "HiyoDyna updater.lnk"
+$LegacyPid = Join-Path $DataDir "watch-update.pid"
+$LegacyWatcher = Join-Path $InstallDir "watch-update.ps1"
 
-function Stop-Watcher {
-    $pidFile = Join-Path $DataDir "watch-update.pid"
-    if (Test-Path -LiteralPath $pidFile) {
+function Stop-LegacyWatcher {
+    if (Test-Path -LiteralPath $LegacyPid) {
         $watcherPid = 0
-        [void][int]::TryParse((Get-Content -LiteralPath $pidFile -Raw).Trim(), [ref]$watcherPid)
+        [void][int]::TryParse((Get-Content -LiteralPath $LegacyPid -Raw).Trim(), [ref]$watcherPid)
         if ($watcherPid -gt 0) {
-            Stop-Process -Id $watcherPid -Force -ErrorAction SilentlyContinue
+            $process = Get-CimInstance Win32_Process -Filter "ProcessId = $watcherPid" -ErrorAction SilentlyContinue
+            if ($process -and $process.CommandLine -and
+                $process.CommandLine.IndexOf("watch-update.ps1", [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                Stop-Process -Id $watcherPid -Force -ErrorAction SilentlyContinue
+            }
         }
-        Remove-Item -LiteralPath $pidFile -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $LegacyPid -Force -ErrorAction SilentlyContinue
     }
     Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" -ErrorAction SilentlyContinue |
         Where-Object {
             $_.CommandLine -and
-            $_.CommandLine.IndexOf($WatcherPath, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+            $_.CommandLine.IndexOf($LegacyWatcher, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
         } |
         ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+}
+
+function Remove-LegacyWatcher {
+    Remove-Item -LiteralPath $LegacyShortcut -Force -ErrorAction SilentlyContinue
+    foreach ($name in @("watch-update.ps1", "watch-update.vbs", "update-state.json")) {
+        Remove-Item -LiteralPath (Join-Path $InstallDir $name) -Force -ErrorAction SilentlyContinue
+    }
+    Remove-Item -LiteralPath (Join-Path $DataDir "pause") -Force -ErrorAction SilentlyContinue
 }
 
 function Stop-Apps {
@@ -64,8 +76,9 @@ function Get-CargoPath {
 }
 
 Write-Host "Preparing HiyoDyna from $RepoPath"
-Stop-Watcher
+Stop-LegacyWatcher
 Stop-Apps
+Remove-LegacyWatcher
 
 $cargo = Get-CargoPath
 Push-Location -LiteralPath $RepoPath
@@ -87,14 +100,15 @@ $version = if ($versionLine) { $versionLine.Matches[0].Groups[1].Value } else { 
 
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 New-Item -ItemType Directory -Force -Path $DataDir | Out-Null
-Copy-Item -LiteralPath $BuiltExe -Destination $ExePath -Force
-foreach ($name in @("watch-update.ps1", "watch-update.vbs", "uninstall.ps1")) {
-    Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) `
-        -Destination (Join-Path $InstallDir $name) -Force
+foreach ($name in @("HiyoDyna.update.part", "HiyoDyna.update.exe", "HiyoDyna.update.txt", "HiyoDyna.exe.old")) {
+    Remove-Item -LiteralPath (Join-Path $InstallDir $name) -Force -ErrorAction SilentlyContinue
 }
+Remove-Item -LiteralPath (Join-Path $DataDir "update-state.ini") -Force -ErrorAction SilentlyContinue
+Copy-Item -LiteralPath $BuiltExe -Destination $ExePath -Force
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot "uninstall.ps1") `
+    -Destination (Join-Path $InstallDir "uninstall.ps1") -Force
 $version | Set-Content -LiteralPath (Join-Path $InstallDir "version.txt") -Encoding UTF8
 [ordered]@{
-    repoPath = $RepoPath
     installDir = $InstallDir
     exePath = $ExePath
     version = $version
@@ -119,19 +133,6 @@ $desktopShortcut.Description = "HiyoDyna"
 $desktopShortcut.IconLocation = "$ExePath,0"
 $desktopShortcut.Save()
 
-$startupDir = [Environment]::GetFolderPath("Startup")
-$watcherShortcutPath = Join-Path $startupDir "HiyoDyna updater.lnk"
-if ($NoWatcher) {
-    Remove-Item -LiteralPath $watcherShortcutPath -Force -ErrorAction SilentlyContinue
-} else {
-    $watcherShortcut = $shell.CreateShortcut($watcherShortcutPath)
-    $watcherShortcut.TargetPath = Join-Path $env:SystemRoot "System32\wscript.exe"
-    $watcherShortcut.Arguments = "`"$(Join-Path $InstallDir 'watch-update.vbs')`""
-    $watcherShortcut.WorkingDirectory = $InstallDir
-    $watcherShortcut.Description = "HiyoDyna"
-    $watcherShortcut.Save()
-}
-
 $runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
 New-Item -Path $runKey -Force | Out-Null
 if ($NoAutostart) {
@@ -150,14 +151,8 @@ Set-ItemProperty -Path $uninstallKey -Name "Publisher" -Value "HiyoDyna"
 Set-ItemProperty -Path $uninstallKey -Name "UninstallString" `
     -Value "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$InstallDir\uninstall.ps1`""
 
-& $WatcherPath -RecordOnly
-if (-not $NoWatcher) {
-    Start-Process -FilePath (Join-Path $env:SystemRoot "System32\wscript.exe") `
-        -ArgumentList "`"$(Join-Path $InstallDir 'watch-update.vbs')`"" `
-        -WorkingDirectory $InstallDir
-}
 Start-Process -FilePath $ExePath -WorkingDirectory $InstallDir
 
 Write-Host "HiyoDyna $version installed to $InstallDir"
-Write-Host "Auto-update watcher: $(if ($NoWatcher) { 'disabled' } else { 'enabled' })"
+Write-Host "Auto-update: in-app (startup and every 30 minutes)"
 Write-Host "Start with Windows: $(if ($NoAutostart) { 'disabled' } else { 'enabled' })"
