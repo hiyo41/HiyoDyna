@@ -78,19 +78,31 @@ const faqs = [
   }
 
   .faq summary::after {
-    content: '+';
+    content: '';
     position: absolute;
     top: 50%;
-    right: 4px;
+    right: 8px;
+    width: 10px;
+    height: 1px;
+    background: var(--text-muted);
     transform: translateY(-50%);
-    font-family: var(--font-body);
-    font-size: 18px;
-    color: var(--text-muted);
     transition: transform 180ms var(--ease-out);
   }
 
-  .faq[open] summary::after {
-    transform: translateY(-50%) rotate(45deg);
+  .faq summary::before {
+    content: '';
+    position: absolute;
+    top: 50%;
+    right: 8px;
+    width: 10px;
+    height: 1px;
+    background: var(--text-muted);
+    transform: translateY(-50%) rotate(90deg);
+    transition: transform 180ms var(--ease-out);
+  }
+
+  .faq[open] summary::before {
+    transform: translateY(-50%) rotate(0deg);
   }
 
   .faq summary:hover {
@@ -98,7 +110,7 @@ const faqs = [
   }
 
   .faq p {
-    max-width: 44rem;
+    max-width: 34rem;
     padding: 0 40px 22px 0;
     font-size: 14px;
     line-height: 1.65;

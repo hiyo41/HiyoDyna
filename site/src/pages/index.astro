@@ -42,7 +42,6 @@ const source = 'https://github.com/hiyo41/HiyoDyna';
         </div>
 
         <div class="hero__copy">
-          <p class="eyebrow">Native overlay for Windows</p>
           <h1>A Dynamic Island-style clock for Windows.</h1>
           <p class="lede">
             A small capsule that sits at the top of your screen. Hover to see the date, the time,
@@ -82,7 +81,6 @@ const source = 'https://github.com/hiyo41/HiyoDyna';
     <section class="section" id="features">
       <div class="wrap">
         <div class="section-head">
-          <p class="eyebrow">Features</p>
           <h2>Small surface, real behavior.</h2>
           <p class="lede">
             The capsule does one job at the top of the screen. Everything below it is built to stay
@@ -96,7 +94,6 @@ const source = 'https://github.com/hiyo41/HiyoDyna';
     <section class="section settings-section" id="settings">
       <div class="wrap">
         <div class="section-head">
-          <p class="eyebrow">Settings</p>
           <h2>Every control, live.</h2>
           <p class="lede">
             The tray menu, without the tray. Change the spring, the accent, or the clock and watch
@@ -122,7 +119,6 @@ const source = 'https://github.com/hiyo41/HiyoDyna';
     <section class="section" id="native">
       <div class="wrap native">
         <div class="native__head">
-          <p class="eyebrow">Under the hood</p>
           <h2>Nothing between the clock and the screen.</h2>
         </div>
         <div class="native__body">
@@ -146,7 +142,6 @@ const source = 'https://github.com/hiyo41/HiyoDyna';
     <section class="section" id="install">
       <div class="wrap">
         <div class="section-head">
-          <p class="eyebrow">Install</p>
           <h2>Download, extract, run.</h2>
           <p class="lede">
             The release is a portable zip. No installer, no admin prompt, and no Rust toolchain.
@@ -213,7 +208,6 @@ const source = 'https://github.com/hiyo41/HiyoDyna';
     <section class="section" id="faq">
       <div class="wrap">
         <div class="section-head">
-          <p class="eyebrow">FAQ</p>
           <h2>Questions, answered.</h2>
         </div>
         <Faq />
@@ -386,7 +380,7 @@ const source = 'https://github.com/hiyo41/HiyoDyna';
   }
 
   .hero__copy h1 {
-    margin-top: 20px;
+    max-width: 100%;
   }
 
   .hero__copy .lede {
@@ -425,7 +419,7 @@ const source = 'https://github.com/hiyo41/HiyoDyna';
   }
 
   .section-head h2 {
-    margin-top: 16px;
+    max-width: 20ch;
   }
 
   .section-head .lede {
@@ -510,7 +504,7 @@ const source = 'https://github.com/hiyo41/HiyoDyna';
 
   .fact__label {
     margin-top: 6px;
-    font-size: 10px;
+    font-size: 11px;
     letter-spacing: 0.13em;
     text-transform: uppercase;
     color: var(--text-muted);
@@ -560,11 +554,11 @@ const source = 'https://github.com/hiyo41/HiyoDyna';
   }
 
   .native__head h2 {
-    margin-top: 16px;
+    max-width: 16ch;
   }
 
   .native__body p {
-    max-width: 36rem;
+    max-width: 34rem;
     font-size: 14px;
     line-height: 1.7;
     color: var(--text-secondary);
@@ -582,7 +576,7 @@ const source = 'https://github.com/hiyo41/HiyoDyna';
     padding: 20px 0 0;
     border-top: 1px solid var(--hairline);
     list-style: none;
-    font-size: 10px;
+    font-size: 11px;
     letter-spacing: 0.12em;
     text-transform: uppercase;
     color: var(--text-muted);
@@ -622,7 +616,7 @@ const source = 'https://github.com/hiyo41/HiyoDyna';
 
   .install__num {
     padding-top: 5px;
-    font-size: 10px;
+    font-size: 11px;
     letter-spacing: 0.14em;
     color: var(--text-muted);
   }
@@ -646,7 +640,7 @@ const source = 'https://github.com/hiyo41/HiyoDyna';
   .install__notes h3 {
     margin: 24px 0 8px;
     font-family: var(--font-body);
-    font-size: 10px;
+    font-size: 11px;
     font-weight: 500;
     letter-spacing: 0.14em;
     text-transform: uppercase;
@@ -670,6 +664,7 @@ const source = 'https://github.com/hiyo41/HiyoDyna';
   }
 
   .install__notes p {
+    max-width: 34rem;
     font-size: 14px;
     line-height: 1.65;
     color: var(--text-secondary);
@@ -690,7 +685,7 @@ const source = 'https://github.com/hiyo41/HiyoDyna';
   }
 
   .install__cta span {
-    font-size: 10px;
+    font-size: 11px;
     letter-spacing: 0.1em;
     text-transform: uppercase;
     color: var(--text-muted);
@@ -710,7 +705,7 @@ const source = 'https://github.com/hiyo41/HiyoDyna';
   .site-footer h3 {
     margin: 0 0 14px;
     font-family: var(--font-body);
-    font-size: 10px;
+    font-size: 11px;
     font-weight: 500;
     letter-spacing: 0.14em;
     text-transform: uppercase;
@@ -751,7 +746,7 @@ const source = 'https://github.com/hiyo41/HiyoDyna';
   }
 
   .site-footer__base p {
-    font-size: 10px;
+    font-size: 11px;
     letter-spacing: 0.1em;
     text-transform: uppercase;
     color: var(--text-muted);

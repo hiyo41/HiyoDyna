@@ -29,9 +29,8 @@ const features = [
 
 <ul class="feature-list">
   {
-    features.map((feature, index) => (
+    features.map((feature) => (
       <li class="feature">
-        <span class="feature__index" aria-hidden="true">{String(index + 1).padStart(2, '0')}</span>
         <div class="feature__body">
           <h3>{feature.title}</h3>
           <p>{feature.body}</p>
@@ -57,20 +56,9 @@ const features = [
   }
 
   .feature {
-    display: grid;
-    grid-template-columns: 52px minmax(0, 1fr);
-    gap: clamp(16px, 3vw, 40px);
-    padding-block: 26px;
+    display: block;
+    padding-block: 24px;
     border-bottom: 1px solid var(--hairline);
-  }
-
-  .feature__index {
-    padding-top: 4px;
-    font-size: 10px;
-    line-height: 1;
-    letter-spacing: 0.14em;
-    color: var(--text-muted);
-    font-variant-numeric: tabular-nums;
   }
 
   .feature__body {
@@ -102,10 +90,6 @@ const features = [
   }
 
   @media (max-width: 760px) {
-    .feature {
-      grid-template-columns: 34px minmax(0, 1fr);
-    }
-
     .feature__body {
       grid-template-columns: 1fr;
       gap: 8px;
