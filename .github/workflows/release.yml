@@ -35,8 +35,7 @@ jobs:
           })
           $max = if ($numbers.Count -gt 0) { ($numbers | Measure-Object -Maximum).Maximum } else { 0 }
           $latestTag = if ($max -gt 0) { "pre-$max" } else { "" }
-          $previousNumber = $numbers | Where-Object { $_ -lt $max } | Sort-Object -Descending | Select-Object -First 1
-          $previousTag = if ($null -ne $previousNumber) { "pre-$previousNumber" } else { "" }
+          $previousBeforeLatest = $numbers | Where-Object { $_ -lt $max } | Sort-Object -Descending | Select-Object -First 1
 
           $needsBuild = $true
           if ($latestTag) {
@@ -50,11 +49,13 @@ jobs:
             $title = "Pre-release build $($max + 1)"
             $compareRef = $tag
             $updateOnly = "false"
+            $previousTag = $latestTag
           } else {
             $tag = $latestTag
             $title = "Pre-release build $max"
             $compareRef = $env:GITHUB_SHA
             $updateOnly = "true"
+            $previousTag = if ($null -ne $previousBeforeLatest) { "pre-$previousBeforeLatest" } else { "" }
           }
 
           Add-Content -Path $env:GITHUB_ENV -Value "RELEASE_OFFICIAL=false"
