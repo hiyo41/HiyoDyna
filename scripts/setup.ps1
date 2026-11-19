@@ -111,6 +111,14 @@ $shortcut.Description = "HiyoDyna clock overlay"
 $shortcut.IconLocation = "$ExePath,0"
 $shortcut.Save()
 
+$desktopShortcutPath = Join-Path ([Environment]::GetFolderPath("Desktop")) "HiyoDyna.lnk"
+$desktopShortcut = $shell.CreateShortcut($desktopShortcutPath)
+$desktopShortcut.TargetPath = $ExePath
+$desktopShortcut.WorkingDirectory = $InstallDir
+$desktopShortcut.Description = "HiyoDyna clock overlay"
+$desktopShortcut.IconLocation = "$ExePath,0"
+$desktopShortcut.Save()
+
 $startupDir = [Environment]::GetFolderPath("Startup")
 $watcherShortcutPath = Join-Path $startupDir "HiyoDyna updater.lnk"
 if ($NoWatcher) {

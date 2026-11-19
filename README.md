@@ -29,7 +29,7 @@ A native Rust Dynamic Island-style overlay for Windows. The current build provid
 .\scripts\setup.ps1
 ```
 
-The per-user install goes to `%LOCALAPPDATA%\Programs\HiyoDyna`. Setup also creates a Start Menu shortcut, an uninstall entry, and a hidden watcher in the Startup folder. Use `-NoAutostart` or `-NoWatcher` to skip either one.
+The per-user install goes to `%LOCALAPPDATA%\Programs\HiyoDyna`. Setup also creates Desktop and Start Menu shortcuts, an uninstall entry, and a hidden watcher in the Startup folder. Use `-NoAutostart` or `-NoWatcher` to skip either one.
 
 This installer is for a local checkout and needs Rust to rebuild. Release downloads run the packaged executable without the local watcher.
 

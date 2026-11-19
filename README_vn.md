@@ -29,7 +29,7 @@ Một overlay kiểu Dynamic Island viết bằng Rust native cho Windows. Bản
 .\scripts\setup.ps1
 ```
 
-Bản cài theo người dùng nằm ở `%LOCALAPPDATA%\Programs\HiyoDyna`. Thiết lập cũng tạo shortcut Start Menu, mục gỡ cài đặt và watcher ẩn trong Startup. Dùng `-NoAutostart` hoặc `-NoWatcher` để bỏ qua từng phần.
+Bản cài theo người dùng nằm ở `%LOCALAPPDATA%\Programs\HiyoDyna`. Thiết lập cũng tạo shortcut Desktop và Start Menu, mục gỡ cài đặt và watcher ẩn trong Startup. Dùng `-NoAutostart` hoặc `-NoWatcher` để bỏ qua từng phần.
 
 Trình cài này dành cho checkout cục bộ và cần Rust để build lại. Bản tải từ Releases chạy executable đóng gói sẵn, không có watcher.
 

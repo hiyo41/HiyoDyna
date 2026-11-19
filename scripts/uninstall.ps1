@@ -52,6 +52,8 @@ Stop-Apps
 
 $startupShortcut = Join-Path ([Environment]::GetFolderPath("Startup")) "HiyoDyna updater.lnk"
 Remove-Item -LiteralPath $startupShortcut -Force -ErrorAction SilentlyContinue
+$desktopShortcut = Join-Path ([Environment]::GetFolderPath("Desktop")) "HiyoDyna.lnk"
+Remove-Item -LiteralPath $desktopShortcut -Force -ErrorAction SilentlyContinue
 $startMenuDir = Join-Path ([Environment]::GetFolderPath("Programs")) "HiyoDyna"
 Remove-Item -LiteralPath $startMenuDir -Recurse -Force -ErrorAction SilentlyContinue
 
