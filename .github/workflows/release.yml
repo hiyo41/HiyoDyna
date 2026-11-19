@@ -1,0 +1,142 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  GH_TOKEN: ${{ github.token }}
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Resolve pre-release
+        if: github.event_name == 'push'
+        shell: pwsh
+        run: |
+          $numbers = @(git tag --list "pre-*" | ForEach-Object {
+            if ($_ -match '^pre-(\d+)$') { [int]$Matches[1] }
+          })
+          $max = if ($numbers.Count -gt 0) { ($numbers | Measure-Object -Maximum).Maximum } else { 0 }
+          $latestTag = if ($max -gt 0) { "pre-$max" } else { "" }
+
+          $needsBuild = $true
+          if ($latestTag) {
+            $buildPaths = '^(src/|Cargo\.toml$|Cargo\.lock$|build\.rs$|rust-toolchain(\.toml)?$)'
+            $changed = @(git diff --name-only "$latestTag..HEAD")
+            $needsBuild = @($changed | Where-Object { $_ -match $buildPaths }).Count -gt 0
+          }
+
+          if ($needsBuild) {
+            $tag = "pre-$($max + 1)"
+            $title = "Pre-release build $($max + 1)"
+            $compareRef = $tag
+            $updateOnly = "false"
+          } else {
+            $tag = $latestTag
+            $title = "Pre-release build $max"
+            $compareRef = $env:GITHUB_SHA
+            $updateOnly = "true"
+          }
+
+          Add-Content -Path $env:GITHUB_ENV -Value "RELEASE_OFFICIAL=false"
+          Add-Content -Path $env:GITHUB_ENV -Value "RELEASE_NEEDS_BUILD=$($needsBuild.ToString().ToLowerInvariant())"
+          Add-Content -Path $env:GITHUB_ENV -Value "RELEASE_UPDATE_ONLY=$updateOnly"
+          Add-Content -Path $env:GITHUB_ENV -Value "RELEASE_TAG=$tag"
+          Add-Content -Path $env:GITHUB_ENV -Value "RELEASE_TITLE=$title"
+          Add-Content -Path $env:GITHUB_ENV -Value "RELEASE_COMPARE_REF=$compareRef"
+
+      - name: Resolve official release
+        if: github.event_name == 'workflow_dispatch'
+        shell: pwsh
+        run: |
+          $cargoVersion = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1).Matches.Groups[1].Value
+          $version = "v$cargoVersion"
+          if ("${{ github.ref }}" -ne "refs/heads/main") {
+            throw "Official releases must run from main."
+          }
+          if ($version -notmatch '^v\d+\.\d+\.\d+$') {
+            throw "Cargo.toml version must be semver, for example 0.0.1."
+          }
+          if (git rev-parse -q --verify "refs/tags/$version") {
+            throw "Tag $version already exists."
+          }
+          gh release view $version 2>$null | Out-Null
+          if ($LASTEXITCODE -eq 0) {
+            throw "Release $version already exists."
+          }
+          Add-Content -Path $env:GITHUB_ENV -Value "RELEASE_OFFICIAL=true"
+          Add-Content -Path $env:GITHUB_ENV -Value "RELEASE_NEEDS_BUILD=true"
+          Add-Content -Path $env:GITHUB_ENV -Value "RELEASE_UPDATE_ONLY=false"
+          Add-Content -Path $env:GITHUB_ENV -Value "RELEASE_TAG=$version"
+          Add-Content -Path $env:GITHUB_ENV -Value "RELEASE_TITLE=$version"
+          Add-Content -Path $env:GITHUB_ENV -Value "RELEASE_COMPARE_REF=$version"
+
+      - name: Install Rust
+        if: env.RELEASE_NEEDS_BUILD == 'true'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust artifacts
+        if: env.RELEASE_NEEDS_BUILD == 'true'
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        if: env.RELEASE_NEEDS_BUILD == 'true'
+        run: cargo build --release --locked
+
+      - name: Package
+        if: env.RELEASE_NEEDS_BUILD == 'true'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist/package | Out-Null
+          Copy-Item target/release/hiyodyna.exe dist/package/
+          Copy-Item README.md, README_vn.md, LICENSE dist/package/
+          $zip = "dist/HiyoDyna-$env:RELEASE_TAG-windows-x64.zip"
+          Compress-Archive -Path dist/package/* -DestinationPath $zip -Force
+          Add-Content -Path $env:GITHUB_ENV -Value "RELEASE_ASSET=$zip"
+
+      - name: Prepare release notes
+        shell: pwsh
+        run: |
+          $releases = @(gh api "repos/$env:GITHUB_REPOSITORY/releases?per_page=100" | ConvertFrom-Json)
+          $lastOfficial = $releases | Where-Object { $_ -and -not $_.prerelease } | Select-Object -First 1
+          $fromTag = if ($lastOfficial) { $lastOfficial.tag_name } else { "" }
+          .\scripts\changelog.ps1 -FromTag $fromTag -ToTag $env:RELEASE_COMPARE_REF -Output release-notes.md
+          if ($env:RELEASE_OFFICIAL -eq "true") {
+            Add-Content -Path release-notes.md -Value ""
+            Add-Content -Path release-notes.md -Value "This changelog covers every commit since the previous official release, including changes shipped in pre-release builds."
+          }
+
+      - name: Publish pre-release
+        if: github.event_name == 'push' && env.RELEASE_NEEDS_BUILD == 'true'
+        shell: pwsh
+        run: |
+          gh release create $env:RELEASE_TAG $env:RELEASE_ASSET --target $env:GITHUB_SHA --title $env:RELEASE_TITLE --notes-file release-notes.md --prerelease
+
+      - name: Update pre-release changelog
+        if: github.event_name == 'push' && env.RELEASE_UPDATE_ONLY == 'true'
+        shell: pwsh
+        run: |
+          gh release edit $env:RELEASE_TAG --notes-file release-notes.md
+
+      - name: Publish official release
+        if: github.event_name == 'workflow_dispatch'
+        shell: pwsh
+        run: |
+          gh release create $env:RELEASE_TAG $env:RELEASE_ASSET --target $env:GITHUB_SHA --title $env:RELEASE_TITLE --notes-file release-notes.md --latest

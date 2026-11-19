@@ -1,0 +1,6 @@
+/target/
+/dist/
+/.worktrees/
+/.superpowers/
+/docs/superpowers/
+**/*.rs.bk
