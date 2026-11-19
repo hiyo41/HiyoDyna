@@ -21,32 +21,35 @@ A native Rust Dynamic Island-style overlay for Windows. The current build provid
 ## Requirements
 
 - Windows 10 or 11
-- Rust stable with edition 2024 support for building and for the auto-update watcher
+- Rust stable with edition 2024 support when building from source
 
 ## Install
 
 ```powershell
-.\scripts\setup.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup.ps1
 ```
 
-The per-user install goes to `%LOCALAPPDATA%\Programs\HiyoDyna`. Setup also creates Desktop and Start Menu shortcuts, an uninstall entry, and a hidden watcher in the Startup folder. Use `-NoAutostart` or `-NoWatcher` to skip either one.
+The per-user install goes to `%LOCALAPPDATA%\Programs\HiyoDyna`. Setup creates Desktop and Start Menu shortcuts, an uninstall entry, and Start with Windows. Use `-NoAutostart` to skip autostart.
 
-This installer is for a local checkout and needs Rust to rebuild. Release downloads run the packaged executable without the local watcher.
+This installer builds the checkout locally and needs Rust. Release downloads run the packaged executable and update through the in-app updater.
 
 ## Auto-update
 
-The watcher fingerprints `src\**`, `assets\**`, `Cargo.toml`, and `Cargo.lock`. When they change, it rebuilds the release binary and restarts the installed app. Changes made while it was off are picked up on its next start.
+HiyoDyna updates itself from GitHub. It checks at startup and every 30 minutes, and the tray **Update** menu can switch channels or check now.
 
+- **Build** follows pre-release builds from `main` (`pre-N`).
+- **Stable** follows official releases; until the first official release exists it uses the newest pre-release.
+- Downloads are verified with SHA-256 before they are staged and applied.
 - Log: `%LOCALAPPDATA%\HiyoDyna\auto-update.log`
-- Pause: create `%LOCALAPPDATA%\HiyoDyna\pause`; delete it to resume
-- A failed build leaves the installed app running and waits for the next edit
+
+The updater runs inside HiyoDyna. It starts a short-lived helper only while replacing the executable; there is no resident watcher and no Startup shortcut for updates.
 
 ## Uninstall
 
 Use **Settings > Apps** or run:
 
 ```powershell
-%LOCALAPPDATA%\Programs\HiyoDyna\uninstall.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\Programs\HiyoDyna\uninstall.ps1"
 ```
 
 Add `-KeepSettings` to keep `%APPDATA%\HiyoDyna` and `%LOCALAPPDATA%\HiyoDyna`.
@@ -57,7 +60,7 @@ Add `-KeepSettings` to keep `%APPDATA%\HiyoDyna` and `%LOCALAPPDATA%\HiyoDyna`.
 cargo run --release
 ```
 
-Hover over the capsule to expand the clock panel; move the pointer away and it collapses after a short delay. Left-click does not toggle the panel. Right-click the capsule or the tray icon for Motion, Bounce, Shadow, Accent, Seconds, Position, and Clock presets; the same menu has Restart, Open settings folder, About, and Exit.
+Hover over the capsule to expand the clock panel; move the pointer away and it collapses after a short delay. Left-click does not toggle the panel. Right-click the capsule or the tray icon for Motion, Bounce, Shadow, Accent, Seconds, Position, Clock, and Update; the same menu has Restart, Open settings folder, About, and Exit.
 
 The Position preset can add an 8 or 16 px gap below the top edge. The clock uses 24-hour time by default and can be switched to 12-hour time from the menu.
 
@@ -71,9 +74,9 @@ The executable is written to `target\release\hiyodyna.exe`.
 
 ## Releases
 
-Download builds from the [Releases page](https://github.com/hiyo41/HiyoDyna/releases). Each zip contains the executable, both READMEs, and the license.
+Download builds from the [Releases page](https://github.com/hiyo41/HiyoDyna/releases). Each release includes a zip with the executable, both READMEs, and the license, plus the raw executable and its SHA-256 for the in-app updater.
 
-Pre-releases are test builds from `main`. Official releases are stable and include a full changelog.
+Pre-releases are test builds from `main` and feed the Build channel. Official releases feed the Stable channel and include a full changelog.
 
 Found a problem? [Open an issue](https://github.com/hiyo41/HiyoDyna/issues).
 

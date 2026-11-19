@@ -21,32 +21,35 @@ Một overlay kiểu Dynamic Island viết bằng Rust native cho Windows. Bản
 ## Yêu cầu
 
 - Windows 10 hoặc 11
-- Rust stable hỗ trợ edition 2024 để build và cho watcher tự cập nhật
+- Rust stable hỗ trợ edition 2024 khi build từ mã nguồn
 
 ## Cài đặt
 
 ```powershell
-.\scripts\setup.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup.ps1
 ```
 
-Bản cài theo người dùng nằm ở `%LOCALAPPDATA%\Programs\HiyoDyna`. Thiết lập cũng tạo shortcut Desktop và Start Menu, mục gỡ cài đặt và watcher ẩn trong Startup. Dùng `-NoAutostart` hoặc `-NoWatcher` để bỏ qua từng phần.
+Bản cài theo người dùng nằm ở `%LOCALAPPDATA%\Programs\HiyoDyna`. Thiết lập tạo shortcut Desktop và Start Menu, mục gỡ cài đặt và bật khởi động cùng Windows. Dùng `-NoAutostart` để bỏ qua khởi động cùng Windows.
 
-Trình cài này dành cho checkout cục bộ và cần Rust để build lại. Bản tải từ Releases chạy executable đóng gói sẵn, không có watcher.
+Trình cài này build checkout cục bộ và cần Rust. Bản tải từ Releases chạy executable đóng gói sẵn và cập nhật qua bộ cập nhật trong app.
 
 ## Tự cập nhật
 
-Watcher theo dõi `src\**`, `assets\**`, `Cargo.toml` và `Cargo.lock`. Khi các tệp này thay đổi, nó build lại bản release rồi khởi động lại app đã cài. Thay đổi thực hiện khi watcher tắt sẽ được xử lý ở lần khởi động kế tiếp.
+HiyoDyna tự cập nhật từ GitHub. App kiểm tra lúc khởi động và mỗi 30 phút; menu **Update** trên khay cho phép đổi kênh hoặc kiểm tra ngay.
 
+- **Build** theo bản pre-release từ `main` (`pre-N`).
+- **Stable** theo bản chính thức; trước khi có bản chính thức đầu tiên, kênh này dùng pre-release mới nhất.
+- Bản tải được xác minh SHA-256 trước khi đưa vào hàng chờ và áp dụng.
 - Log: `%LOCALAPPDATA%\HiyoDyna\auto-update.log`
-- Tạm dừng: tạo `%LOCALAPPDATA%\HiyoDyna\pause`; xóa tệp để tiếp tục
-- Build lỗi sẽ giữ app đang chạy và chờ lần chỉnh sửa kế tiếp
+
+Bộ cập nhật chạy trong HiyoDyna. Chỉ một tiến trình phụ ngắn hạn được tạo khi thay executable; không có watcher thường trú và không có shortcut Startup cho việc cập nhật.
 
 ## Gỡ cài đặt
 
 Dùng **Settings > Apps** hoặc chạy:
 
 ```powershell
-%LOCALAPPDATA%\Programs\HiyoDyna\uninstall.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\Programs\HiyoDyna\uninstall.ps1"
 ```
 
 Thêm `-KeepSettings` để giữ `%APPDATA%\HiyoDyna` và `%LOCALAPPDATA%\HiyoDyna`.
@@ -57,7 +60,7 @@ Thêm `-KeepSettings` để giữ `%APPDATA%\HiyoDyna` và `%LOCALAPPDATA%\HiyoD
 cargo run --release
 ```
 
-Rê chuột lên capsule để mở bảng đồng hồ; di chuyển chuột ra ngoài, bảng thu lại sau một khoảng ngắn. Nhấp chuột trái không bật/tắt bảng. Nhấp chuột phải lên capsule hoặc biểu tượng khay để mở các preset Motion, Bounce, Shadow, Accent, Seconds, Position và Clock; menu cũng có Restart, Open settings folder, About và Exit.
+Rê chuột lên capsule để mở bảng đồng hồ; di chuyển chuột ra ngoài, bảng thu lại sau một khoảng ngắn. Nhấp chuột trái không bật/tắt bảng. Nhấp chuột phải lên capsule hoặc biểu tượng khay để mở các preset Motion, Bounce, Shadow, Accent, Seconds, Position, Clock và Update; menu cũng có Restart, Open settings folder, About và Exit.
 
 Preset Position có thể thêm khoảng cách 8 hoặc 16 px dưới mép trên. Đồng hồ mặc định dùng 24 giờ và có thể chuyển sang 12 giờ trong menu.
 
@@ -71,9 +74,9 @@ Tệp thực thi được ghi vào `target\release\hiyodyna.exe`.
 
 ## Phát hành
 
-Tải bản dựng từ [trang Releases](https://github.com/hiyo41/HiyoDyna/releases). Mỗi file zip gồm executable, hai bản README, giấy phép và giấy phép font Inter.
+Tải bản dựng từ [trang Releases](https://github.com/hiyo41/HiyoDyna/releases). Mỗi bản phát hành có một file zip gồm executable, hai bản README, giấy phép và giấy phép font Inter, cùng executable thô và SHA-256 cho bộ cập nhật trong app.
 
-Bản pre-release là bản thử nghiệm từ `main`. Bản chính thức ổn định và có changelog đầy đủ.
+Bản pre-release là bản thử nghiệm từ `main` và cấp cho kênh Build. Bản chính thức cấp cho kênh Stable và có changelog đầy đủ.
 
 Gặp lỗi? [Mở issue](https://github.com/hiyo41/HiyoDyna/issues).
 

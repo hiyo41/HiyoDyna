@@ -67,12 +67,13 @@ jobs:
         shell: pwsh
         run: |
           $cargoVersion = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1).Matches.Groups[1].Value
-          $version = "v$cargoVersion"
+          $build = "${{ github.run_number }}"
+          $version = "v$cargoVersion-$build"
           if ("${{ github.ref }}" -ne "refs/heads/main") {
             throw "Official releases must run from main."
           }
-          if ($version -notmatch '^v\d+\.\d+\.\d+$') {
-            throw "Cargo.toml version must be semver, for example 0.0.1."
+          if ($version -notmatch '^v\d+\.\d+\.\d+-\d+$') {
+            throw "Cargo.toml version must be semver, for example 0.0.1; the tag becomes v0.0.1-<build>."
           }
           if (git rev-parse -q --verify "refs/tags/$version") {
             throw "Tag $version already exists."
@@ -85,7 +86,7 @@ jobs:
           Add-Content -Path $env:GITHUB_ENV -Value "RELEASE_NEEDS_BUILD=true"
           Add-Content -Path $env:GITHUB_ENV -Value "RELEASE_UPDATE_ONLY=false"
           Add-Content -Path $env:GITHUB_ENV -Value "RELEASE_TAG=$version"
-          Add-Content -Path $env:GITHUB_ENV -Value "RELEASE_TITLE=$version"
+          Add-Content -Path $env:GITHUB_ENV -Value "RELEASE_TITLE=HiyoDyna $cargoVersion (build $build)"
           Add-Content -Path $env:GITHUB_ENV -Value "RELEASE_COMPARE_REF=$version"
 
       - name: Install Rust
@@ -98,6 +99,8 @@ jobs:
 
       - name: Build
         if: env.RELEASE_NEEDS_BUILD == 'true'
+        env:
+          HIYODyna_BUILD_TAG: ${{ env.RELEASE_TAG }}
         run: cargo build --release --locked
 
       - name: Package
@@ -105,11 +108,13 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist/package | Out-Null
-          Copy-Item target/release/hiyodyna.exe dist/package/
+          Copy-Item target/release/hiyodyna.exe dist/package/HiyoDyna.exe
           Copy-Item README.md, README_vn.md, LICENSE dist/package/
           Copy-Item assets/fonts/OFL.txt dist/package/OFL.txt
           $zip = "dist/HiyoDyna-$env:RELEASE_TAG-windows-x64.zip"
           Compress-Archive -Path dist/package/* -DestinationPath $zip -Force
+          $hash = (Get-FileHash -LiteralPath dist/package/HiyoDyna.exe -Algorithm SHA256).Hash
+          $hash | Set-Content -LiteralPath dist/HiyoDyna.exe.sha256 -Encoding ASCII
           Add-Content -Path $env:GITHUB_ENV -Value "RELEASE_ASSET=$zip"
 
       - name: Prepare release notes
@@ -128,7 +133,7 @@ jobs:
         if: github.event_name == 'push' && env.RELEASE_NEEDS_BUILD == 'true'
         shell: pwsh
         run: |
-          gh release create $env:RELEASE_TAG $env:RELEASE_ASSET --target $env:GITHUB_SHA --title $env:RELEASE_TITLE --notes-file release-notes.md --prerelease
+          gh release create $env:RELEASE_TAG $env:RELEASE_ASSET dist/package/HiyoDyna.exe dist/HiyoDyna.exe.sha256 --target $env:GITHUB_SHA --title $env:RELEASE_TITLE --notes-file release-notes.md --prerelease
 
       - name: Update pre-release changelog
         if: github.event_name == 'push' && env.RELEASE_UPDATE_ONLY == 'true'
@@ -140,4 +145,4 @@ jobs:
         if: github.event_name == 'workflow_dispatch'
         shell: pwsh
         run: |
-          gh release create $env:RELEASE_TAG $env:RELEASE_ASSET --target $env:GITHUB_SHA --title $env:RELEASE_TITLE --notes-file release-notes.md --latest
+          gh release create $env:RELEASE_TAG $env:RELEASE_ASSET dist/package/HiyoDyna.exe dist/HiyoDyna.exe.sha256 --target $env:GITHUB_SHA --title $env:RELEASE_TITLE --notes-file release-notes.md --latest
