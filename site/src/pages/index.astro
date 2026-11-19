@@ -1,11 +1,306 @@
 ---
 import Base from '../layouts/Base.astro';
+import Island from '../components/Island.astro';
+
+const base = import.meta.env.BASE_URL;
+const releases = 'https://github.com/hiyo41/HiyoDyna/releases';
+const source = 'https://github.com/hiyo41/HiyoDyna';
 ---
 
 <Base>
-  <main id="main" class="wrap">
-    <h1>HiyoDyna</h1>
-    <p class="lede">A Dynamic Island-style clock for Windows.</p>
-    <p><a class="text-link" href="https://github.com/hiyo41/HiyoDyna/releases">Releases</a></p>
+  <header class="site-header" data-header>
+    <div class="wrap site-header__inner">
+      <a class="brand" href={base} aria-label="HiyoDyna home">
+        <span class="brand__dot" aria-hidden="true"></span>
+        HiyoDyna
+      </a>
+      <nav class="site-header__nav" aria-label="Sections">
+        <a href="#features">Features</a>
+        <a href="#settings">Settings</a>
+        <a href="#install">Install</a>
+        <a href="#faq">FAQ</a>
+        <a class="site-header__github" href={source}>GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="main">
+    <section class="hero" data-hero>
+      <div class="hero__light" aria-hidden="true"></div>
+      <div class="hero__grain" aria-hidden="true"></div>
+
+      <div class="wrap hero__inner">
+        <div class="hero__island">
+          <Island id="hero" hint="Hover or tap the island" />
+        </div>
+
+        <div class="hero__copy">
+          <p class="eyebrow">Native overlay for Windows</p>
+          <h1>A Dynamic Island-style clock for Windows.</h1>
+          <p class="lede">
+            A small capsule that sits at the top of your screen. Hover to see the date, the time,
+            and the seconds. Written in Rust, drawn with Win32, and under 2 MB.
+          </p>
+          <div class="button-row hero__actions">
+            <a class="button button--primary" href={releases}>Download for Windows</a>
+            <a class="button button--ghost" href={source}>View source</a>
+          </div>
+          <p class="hero__meta">Windows 10/11 x64 · Free and open source · AGPL-3.0</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="facts" aria-label="At a glance">
+      <div class="wrap facts__grid">
+        <div class="fact">
+          <span class="fact__value">Under 2 MB</span>
+          <span class="fact__label">Single executable</span>
+        </div>
+        <div class="fact">
+          <span class="fact__value">Native Win32</span>
+          <span class="fact__label">No browser engine</span>
+        </div>
+        <div class="fact">
+          <span class="fact__value">No webview</span>
+          <span class="fact__label">No Electron runtime</span>
+        </div>
+        <div class="fact">
+          <span class="fact__value">Software-rendered</span>
+          <span class="fact__label">GDI, every frame</span>
+        </div>
+      </div>
+    </section>
   </main>
 </Base>
+
+<script>
+  const header = document.querySelector<HTMLElement>('[data-header]');
+  const hero = document.querySelector<HTMLElement>('[data-hero]');
+
+  if (header && hero && 'IntersectionObserver' in window) {
+    const observer = new IntersectionObserver(
+      ([entry]) => header.classList.toggle('is-stuck', !entry.isIntersecting),
+      { rootMargin: '-8px 0px 0px 0px' },
+    );
+    observer.observe(hero);
+  }
+</script>
+
+<style>
+  .site-header {
+    position: fixed;
+    z-index: 20;
+    inset: 0 0 auto;
+    padding-block: 18px;
+    border-bottom: 1px solid transparent;
+    transition:
+      background-color 220ms ease-out,
+      border-color 220ms ease-out,
+      backdrop-filter 220ms ease-out;
+  }
+
+  .site-header.is-stuck {
+    border-bottom-color: var(--hairline);
+    background: rgb(10 11 12 / 78%);
+    backdrop-filter: blur(14px);
+  }
+
+  .site-header__inner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 24px;
+  }
+
+  .brand {
+    display: inline-flex;
+    align-items: center;
+    gap: 9px;
+    font-size: 14px;
+    letter-spacing: -0.01em;
+    text-decoration: none;
+  }
+
+  .brand__dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 12px color-mix(in srgb, var(--accent) 50%, transparent);
+  }
+
+  .site-header__nav {
+    display: flex;
+    align-items: center;
+    gap: 26px;
+    font-size: 13px;
+    color: var(--text-secondary);
+  }
+
+  .site-header__nav a {
+    text-decoration: none;
+    transition: color 160ms ease-out;
+  }
+
+  .site-header__nav a:hover {
+    color: var(--text);
+  }
+
+  .site-header__github {
+    color: var(--text);
+  }
+
+  .hero {
+    position: relative;
+    display: flex;
+    align-items: flex-start;
+    min-height: 100svh;
+    padding: 108px 0 72px;
+    overflow: hidden;
+    background:
+      radial-gradient(120% 70% at 50% 0%, rgb(35 42 50 / 45%) 0%, transparent 62%),
+      var(--ink);
+  }
+
+  .hero__light {
+    position: absolute;
+    top: -90px;
+    left: 50%;
+    width: min(900px, 120vw);
+    height: 520px;
+    transform: translateX(-50%);
+    background: radial-gradient(
+      closest-side,
+      color-mix(in srgb, var(--accent) 13%, transparent),
+      transparent 72%
+    );
+    filter: blur(48px);
+    pointer-events: none;
+  }
+
+  .hero__grain {
+    position: absolute;
+    inset: 0;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)' opacity='0.55'/%3E%3C/svg%3E");
+    opacity: 0.035;
+    pointer-events: none;
+  }
+
+  .hero__inner {
+    position: relative;
+    z-index: 1;
+  }
+
+  .hero__island {
+    margin-bottom: clamp(24px, 4vh, 48px);
+  }
+
+  .hero__copy {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    max-width: 860px;
+    margin-inline: auto;
+    text-align: center;
+  }
+
+  .hero__copy h1 {
+    margin-top: 20px;
+  }
+
+  .hero__copy .lede {
+    margin-top: 24px;
+    max-width: 40rem;
+  }
+
+  .hero__actions {
+    justify-content: center;
+    margin-top: 34px;
+  }
+
+  .hero__meta {
+    margin-top: 20px;
+    font-size: 11px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+  }
+
+  .facts {
+    border-block: 1px solid var(--hairline);
+  }
+
+  .facts__grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+  }
+
+  .fact {
+    padding: 28px 22px;
+    border-left: 1px solid var(--hairline);
+  }
+
+  .fact:first-child {
+    border-left: 0;
+    padding-left: 0;
+  }
+
+  .fact:last-child {
+    padding-right: 0;
+  }
+
+  .fact__value,
+  .fact__label {
+    display: block;
+  }
+
+  .fact__value {
+    font-family: var(--font-display);
+    font-size: 15px;
+    letter-spacing: -0.01em;
+  }
+
+  .fact__label {
+    margin-top: 6px;
+    font-size: 10px;
+    letter-spacing: 0.13em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+  }
+
+  @media (max-width: 720px) {
+    .site-header__nav {
+      gap: 16px;
+    }
+
+    .site-header__nav a:not(.site-header__github) {
+      display: none;
+    }
+
+    .hero {
+      padding-top: 92px;
+    }
+
+    .facts__grid {
+      grid-template-columns: repeat(2, 1fr);
+    }
+
+    .fact {
+      border-top: 1px solid var(--hairline);
+      padding: 22px 16px;
+    }
+
+    .fact:nth-child(-n + 2) {
+      border-top: 0;
+    }
+
+    .fact:nth-child(odd) {
+      border-left: 0;
+      padding-left: 0;
+    }
+
+    .fact:nth-child(even) {
+      padding-right: 0;
+    }
+  }
+</style>
