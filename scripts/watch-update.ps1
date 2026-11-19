@@ -206,7 +206,6 @@ function Invoke-UpdateCheck {
         ((-not (Test-Path -LiteralPath $Exe)) -or ($installedHash -ne $previousHash))
 
     if ($fingerprint -eq $failedFingerprint -and ($sourceChanged -or $needsRepair)) {
-        Write-Log "source matches a failed build; waiting for the next edit"
         return
     }
     if (-not $sourceChanged -and -not $needsRepair) {

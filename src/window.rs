@@ -3,7 +3,10 @@ use std::ptr::{null, null_mut};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Instant;
 
-use windows_sys::Win32::Foundation::{GetLastError, HWND, LPARAM, LRESULT, POINT, SIZE, WPARAM};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE, HWND, LPARAM, LRESULT, POINT, SIZE,
+    WPARAM,
+};
 use windows_sys::Win32::Graphics::Gdi::{
     AC_SRC_ALPHA, AC_SRC_OVER, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION,
     CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS, DeleteDC, DeleteObject, GetMonitorInfoW,
@@ -15,6 +18,7 @@ use windows_sys::Win32::Media::{
     timeKillEvent, timeSetEvent,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::System::Threading::CreateMutexW;
 use windows_sys::Win32::UI::Controls::WM_MOUSELEAVE;
 use windows_sys::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForWindow, SetProcessDpiAwarenessContext,
@@ -52,10 +56,30 @@ static ANIMATION_FRAME_PENDING: AtomicBool = AtomicBool::new(false);
 static NEXT_ANIMATION_TIMER_GENERATION: AtomicUsize = AtomicUsize::new(0x1000);
 static ACTIVE_ANIMATION_TIMER_GENERATION: AtomicUsize = AtomicUsize::new(0);
 
+struct InstanceGuard(HANDLE);
+
+impl Drop for InstanceGuard {
+    fn drop(&mut self) {
+        // SAFETY: The handle came from CreateMutexW and is owned by this guard.
+        unsafe { CloseHandle(self.0) };
+    }
+}
+
 pub(crate) fn run() -> Result<(), String> {
     // SAFETY: All HWND/GDI handles remain owned by this thread until the loop exits.
     unsafe {
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        let mutex_name = wide("Local\\HiyoDynaInstance");
+        let instance_mutex = CreateMutexW(null(), 0, mutex_name.as_ptr());
+        if instance_mutex.is_null() {
+            return Err(last_error("CreateMutexW"));
+        }
+        if GetLastError() == ERROR_ALREADY_EXISTS {
+            CloseHandle(instance_mutex);
+            return Ok(());
+        }
+        let _instance_guard = InstanceGuard(instance_mutex);
+
         let instance = GetModuleHandleW(null());
         if instance.is_null() {
             return Err(last_error("GetModuleHandleW"));
