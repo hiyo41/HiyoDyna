@@ -54,7 +54,6 @@ impl ShapeState {
         ((self.height - COMPACT.height) / (EXPANDED.height - COMPACT.height)).clamp(0.0, 1.0)
     }
 
-    #[allow(dead_code)]
     pub fn compact_content_alpha(self) -> f32 {
         1.0 - smoothstep(0.10, 0.42, self.progress())
     }
@@ -63,17 +62,14 @@ impl ShapeState {
         smoothstep(0.50, 0.90, self.progress())
     }
 
-    #[allow(dead_code)]
     pub fn compact_lift(self) -> f32 {
         -(1.0 - self.compact_content_alpha()) * 7.0
     }
 
-    #[allow(dead_code)]
     pub fn expanded_lift(self) -> f32 {
         (1.0 - self.expanded_content_alpha()) * 10.0
     }
 
-    #[allow(dead_code)]
     pub fn expanded_scale(self) -> f32 {
         0.96 + 0.04 * self.expanded_content_alpha()
     }
@@ -131,7 +127,6 @@ impl Animation {
         self.target = COMPACT;
     }
 
-    #[allow(dead_code)]
     pub fn set_hover(&mut self, inside: bool) -> bool {
         let target = if inside { 1.0 } else { 0.0 };
         if (self.hover_target - target).abs() < f32::EPSILON {

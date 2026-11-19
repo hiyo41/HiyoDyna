@@ -1,7 +1,7 @@
 use crate::animation::ShapeState;
 use crate::geometry::rounded_rect_distance;
 
-pub(crate) const HOVER_GRACE_MILLISECONDS: u32 = 120;
+pub(crate) const HOVER_GRACE_MILLISECONDS: u32 = 160;
 pub(crate) const HOVER_RECHECK_MILLISECONDS: u32 = 200;
 
 pub(crate) fn pointer_inside_shape(
@@ -148,6 +148,11 @@ mod tests {
             center.0 + scaled.width / 2.0 + 4.0,
             center.1
         ));
+    }
+
+    #[test]
+    fn grace_period_is_long_enough_for_a_reentry() {
+        assert_eq!(super::HOVER_GRACE_MILLISECONDS, 160);
     }
 
     #[test]

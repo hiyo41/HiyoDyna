@@ -74,7 +74,6 @@ impl Settings {
         if self.shadow { 0.22 } else { 0.0 }
     }
 
-    #[allow(dead_code)]
     pub fn accent_bgra(&self) -> [u8; 3] {
         self.accent.bgra()
     }

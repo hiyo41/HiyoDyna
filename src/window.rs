@@ -25,7 +25,7 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 use crate::animation::{Animation, ShapeState};
-use crate::clock::{ClockFormat, ClockSnapshot};
+use crate::clock::ClockSnapshot;
 use crate::hover::{
     HOVER_GRACE_MILLISECONDS, HOVER_RECHECK_MILLISECONDS, HoverCommand, HoverTracker,
     pointer_inside_shape,
@@ -111,13 +111,7 @@ fn run_loop(hwnd: HWND) -> Result<(), String> {
     let mut animation = Animation::new_with_tuning(settings.tuning());
     let mut hover = HoverTracker::new();
     let mut position = primary_position(surface.size, settings.top_gap)?;
-    surface.draw(
-        animation.current,
-        scale,
-        settings.shadow_opacity(),
-        &clock,
-        settings.clock,
-    );
+    surface.draw(animation.current, scale, &settings, &clock, animation.hover);
     surface.present(hwnd, position)?;
 
     // SAFETY: hwnd is live, owned by this thread, and the surface has been initialized.
@@ -175,6 +169,12 @@ fn run_loop(hwnd: HWND) -> Result<(), String> {
                 let (x, y) = mouse_position(message.lParam);
                 let inside = pointer_inside_current_shape(&animation, scale, surface.size, x, y);
                 let command = hover.pointer_moved(inside);
+                set_hover(
+                    &mut animation,
+                    &mut animation_timer,
+                    &mut last_frame,
+                    inside,
+                )?;
                 apply_hover_command(
                     hwnd,
                     command,
@@ -185,6 +185,7 @@ fn run_loop(hwnd: HWND) -> Result<(), String> {
             }
             WM_MOUSELEAVE if message.hwnd == hwnd => {
                 let command = hover.pointer_moved(false);
+                set_hover(&mut animation, &mut animation_timer, &mut last_frame, false)?;
                 apply_hover_command(
                     hwnd,
                     command,
@@ -225,13 +226,7 @@ fn run_loop(hwnd: HWND) -> Result<(), String> {
                     last_frame = now;
                     let moving = animation.advance(elapsed);
                     let draw_start = Instant::now();
-                    surface.draw(
-                        animation.current,
-                        scale,
-                        settings.shadow_opacity(),
-                        &clock,
-                        settings.clock,
-                    );
+                    surface.draw(animation.current, scale, &settings, &clock, animation.hover);
                     let present_start = Instant::now();
                     surface.present(hwnd, position)?;
                     if trace_frames {
@@ -286,6 +281,12 @@ fn run_loop(hwnd: HWND) -> Result<(), String> {
                     let inside =
                         pointer_inside_current_shape(&animation, scale, surface.size, x, y);
                     let command = hover.pointer_moved(inside);
+                    set_hover(
+                        &mut animation,
+                        &mut animation_timer,
+                        &mut last_frame,
+                        inside,
+                    )?;
                     apply_hover_command(
                         hwnd,
                         command,
@@ -303,6 +304,12 @@ fn run_loop(hwnd: HWND) -> Result<(), String> {
                     })
                     .unwrap_or(false);
                 let command = hover.grace_expired(inside);
+                set_hover(
+                    &mut animation,
+                    &mut animation_timer,
+                    &mut last_frame,
+                    inside,
+                )?;
                 apply_hover_command(
                     hwnd,
                     command,
@@ -317,13 +324,7 @@ fn run_loop(hwnd: HWND) -> Result<(), String> {
                     ClockSnapshot::now(),
                     animation_timer.is_active(),
                 ) {
-                    surface.draw(
-                        animation.current,
-                        scale,
-                        settings.shadow_opacity(),
-                        &clock,
-                        settings.clock,
-                    );
+                    surface.draw(animation.current, scale, &settings, &clock, animation.hover);
                     surface.present(hwnd, position)?;
                 }
             }
@@ -331,13 +332,7 @@ fn run_loop(hwnd: HWND) -> Result<(), String> {
                 scale = window_scale(hwnd);
                 surface = Surface::new(canvas_size(scale), scale)?;
                 position = primary_position(surface.size, settings.top_gap)?;
-                surface.draw(
-                    animation.current,
-                    scale,
-                    settings.shadow_opacity(),
-                    &clock,
-                    settings.clock,
-                );
+                surface.draw(animation.current, scale, &settings, &clock, animation.hover);
                 surface.present(hwnd, position)?;
             }
             WM_APP_TRAY_MENU if message.hwnd == hwnd => {
@@ -456,13 +451,14 @@ impl Surface {
         &mut self,
         state: ShapeState,
         scale: f32,
-        shadow_opacity: f32,
+        settings: &Settings,
         clock: &ClockSnapshot,
-        format: ClockFormat,
+        hover: f32,
     ) {
         let length = self.size.0 as usize * self.size.1 as usize * 4;
         // SAFETY: The DIB allocated exactly size.0 * size.1 * 4 writable bytes and outlives self.
         let pixels = unsafe { std::slice::from_raw_parts_mut(self.bits, length) };
+        let accent = settings.accent_bgra();
         render_frame_with_margin(
             pixels,
             self.size,
@@ -470,12 +466,12 @@ impl Surface {
                 state: scale_shape(state, scale),
                 top_margin: TOP_MARGIN * scale,
                 scale,
-                shadow_opacity,
-                hover: 0.0,
-                accent: [255, 199, 143],
+                shadow_opacity: settings.shadow_opacity(),
+                hover,
+                accent,
             },
         );
-        self.text.update(clock, format);
+        self.text.update(clock, settings.clock);
         self.text.draw(
             pixels,
             TextParams {
@@ -483,9 +479,9 @@ impl Surface {
                 state,
                 top_margin: TOP_MARGIN * scale,
                 scale,
-                accent: [255, 199, 143],
-                show_seconds: true,
-                hover: 0.0,
+                accent,
+                show_seconds: settings.show_seconds,
+                hover,
             },
         );
     }
@@ -632,6 +628,22 @@ fn track_mouse_leave(hwnd: HWND) {
     unsafe {
         TrackMouseEvent(&mut event);
     }
+}
+
+fn set_hover(
+    animation: &mut Animation,
+    animation_timer: &mut AnimationTimer,
+    last_frame: &mut Instant,
+    inside: bool,
+) -> Result<(), String> {
+    if !animation.set_hover(inside) {
+        return Ok(());
+    }
+    if animation_timer.is_active() {
+        animation.advance(last_frame.elapsed().as_secs_f32());
+    }
+    *last_frame = Instant::now();
+    animation_timer.start()
 }
 
 fn apply_hover_command(
@@ -915,13 +927,7 @@ fn apply_tray_command(
     {
         return Err(last_error("SetWindowPos"));
     }
-    surface.draw(
-        animation.current,
-        scale,
-        settings.shadow_opacity(),
-        clock,
-        settings.clock,
-    );
+    surface.draw(animation.current, scale, settings, clock, animation.hover);
     surface.present(hwnd, *position)?;
     settings.save();
     Ok(())
