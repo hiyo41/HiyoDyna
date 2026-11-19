@@ -374,9 +374,12 @@ fn run_loop(hwnd: HWND) -> Result<ExitAction, String> {
                 )?;
             }
             WM_TIMER if message.hwnd == hwnd && message.wParam == TIMER_ID_CLOCK => {
-                if update::take_ready() {
+                if update::take_ready() && update::restart_for_update() {
                     update::mark_app_exiting();
                     return Ok(ExitAction::Exit);
+                }
+                if let Some(result) = update::take_status() {
+                    show_update_status(&mut tray, result);
                 }
                 if update_clock(
                     &mut clock,
@@ -414,21 +417,14 @@ fn run_loop(hwnd: HWND) -> Result<ExitAction, String> {
                 }
             }
             update::WM_APP_UPDATE_READY if message.hwnd == hwnd => {
-                if update::take_ready() {
+                if update::take_ready() && update::restart_for_update() {
                     update::mark_app_exiting();
                     return Ok(ExitAction::Exit);
                 }
             }
             update::WM_APP_UPDATE_STATUS if message.hwnd == hwnd => {
                 if message.wParam != 0 {
-                    let (text, warning) = match message.lParam {
-                        0 => ("HiyoDyna is up to date.", false),
-                        1 => ("No release is available.", false),
-                        _ => ("The update check failed. See the update log.", true),
-                    };
-                    if let Some(tray) = tray.as_mut() {
-                        tray.notify("Update", text, warning);
-                    }
+                    show_update_status(&mut tray, message.lParam);
                 }
             }
             WM_CLOSE if message.hwnd == hwnd => {
@@ -466,10 +462,17 @@ unsafe extern "system" fn window_proc(
             ANIMATION_FRAME_PENDING.store(false, Ordering::Release);
             0
         }
-        crate::update::WM_APP_UPDATE_READY | crate::update::WM_APP_UPDATE_STATUS => 0,
+        crate::update::WM_APP_UPDATE_READY => 0,
+        crate::update::WM_APP_UPDATE_STATUS => {
+            if wparam != 0 {
+                crate::update::store_status(lparam);
+            }
+            0
+        }
         WM_MOUSEACTIVATE => MA_NOACTIVATE as LRESULT,
         WM_ERASEBKGND => 1,
         WM_CLOSE => {
+            crate::update::mark_app_exiting();
             unsafe { DestroyWindow(hwnd) };
             0
         }
@@ -1107,6 +1110,17 @@ fn apply_tray_command(
     surface.present(hwnd, *position)?;
     settings.save();
     Ok(())
+}
+
+fn show_update_status(tray: &mut Option<Tray>, result: isize) {
+    let (text, warning) = match result {
+        0 => ("HiyoDyna is up to date.", false),
+        1 => ("No release is available.", false),
+        _ => ("The update check failed. See the update log.", true),
+    };
+    if let Some(tray) = tray.as_mut() {
+        tray.notify("Update", text, warning);
+    }
 }
 
 fn show_about(hwnd: HWND, text: &str) {

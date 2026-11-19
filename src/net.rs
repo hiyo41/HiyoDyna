@@ -5,7 +5,7 @@ use std::ptr::null;
 use windows_sys::Win32::Foundation::GetLastError;
 use windows_sys::Win32::Networking::WinInet::{
     HTTP_QUERY_FLAG_NUMBER, HTTP_QUERY_STATUS_CODE, HttpQueryInfoW, INTERNET_FLAG_NO_CACHE_WRITE,
-    INTERNET_FLAG_RELOAD, INTERNET_FLAG_SECURE, INTERNET_OPEN_TYPE_PRECONFIG,
+    INTERNET_FLAG_NO_UI, INTERNET_FLAG_RELOAD, INTERNET_FLAG_SECURE, INTERNET_OPEN_TYPE_PRECONFIG,
     INTERNET_OPTION_CONNECT_TIMEOUT, INTERNET_OPTION_RECEIVE_TIMEOUT, INTERNET_OPTION_SEND_TIMEOUT,
     InternetCloseHandle, InternetOpenUrlW, InternetOpenW, InternetReadFile, InternetSetOptionW,
 };
@@ -36,6 +36,23 @@ pub(crate) fn get(url: &str, max_bytes: usize) -> Result<Vec<u8>, HttpError> {
         return Err(last_error("InternetOpenW"));
     }
 
+    for (option, milliseconds) in [
+        (
+            INTERNET_OPTION_CONNECT_TIMEOUT,
+            CONNECT_TIMEOUT_MILLISECONDS,
+        ),
+        (
+            INTERNET_OPTION_RECEIVE_TIMEOUT,
+            RECEIVE_TIMEOUT_MILLISECONDS,
+        ),
+        (INTERNET_OPTION_SEND_TIMEOUT, SEND_TIMEOUT_MILLISECONDS),
+    ] {
+        if let Err(error) = set_timeout(session, option, milliseconds) {
+            unsafe { InternetCloseHandle(session) };
+            return Err(error);
+        }
+    }
+
     let result = fetch(session, url, max_bytes);
     unsafe { InternetCloseHandle(session) };
     result
@@ -43,7 +60,10 @@ pub(crate) fn get(url: &str, max_bytes: usize) -> Result<Vec<u8>, HttpError> {
 
 fn fetch(session: *const c_void, url: &str, max_bytes: usize) -> Result<Vec<u8>, HttpError> {
     let url = wide(url);
-    let flags = INTERNET_FLAG_RELOAD | INTERNET_FLAG_SECURE | INTERNET_FLAG_NO_CACHE_WRITE;
+    let flags = INTERNET_FLAG_RELOAD
+        | INTERNET_FLAG_SECURE
+        | INTERNET_FLAG_NO_CACHE_WRITE
+        | INTERNET_FLAG_NO_UI;
     let request = unsafe { InternetOpenUrlW(session, url.as_ptr(), null(), 0, flags, 0) };
     if request.is_null() {
         return Err(last_error("InternetOpenUrlW"));
@@ -55,22 +75,6 @@ fn fetch(session: *const c_void, url: &str, max_bytes: usize) -> Result<Vec<u8>,
 }
 
 fn fetch_request(request: *const c_void, max_bytes: usize) -> Result<Vec<u8>, HttpError> {
-    set_timeout(
-        request,
-        INTERNET_OPTION_CONNECT_TIMEOUT,
-        CONNECT_TIMEOUT_MILLISECONDS,
-    );
-    set_timeout(
-        request,
-        INTERNET_OPTION_RECEIVE_TIMEOUT,
-        RECEIVE_TIMEOUT_MILLISECONDS,
-    );
-    set_timeout(
-        request,
-        INTERNET_OPTION_SEND_TIMEOUT,
-        SEND_TIMEOUT_MILLISECONDS,
-    );
-
     let status = query_status(request)?;
     if !(200..=299).contains(&status) {
         return Err(HttpError {
@@ -126,15 +130,19 @@ fn query_status(request: *const c_void) -> Result<u32, HttpError> {
     Ok(status)
 }
 
-fn set_timeout(request: *const c_void, option: u32, milliseconds: u32) {
-    unsafe {
+fn set_timeout(handle: *const c_void, option: u32, milliseconds: u32) -> Result<(), HttpError> {
+    let ok = unsafe {
         InternetSetOptionW(
-            request,
+            handle,
             option,
             (&milliseconds as *const u32).cast(),
             size_of::<u32>() as u32,
-        );
+        )
+    };
+    if ok == 0 {
+        return Err(last_error("InternetSetOptionW"));
     }
+    Ok(())
 }
 
 fn last_error(operation: &str) -> HttpError {

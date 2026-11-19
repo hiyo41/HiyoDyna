@@ -2,14 +2,17 @@ use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::ptr::null;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, ERROR_INVALID_PARAMETER, GetLastError, HWND, SYSTEMTIME, WAIT_OBJECT_0,
+    CloseHandle, ERROR_ALREADY_EXISTS, ERROR_INVALID_PARAMETER, GetLastError, HANDLE, HWND,
+    SYSTEMTIME, SetLastError, WAIT_ABANDONED, WAIT_OBJECT_0,
 };
 use windows_sys::Win32::System::SystemInformation::GetLocalTime;
 use windows_sys::Win32::System::Threading::{
-    OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
+    CreateMutexW, OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_APP};
 
@@ -33,6 +36,7 @@ struct StageManifest {
 struct UpdateState {
     applied_tag: Option<String>,
     applied_published: Option<String>,
+    failed_tag: Option<String>,
 }
 
 struct ApplyPaths {
@@ -48,11 +52,12 @@ enum ApplyOutcome {
     Discarded,
 }
 
-fn stage_paths(install_dir: &Path) -> ApplyPaths {
+fn stage_paths(installed: &Path) -> ApplyPaths {
+    let install_dir = installed.parent().unwrap_or_else(|| Path::new("."));
     ApplyPaths {
         staged: install_dir.join("HiyoDyna.update.exe"),
         manifest: install_dir.join("HiyoDyna.update.txt"),
-        installed: install_dir.join("HiyoDyna.exe"),
+        installed: installed.to_path_buf(),
         state: state_path().unwrap_or_else(|| install_dir.join("update-state.ini")),
     }
 }
@@ -119,6 +124,7 @@ fn parse_state(text: &str) -> UpdateState {
         match key.trim() {
             "applied_tag" => state.applied_tag = Some(value.to_string()),
             "applied_published" => state.applied_published = Some(value.to_string()),
+            "failed_tag" => state.failed_tag = Some(value.to_string()),
             _ => {}
         }
     }
@@ -132,6 +138,9 @@ fn serialize_state(state: &UpdateState) -> String {
     }
     if let Some(published) = &state.applied_published {
         text.push_str(&format!("applied_published={published}\n"));
+    }
+    if let Some(tag) = &state.failed_tag {
+        text.push_str(&format!("failed_tag={tag}\n"));
     }
     text
 }
@@ -152,7 +161,9 @@ fn write_state(path: &Path, state: &UpdateState) {
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
-    let _ = fs::write(path, serialize_state(state));
+    if let Err(error) = fs::write(path, serialize_state(state)) {
+        log(&format!("could not write {path:?}: {error}"));
+    }
 }
 
 fn repo_slug() -> &'static str {
@@ -193,6 +204,11 @@ fn parse_atom(text: &str) -> Vec<Release> {
 
 fn parse_latest_json(text: &str) -> Result<Release, String> {
     let tag = json_string(text, "tag_name").ok_or("release JSON has no tag_name")?;
+    if !is_official_tag(&tag) {
+        return Err(format!(
+            "release tag {tag:?} does not match the official release convention"
+        ));
+    }
     let published = json_string(text, "published_at").ok_or("release JSON has no published_at")?;
     Ok(Release { tag, published })
 }
@@ -205,14 +221,16 @@ fn select_from_atom(entries: &[Release], channel: UpdateChannel) -> Option<Relea
             .cloned(),
         UpdateChannel::Stable => entries
             .iter()
-            .find(|entry| entry.tag.starts_with('v'))
+            .find(|entry| is_official_tag(&entry.tag))
             .or_else(|| entries.iter().find(|entry| is_pre_release(&entry.tag)))
             .cloned(),
     }
 }
 
 fn stable_candidate(latest: Option<Release>, atom: &[Release]) -> Option<Release> {
-    latest.or_else(|| select_from_atom(atom, UpdateChannel::Build))
+    latest
+        .filter(|release| is_official_tag(&release.tag))
+        .or_else(|| select_from_atom(atom, UpdateChannel::Build))
 }
 
 fn parse_rfc3339(text: &str) -> Option<i64> {
@@ -312,6 +330,33 @@ fn is_pre_release(tag: &str) -> bool {
     })
 }
 
+fn is_official_tag(tag: &str) -> bool {
+    let Some(rest) = tag.strip_prefix('v') else {
+        return false;
+    };
+    let Some((version, build)) = rest.rsplit_once('-') else {
+        return false;
+    };
+    if build.is_empty() || !build.bytes().all(|byte| byte.is_ascii_digit()) {
+        return false;
+    }
+    let mut parts = version.split('.');
+    for _ in 0..3 {
+        let Some(part) = parts.next() else {
+            return false;
+        };
+        if part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()) {
+            return false;
+        }
+    }
+    parts.next().is_none()
+}
+
+#[cfg(test)]
+fn is_valid_tag(tag: &str) -> bool {
+    is_pre_release(tag) || is_official_tag(tag)
+}
+
 fn split_offset(text: &str) -> Option<(&str, i64)> {
     if let Some(time) = text.strip_suffix(['Z', 'z']) {
         return Some((time, 0));
@@ -379,8 +424,9 @@ fn apply_staged_update(
     }
 
     let old = old_path(&paths.installed);
-    let _ = fs::remove_file(&old);
-    if !paths.installed.exists() && old.exists() {
+    if paths.installed.exists() {
+        let _ = fs::remove_file(&old);
+    } else if old.exists() {
         fs::rename(&old, &paths.installed)
             .map_err(|error| format!("could not restore the previous exe: {error}"))?;
     }
@@ -402,7 +448,9 @@ fn apply_staged_update(
             fs::rename(&old, &paths.installed)
                 .map_err(|restore| format!("could not restore the previous exe: {restore}"))?;
         }
-        let _ = launch(&paths.installed);
+        let mut state = read_state_from(&paths.state);
+        state.failed_tag = Some(manifest.tag.clone());
+        write_state(&paths.state, &state);
         return Err(format!("could not launch the updated exe: {error}"));
     }
 
@@ -411,6 +459,7 @@ fn apply_staged_update(
         &UpdateState {
             applied_tag: Some(manifest.tag.clone()),
             applied_published: Some(manifest.published.clone()),
+            failed_tag: None,
         },
     );
     let _ = fs::remove_file(&paths.manifest);
@@ -422,6 +471,15 @@ fn discard_stage(paths: &ApplyPaths) {
     let _ = fs::remove_file(&paths.manifest);
 }
 
+fn record_failed(paths: &ApplyPaths) {
+    let Some(manifest) = read_manifest(&paths.manifest) else {
+        return;
+    };
+    let mut state = read_state_from(&paths.state);
+    state.failed_tag = Some(manifest.tag);
+    write_state(&paths.state, &state);
+}
+
 fn stage_should_apply(
     paths: &ApplyPaths,
     channel: UpdateChannel,
@@ -431,6 +489,9 @@ fn stage_should_apply(
         return false;
     }
     let state = read_state_from(&paths.state);
+    if state.failed_tag.as_deref() == Some(manifest.tag.as_str()) {
+        return false;
+    }
     let applied_time = state.applied_published.as_deref().and_then(parse_rfc3339);
     let release = Release {
         tag: manifest.tag.clone(),
@@ -468,21 +529,25 @@ fn epoch_seconds(time: std::time::SystemTime) -> Option<i64> {
 }
 
 fn stage_bytes(
-    install_dir: &Path,
+    installed: &Path,
     bytes: &[u8],
     manifest: &StageManifest,
 ) -> Result<ApplyPaths, String> {
+    let install_dir = installed
+        .parent()
+        .ok_or("the installed exe has no parent directory")?;
     if !install_dir.is_dir() {
         return Err(format!(
             "install directory {install_dir:?} does not exist or is not writable"
         ));
     }
+    let paths = stage_paths(installed);
     let actual = crate::sha256::to_hex(&crate::sha256::hash_bytes(bytes)?);
     if !actual.eq_ignore_ascii_case(manifest.sha256.trim()) {
+        discard_stage(&paths);
         return Err(format!("SHA-256 mismatch for {}", manifest.tag));
     }
 
-    let paths = stage_paths(install_dir);
     let part = install_dir.join("HiyoDyna.update.part");
     let result = (|| {
         let _ = fs::remove_file(&paths.staged);
@@ -500,12 +565,51 @@ fn stage_bytes(
     Ok(paths)
 }
 
-fn download_and_stage(release: &Release, channel: UpdateChannel) -> Result<ApplyPaths, String> {
-    let install_dir = std::env::current_exe()
-        .map_err(|error| format!("could not locate the running exe: {error}"))?
+fn prepare_stage(installed: &Path) -> Result<ApplyPaths, String> {
+    let install_dir = installed
         .parent()
-        .ok_or("the running exe has no parent directory")?
-        .to_path_buf();
+        .ok_or("the installed exe has no parent directory")?;
+    let paths = stage_paths(installed);
+    if !install_dir.is_dir() {
+        return Err(format!("install directory {install_dir:?} does not exist"));
+    }
+    let probe = install_dir.join("HiyoDyna.update.probe");
+    if fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&probe)
+        .is_err()
+    {
+        return Err(format!("install directory {install_dir:?} is not writable"));
+    }
+    let _ = fs::remove_file(&probe);
+    Ok(paths)
+}
+
+fn stage_is_current(paths: &ApplyPaths, release: &Release, channel: UpdateChannel) -> bool {
+    let Some(manifest) = read_manifest(&paths.manifest) else {
+        return false;
+    };
+    if manifest.tag != release.tag || manifest.channel != channel || !paths.staged.is_file() {
+        return false;
+    }
+    match crate::sha256::hash_file(&paths.staged) {
+        Ok(hash) => crate::sha256::to_hex(&hash).eq_ignore_ascii_case(manifest.sha256.trim()),
+        Err(_) => false,
+    }
+}
+
+fn download_and_stage(
+    release: &Release,
+    channel: UpdateChannel,
+    installed: &Path,
+) -> Result<ApplyPaths, String> {
+    let paths = prepare_stage(installed)?;
+    if stage_is_current(&paths, release, channel) {
+        return Ok(paths);
+    }
+    discard_stage(&paths);
     let base = format!(
         "https://github.com/{}/releases/download/{}",
         repo_slug(),
@@ -532,16 +636,40 @@ fn download_and_stage(release: &Release, channel: UpdateChannel) -> Result<Apply
         channel,
         sha256,
     };
-    stage_bytes(&install_dir, &bytes, &manifest)
+    stage_bytes(installed, &bytes, &manifest)
 }
 
 pub(crate) const WM_APP_UPDATE_READY: u32 = WM_APP + 5;
 pub(crate) const WM_APP_UPDATE_STATUS: u32 = WM_APP + 6;
 pub(crate) const UPDATE_INTERVAL_MILLISECONDS: u32 = 30 * 60 * 1000;
+const UPDATE_MUTEX_NAME: &str = "Local\\HiyoDynaUpdate";
 
-static CHECK_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 static UPDATE_READY: AtomicBool = AtomicBool::new(false);
 static APP_EXITING: AtomicBool = AtomicBool::new(false);
+static PENDING_STATUS: AtomicI32 = AtomicI32::new(-1);
+
+#[derive(Default)]
+struct PendingCheck(Option<(UpdateChannel, bool)>);
+
+impl PendingCheck {
+    fn queue(&mut self, channel: UpdateChannel, manual: bool) {
+        self.0 = Some((channel, manual));
+    }
+
+    fn take(&mut self) -> Option<(UpdateChannel, bool)> {
+        self.0.take()
+    }
+}
+
+struct CheckState {
+    in_flight: bool,
+    pending: PendingCheck,
+}
+
+static CHECK_STATE: Mutex<CheckState> = Mutex::new(CheckState {
+    in_flight: false,
+    pending: PendingCheck(None),
+});
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum UpdateResult {
@@ -563,36 +691,113 @@ enum PendingAction {
 }
 
 pub(crate) fn request_check(hwnd: HWND, channel: UpdateChannel, manual: bool) {
-    if CHECK_IN_FLIGHT.swap(true, Ordering::SeqCst) {
-        return;
+    {
+        let mut state = CHECK_STATE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.in_flight {
+            state.pending.queue(channel, manual);
+            return;
+        }
+        state.in_flight = true;
     }
     let hwnd_value = hwnd as isize;
     let spawned = std::thread::Builder::new()
         .name("hiyodyna-update-check".into())
         .spawn(move || {
-            let outcome = perform_check(channel);
-            match outcome {
-                CheckOutcome::Ready => {
-                    signal_ready();
-                    unsafe {
-                        PostMessageW(hwnd_value as HWND, WM_APP_UPDATE_READY, 0, 0);
+            let mut channel = channel;
+            let mut manual = manual;
+            loop {
+                let outcome = perform_check(channel);
+                match outcome {
+                    CheckOutcome::Ready => {
+                        signal_ready();
+                        unsafe {
+                            PostMessageW(hwnd_value as HWND, WM_APP_UPDATE_READY, 0, 0);
+                        }
                     }
+                    CheckOutcome::Status(result) if manual => unsafe {
+                        PostMessageW(hwnd_value as HWND, WM_APP_UPDATE_STATUS, 1, result as isize);
+                    },
+                    CheckOutcome::Status(_) => {}
                 }
-                CheckOutcome::Status(result) if manual => unsafe {
-                    PostMessageW(hwnd_value as HWND, WM_APP_UPDATE_STATUS, 1, result as isize);
-                },
-                CheckOutcome::Status(_) => {}
+                let next = {
+                    let mut state = CHECK_STATE
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    match state.pending.take() {
+                        Some(next) => Some(next),
+                        None => {
+                            state.in_flight = false;
+                            None
+                        }
+                    }
+                };
+                match next {
+                    Some((next_channel, next_manual)) => {
+                        channel = next_channel;
+                        manual = next_manual;
+                    }
+                    None => break,
+                }
             }
-            CHECK_IN_FLIGHT.store(false, Ordering::SeqCst);
         });
     if spawned.is_err() {
         log("could not start the update check thread");
-        CHECK_IN_FLIGHT.store(false, Ordering::SeqCst);
+        let mut state = CHECK_STATE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.in_flight = false;
     }
 }
 
 pub(crate) fn take_ready() -> bool {
     UPDATE_READY.swap(false, Ordering::SeqCst)
+}
+
+pub(crate) fn store_status(result: isize) {
+    PENDING_STATUS.store(result as i32, Ordering::SeqCst);
+}
+
+pub(crate) fn take_status() -> Option<isize> {
+    match PENDING_STATUS.swap(-1, Ordering::SeqCst) {
+        -1 => None,
+        result => Some(result as isize),
+    }
+}
+
+pub(crate) fn restart_for_update() -> bool {
+    if APP_EXITING.load(Ordering::SeqCst) {
+        return false;
+    }
+    let channel = Settings::load().update;
+    if pending_action(channel) != PendingAction::Apply {
+        return false;
+    }
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(error) => {
+            log(&format!("could not locate the running exe: {error}"));
+            return false;
+        }
+    };
+    if is_dev_build_path(&exe) {
+        return false;
+    }
+    match Command::new(&exe)
+        .arg("--apply-update")
+        .arg(std::process::id().to_string())
+        .spawn()
+    {
+        Ok(_) => {
+            log("exiting to apply the staged update");
+            true
+        }
+        Err(error) => {
+            log(&format!("could not start the update helper: {error}"));
+            false
+        }
+    }
 }
 
 pub(crate) fn mark_app_exiting() {
@@ -601,9 +806,9 @@ pub(crate) fn mark_app_exiting() {
 
 pub(crate) fn discard_staged_for(channel: UpdateChannel) {
     if pending_action(channel) == PendingAction::Discard
-        && let Some(install_dir) = install_dir()
+        && let Ok(exe) = std::env::current_exe()
     {
-        discard_stage(&stage_paths(&install_dir));
+        discard_stage(&stage_paths(&exe));
     }
 }
 
@@ -619,6 +824,9 @@ pub(crate) fn run_apply_helper() {
         .and_then(|argument| argument.to_string_lossy().parse::<u32>().ok())
     else {
         log("the update helper was started without a process id");
+        return;
+    };
+    let Some(_guard) = acquire_update_mutex() else {
         return;
     };
     let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
@@ -640,12 +848,21 @@ pub(crate) fn run_apply_helper() {
         }
     }
 
-    let Some(install_dir) = install_dir() else {
-        log("the update helper could not locate its install directory");
-        return;
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(error) => {
+            log(&format!(
+                "the update helper could not locate its exe: {error}"
+            ));
+            return;
+        }
     };
     let channel = Settings::load().update;
-    let paths = stage_paths(&install_dir);
+    let paths = stage_paths(&exe);
+    if !paths.manifest.is_file() {
+        log("no staged update is pending");
+        return;
+    }
     let mut launch = |path: &Path| -> Result<(), String> {
         Command::new(path)
             .spawn()
@@ -656,11 +873,12 @@ pub(crate) fn run_apply_helper() {
         Ok(ApplyOutcome::Applied) => log("applied the staged update"),
         Ok(ApplyOutcome::Discarded) => {
             log("discarded the staged update");
-            launch_installed(&paths.installed);
+            launch_installed(&paths);
         }
         Err(error) => {
             log(&format!("could not apply the staged update: {error}"));
-            launch_installed(&paths.installed);
+            record_failed(&paths);
+            launch_installed(&paths);
         }
     }
 }
@@ -705,7 +923,7 @@ pub(crate) fn cleanup_old_binary() {
     let Some(install_dir) = exe.parent() else {
         return;
     };
-    let paths = stage_paths(install_dir);
+    let paths = stage_paths(&exe);
     let _ = fs::remove_file(install_dir.join("HiyoDyna.update.part"));
     if !paths.staged.exists() {
         let _ = fs::remove_file(&paths.manifest);
@@ -772,6 +990,13 @@ fn perform_check(channel: UpdateChannel) -> CheckOutcome {
     };
 
     let state = read_state();
+    if state.failed_tag.as_deref() == Some(release.tag.as_str()) {
+        log(&format!(
+            "skipping {} after an earlier apply failure",
+            release.tag
+        ));
+        return CheckOutcome::Status(UpdateResult::UpToDate);
+    }
     let applied_time = state.applied_published.as_deref().and_then(parse_rfc3339);
     if !should_apply(
         &release,
@@ -793,7 +1018,7 @@ fn perform_check(channel: UpdateChannel) -> CheckOutcome {
         release.tag,
         channel.label()
     ));
-    let paths = match download_and_stage(&release, channel) {
+    let paths = match download_and_stage(&release, channel, &exe) {
         Ok(paths) => paths,
         Err(error) => {
             log(&format!("could not download {}: {error}", release.tag));
@@ -811,30 +1036,18 @@ fn perform_check(channel: UpdateChannel) -> CheckOutcome {
         return CheckOutcome::Status(UpdateResult::UpToDate);
     }
 
-    match Command::new(&exe)
-        .arg("--apply-update")
-        .arg(std::process::id().to_string())
-        .spawn()
-    {
-        Ok(_) => {
-            log(&format!(
-                "{} is staged; restarting to apply it",
-                release.tag
-            ));
-            CheckOutcome::Ready
-        }
-        Err(error) => {
-            log(&format!("could not start the update helper: {error}"));
-            CheckOutcome::Status(UpdateResult::Failed)
-        }
-    }
+    log(&format!(
+        "{} is staged; waiting for the app to restart",
+        release.tag
+    ));
+    CheckOutcome::Ready
 }
 
 fn pending_action(channel: UpdateChannel) -> PendingAction {
-    let Some(install_dir) = install_dir() else {
+    let Ok(exe) = std::env::current_exe() else {
         return PendingAction::None;
     };
-    let paths = stage_paths(&install_dir);
+    let paths = stage_paths(&exe);
     let stage = read_manifest(&paths.manifest);
     let action = pending_action_from(paths.staged.is_file(), stage.as_ref(), channel);
     if action == PendingAction::Apply
@@ -860,13 +1073,6 @@ fn pending_action_from(
     }
 }
 
-fn install_dir() -> Option<PathBuf> {
-    std::env::current_exe()
-        .ok()?
-        .parent()
-        .map(Path::to_path_buf)
-}
-
 fn is_dev_build_path(path: &Path) -> bool {
     let mut components = path.components().peekable();
     while let Some(component) = components.next() {
@@ -885,11 +1091,20 @@ fn is_dev_build_path(path: &Path) -> bool {
     false
 }
 
-fn launch_installed(path: &Path) {
-    if path.is_file()
-        && let Err(error) = Command::new(path).spawn()
-    {
-        log(&format!("could not relaunch HiyoDyna: {error}"));
+fn launch_installed(paths: &ApplyPaths) {
+    let old = old_path(&paths.installed);
+    let target = if paths.installed.is_file() {
+        &paths.installed
+    } else if old.is_file() {
+        &old
+    } else {
+        log("no installed or previous HiyoDyna executable was found to relaunch");
+        return;
+    };
+    if let Err(error) = Command::new(target).spawn() {
+        log(&format!(
+            "could not relaunch HiyoDyna from {target:?}: {error}"
+        ));
     }
 }
 
@@ -904,6 +1119,40 @@ fn timestamp() -> String {
         "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
         time.wYear, time.wMonth, time.wDay, time.wHour, time.wMinute, time.wSecond
     )
+}
+
+struct UpdateMutex(HANDLE);
+
+impl Drop for UpdateMutex {
+    fn drop(&mut self) {
+        unsafe { CloseHandle(self.0) };
+    }
+}
+
+fn acquire_update_mutex() -> Option<UpdateMutex> {
+    let name = wide(UPDATE_MUTEX_NAME);
+    unsafe { SetLastError(0) };
+    let handle = unsafe { CreateMutexW(null(), 0, name.as_ptr()) };
+    if handle.is_null() {
+        log(&format!(
+            "could not create the update mutex (Windows error {})",
+            unsafe { GetLastError() }
+        ));
+        return None;
+    }
+    if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+        let wait = unsafe { WaitForSingleObject(handle, 60_000) };
+        if wait != WAIT_OBJECT_0 && wait != WAIT_ABANDONED {
+            log("timed out waiting for another update helper");
+            unsafe { CloseHandle(handle) };
+            return None;
+        }
+    }
+    Some(UpdateMutex(handle))
+}
+
+fn wide(text: &str) -> Vec<u16> {
+    text.encode_utf16().chain(Some(0)).collect()
 }
 
 #[cfg(test)]
@@ -1009,10 +1258,32 @@ mod tests {
         });
         assert!(result.is_err());
         assert_eq!(std::fs::read(&paths.installed).unwrap(), b"old");
-        assert_eq!(calls.len(), 2);
+        assert_eq!(calls.len(), 1);
         assert_eq!(calls[0], paths.installed);
-        assert_eq!(calls[1], paths.installed);
-        assert!(!paths.state.exists());
+        let state = super::read_state_from(&paths.state);
+        assert_eq!(state.failed_tag.as_deref(), Some("pre-2"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_failed_apply_is_not_retried_for_the_same_tag() {
+        let dir = unique_temp_dir("apply-no-loop");
+        let paths = test_stage(&dir, b"old", b"new", UpdateChannel::Build, "pre-2");
+        let _ =
+            super::apply_staged_update(&paths, UpdateChannel::Build, &mut |_| Err("boom".into()));
+        assert!(paths.staged.exists());
+
+        let mut calls = 0;
+        let outcome = super::apply_staged_update(&paths, UpdateChannel::Build, &mut |_| {
+            calls += 1;
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(outcome, super::ApplyOutcome::Discarded);
+        assert_eq!(calls, 0);
+        assert!(!paths.staged.exists());
+        assert!(!paths.manifest.exists());
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -1035,6 +1306,75 @@ mod tests {
     }
 
     #[test]
+    fn prepare_stage_keeps_a_current_stage_and_rejects_stale_ones() {
+        let dir = unique_temp_dir("prepare-stale");
+        let paths = test_stage(&dir, b"old", b"new", UpdateChannel::Build, "pre-2");
+        let prepared = super::prepare_stage(&paths.installed).unwrap();
+        assert!(paths.staged.exists());
+        assert!(paths.manifest.exists());
+
+        let release = super::Release {
+            tag: "pre-2".into(),
+            published: "2099-01-01T00:00:00Z".into(),
+        };
+        assert!(super::stage_is_current(
+            &prepared,
+            &release,
+            UpdateChannel::Build
+        ));
+        let newer = super::Release {
+            tag: "pre-3".into(),
+            ..release.clone()
+        };
+        assert!(!super::stage_is_current(
+            &prepared,
+            &newer,
+            UpdateChannel::Build
+        ));
+        assert!(!super::stage_is_current(
+            &prepared,
+            &release,
+            UpdateChannel::Stable
+        ));
+        std::fs::write(&paths.staged, b"tampered").unwrap();
+        assert!(!super::stage_is_current(
+            &prepared,
+            &release,
+            UpdateChannel::Build
+        ));
+        assert!(super::prepare_stage(&dir.join("missing").join("Clock.exe")).is_err());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn stage_paths_replaces_the_running_exe_name() {
+        let dir = unique_temp_dir("stage-name");
+        let installed = dir.join("Clock.exe");
+        let paths = super::stage_paths(&installed);
+        assert_eq!(paths.installed, installed);
+        assert_eq!(paths.staged, dir.join("HiyoDyna.update.exe"));
+        assert_eq!(paths.manifest, dir.join("HiyoDyna.update.txt"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn restores_a_missing_installed_exe_from_old_before_applying() {
+        let dir = unique_temp_dir("apply-missing-installed");
+        let paths = test_stage(&dir, b"previous", b"new", UpdateChannel::Build, "pre-2");
+        let old = super::old_path(&paths.installed);
+        std::fs::remove_file(&paths.installed).unwrap();
+        std::fs::write(&old, b"previous").unwrap();
+
+        let outcome =
+            super::apply_staged_update(&paths, UpdateChannel::Build, &mut |_| Ok(())).unwrap();
+
+        assert_eq!(outcome, super::ApplyOutcome::Applied);
+        assert_eq!(std::fs::read(&paths.installed).unwrap(), b"new");
+        assert_eq!(std::fs::read(&old).unwrap(), b"previous");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn stage_bytes_writes_a_verified_update() {
         let dir = unique_temp_dir("stage-ok");
         let manifest = super::StageManifest {
@@ -1043,7 +1383,7 @@ mod tests {
             channel: UpdateChannel::Build,
             sha256: crate::sha256::to_hex(&crate::sha256::hash_bytes(b"new").unwrap()),
         };
-        let paths = super::stage_bytes(&dir, b"new", &manifest).unwrap();
+        let paths = super::stage_bytes(&dir.join("installed.exe"), b"new", &manifest).unwrap();
         assert_eq!(std::fs::read(&paths.staged).unwrap(), b"new");
         assert!(paths.manifest.exists());
         let _ = std::fs::remove_dir_all(dir);
@@ -1058,7 +1398,7 @@ mod tests {
             channel: UpdateChannel::Build,
             sha256: "00".repeat(32),
         };
-        assert!(super::stage_bytes(&dir, b"new", &bad).is_err());
+        assert!(super::stage_bytes(&dir.join("installed.exe"), b"new", &bad).is_err());
         assert!(!dir.join("HiyoDyna.update.exe").exists());
         assert!(!dir.join("HiyoDyna.update.part").exists());
 
@@ -1066,7 +1406,9 @@ mod tests {
             sha256: crate::sha256::to_hex(&crate::sha256::hash_bytes(b"new").unwrap()),
             ..bad
         };
-        assert!(super::stage_bytes(&dir.join("missing"), b"new", &good).is_err());
+        assert!(
+            super::stage_bytes(&dir.join("missing").join("installed.exe"), b"new", &good).is_err()
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -1075,6 +1417,7 @@ mod tests {
         let state = super::UpdateState {
             applied_tag: Some("pre-2".into()),
             applied_published: Some("2026-11-19T08:07:44Z".into()),
+            failed_tag: Some("pre-3".into()),
         };
         assert_eq!(super::parse_state(&super::serialize_state(&state)), state);
 
@@ -1204,6 +1547,33 @@ mod tests {
     }
 
     #[test]
+    fn validates_release_tag_conventions() {
+        assert!(super::is_valid_tag("pre-2"));
+        assert!(super::is_valid_tag("v0.0.1-3"));
+        assert!(!super::is_valid_tag("vfoo"));
+        assert!(!super::is_valid_tag("v0.0.1"));
+        assert!(!super::is_valid_tag("pre-x"));
+        assert!(
+            super::parse_latest_json(
+                r#"{"tag_name":"vfoo","published_at":"2026-11-19T09:00:00Z"}"#
+            )
+            .is_err()
+        );
+        let entries = super::parse_atom(
+            r#"<entry><updated>2026-11-19T10:00:00Z</updated>
+        <link href="https://github.com/hiyo41/HiyoDyna/releases/tag/vfoo"/></entry>
+        <entry><updated>2026-11-18T10:00:00Z</updated>
+        <link href="https://github.com/hiyo41/HiyoDyna/releases/tag/v0.0.1-2"/></entry>"#,
+        );
+        assert_eq!(
+            super::select_from_atom(&entries, UpdateChannel::Stable)
+                .unwrap()
+                .tag,
+            "v0.0.1-2"
+        );
+    }
+
+    #[test]
     fn stable_uses_official_then_falls_back() {
         let atom = super::parse_atom(ATOM);
         let official = super::Release {
@@ -1258,6 +1628,16 @@ mod tests {
             super::pending_action_from(true, Some(&build), UpdateChannel::Build),
             super::PendingAction::Apply
         );
+    }
+
+    #[test]
+    fn pending_check_keeps_the_latest_request() {
+        let mut pending = super::PendingCheck::default();
+        assert_eq!(pending.take(), None);
+        pending.queue(UpdateChannel::Build, false);
+        pending.queue(UpdateChannel::Stable, true);
+        assert_eq!(pending.take(), Some((UpdateChannel::Stable, true)));
+        assert_eq!(pending.take(), None);
     }
 
     #[test]
