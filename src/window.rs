@@ -576,7 +576,6 @@ fn scale_shape(state: ShapeState, scale: f32) -> ShapeState {
         width: state.width * scale,
         height: state.height * scale,
         radius: state.radius * scale,
-        content_opacity: state.content_opacity,
     }
 }
 
@@ -946,13 +945,12 @@ mod tests {
     }
 
     #[test]
-    fn scales_geometry_but_not_normalized_opacity() {
+    fn scales_geometry() {
         let scaled = scale_shape(COMPACT, 1.5);
 
         assert_eq!(scaled.width, 276.0);
         assert_eq!(scaled.height, 81.0);
         assert_eq!(scaled.radius, 40.5);
-        assert_eq!(scaled.content_opacity, 0.0);
     }
 
     #[test]

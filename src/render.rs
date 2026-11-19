@@ -262,7 +262,6 @@ mod tests {
                 width: COMPACT.width * scale,
                 height: COMPACT.height * scale,
                 radius: COMPACT.radius * scale,
-                content_opacity: COMPACT.content_opacity,
             };
             let top_margin = 12.0 * scale;
             let y = (top_margin + scaled.height + 4.0 * scale).floor() as u32;
@@ -386,7 +385,6 @@ mod tests {
             width: EXPANDED.width * 1.08 * scale,
             height: EXPANDED.height * 1.08 * scale,
             radius: EXPANDED.radius * 1.08 * scale,
-            content_opacity: 1.0,
         };
         let mut pixels = vec![0_u8; size.0 as usize * size.1 as usize * 4];
 

@@ -133,7 +133,6 @@ mod tests {
             width: COMPACT.width * scale,
             height: COMPACT.height * scale,
             radius: COMPACT.radius * scale,
-            content_opacity: COMPACT.content_opacity,
         };
         let canvas = (768, 336);
         let margin = TOP_MARGIN * scale;

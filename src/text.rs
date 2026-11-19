@@ -194,7 +194,7 @@ impl TextLayer {
         top_margin: f32,
         scale: f32,
     ) {
-        let content = state.content_opacity.clamp(0.0, 1.0);
+        let content = state.expanded_content_alpha().clamp(0.0, 1.0);
         let top = top_margin;
         let center = (size.0 as f32 * 0.5, top + state.height * 0.5);
 
@@ -712,7 +712,6 @@ mod tests {
             width: 10.0,
             height: 10.0,
             radius: 5.0,
-            content_opacity: 1.0,
         };
 
         blend_mask(

@@ -4,6 +4,8 @@ const EXPAND_DAMPING: f32 = 0.55;
 const EXPAND_RESPONSE_SECONDS: f32 = 0.28;
 const COLLAPSE_DAMPING: f32 = 0.68;
 const COLLAPSE_RESPONSE_SECONDS: f32 = 0.30;
+const HOVER_RESPONSE_SECONDS: f32 = 0.16;
+const HOVER_DAMPING: f32 = 1.0;
 pub(crate) const OVERSHOOT_MIN: f32 = 0.92;
 pub(crate) const OVERSHOOT_MAX: f32 = 1.08;
 const MAX_FRAME_DELTA_SECONDS: f32 = 0.1;
@@ -32,14 +34,12 @@ pub(crate) const COMPACT: ShapeState = ShapeState {
     width: 184.0,
     height: 54.0,
     radius: 27.0,
-    content_opacity: 0.0,
 };
 
 pub(crate) const EXPANDED: ShapeState = ShapeState {
     width: 420.0,
     height: 150.0,
     radius: 30.0,
-    content_opacity: 1.0,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -47,7 +47,41 @@ pub(crate) struct ShapeState {
     pub width: f32,
     pub height: f32,
     pub radius: f32,
-    pub content_opacity: f32,
+}
+
+impl ShapeState {
+    pub fn progress(self) -> f32 {
+        ((self.height - COMPACT.height) / (EXPANDED.height - COMPACT.height)).clamp(0.0, 1.0)
+    }
+
+    #[allow(dead_code)]
+    pub fn compact_content_alpha(self) -> f32 {
+        1.0 - smoothstep(0.10, 0.42, self.progress())
+    }
+
+    pub fn expanded_content_alpha(self) -> f32 {
+        smoothstep(0.50, 0.90, self.progress())
+    }
+
+    #[allow(dead_code)]
+    pub fn compact_lift(self) -> f32 {
+        -(1.0 - self.compact_content_alpha()) * 7.0
+    }
+
+    #[allow(dead_code)]
+    pub fn expanded_lift(self) -> f32 {
+        (1.0 - self.expanded_content_alpha()) * 10.0
+    }
+
+    #[allow(dead_code)]
+    pub fn expanded_scale(self) -> f32 {
+        0.96 + 0.04 * self.expanded_content_alpha()
+    }
+}
+
+fn smoothstep(edge0: f32, edge1: f32, value: f32) -> f32 {
+    let t = ((value - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -55,13 +89,15 @@ pub(crate) struct ShapeVelocity {
     pub width: f32,
     pub height: f32,
     pub radius: f32,
-    pub content_opacity: f32,
 }
 
 pub(crate) struct Animation {
     pub current: ShapeState,
     pub velocity: ShapeVelocity,
     pub target: ShapeState,
+    pub hover: f32,
+    hover_velocity: f32,
+    hover_target: f32,
     tuning: SpringTuning,
 }
 
@@ -76,6 +112,9 @@ impl Animation {
             current: COMPACT,
             velocity: ShapeVelocity::default(),
             target: COMPACT,
+            hover: 0.0,
+            hover_velocity: 0.0,
+            hover_target: 0.0,
             tuning,
         }
     }
@@ -90,6 +129,16 @@ impl Animation {
 
     pub fn collapse(&mut self) {
         self.target = COMPACT;
+    }
+
+    #[allow(dead_code)]
+    pub fn set_hover(&mut self, inside: bool) -> bool {
+        let target = if inside { 1.0 } else { 0.0 };
+        if (self.hover_target - target).abs() < f32::EPSILON {
+            return false;
+        }
+        self.hover_target = target;
+        true
     }
 
     /// Advances the spring by elapsed wall-clock time and returns whether it is moving.
@@ -117,16 +166,42 @@ impl Animation {
             self.integrate_axis(step, 0, omega, damping);
             self.integrate_axis(step, 1, omega, damping);
             self.integrate_axis(step, 2, omega, damping);
-            self.integrate_axis(step, 3, omega, damping);
             remaining -= step;
         }
+        self.integrate_hover(dt_seconds);
 
         if self.is_settled() {
             self.current = self.target;
             self.velocity = ShapeVelocity::default();
+            self.hover = self.hover_target;
+            self.hover_velocity = 0.0;
             false
         } else {
             true
+        }
+    }
+
+    fn integrate_hover(&mut self, dt_seconds: f32) {
+        let omega = 2.0 * PI / HOVER_RESPONSE_SECONDS;
+        let mut remaining = dt_seconds.min(MAX_FRAME_DELTA_SECONDS);
+        while remaining > 0.0 {
+            let step = remaining.min(MAX_SUBSTEP_SECONDS);
+            let acceleration = -2.0 * HOVER_DAMPING * omega * self.hover_velocity
+                - omega * omega * (self.hover - self.hover_target);
+            self.hover_velocity += acceleration * step;
+            self.hover += self.hover_velocity * step;
+            if self.hover < 0.0 {
+                self.hover = 0.0;
+                if self.hover_velocity < 0.0 {
+                    self.hover_velocity = 0.0;
+                }
+            } else if self.hover > 1.0 {
+                self.hover = 1.0;
+                if self.hover_velocity > 0.0 {
+                    self.hover_velocity = 0.0;
+                }
+            }
+            remaining -= step;
         }
     }
 
@@ -147,19 +222,12 @@ impl Animation {
                 COMPACT.height * OVERSHOOT_MIN,
                 EXPANDED.height * OVERSHOOT_MAX,
             ),
-            2 => (
+            _ => (
                 &mut self.current.radius,
                 &mut self.velocity.radius,
                 self.target.radius,
                 COMPACT.radius * OVERSHOOT_MIN,
                 EXPANDED.radius * OVERSHOOT_MAX,
-            ),
-            _ => (
-                &mut self.current.content_opacity,
-                &mut self.velocity.content_opacity,
-                self.target.content_opacity,
-                0.0,
-                1.0,
             ),
         };
 
@@ -198,15 +266,17 @@ impl Animation {
     fn is_settled(&self) -> bool {
         const POSITION_EPSILON: f32 = 0.03;
         const VELOCITY_EPSILON: f32 = 0.05;
+        const HOVER_EPSILON: f32 = 0.001;
+        const HOVER_VELOCITY_EPSILON: f32 = 0.01;
 
         (self.current.width - self.target.width).abs() < POSITION_EPSILON
             && (self.current.height - self.target.height).abs() < POSITION_EPSILON
             && (self.current.radius - self.target.radius).abs() < POSITION_EPSILON
-            && (self.current.content_opacity - self.target.content_opacity).abs() < POSITION_EPSILON
             && self.velocity.width.abs() < VELOCITY_EPSILON
             && self.velocity.height.abs() < VELOCITY_EPSILON
             && self.velocity.radius.abs() < VELOCITY_EPSILON
-            && self.velocity.content_opacity.abs() < VELOCITY_EPSILON
+            && (self.hover - self.hover_target).abs() < HOVER_EPSILON
+            && self.hover_velocity.abs() < HOVER_VELOCITY_EPSILON
     }
 }
 
@@ -251,9 +321,6 @@ mod tests {
 
         assert!((at_30_fps.current.width - at_120_fps.current.width).abs() < 0.01);
         assert!((at_30_fps.current.height - at_120_fps.current.height).abs() < 0.01);
-        assert!(
-            (at_30_fps.current.content_opacity - at_120_fps.current.content_opacity).abs() < 0.001
-        );
     }
 
     #[test]
@@ -391,5 +458,40 @@ mod tests {
         assert!(!active);
         assert_eq!(animation.current, EXPANDED);
         assert_eq!(animation.velocity, ShapeVelocity::default());
+    }
+
+    #[test]
+    fn reveal_windows_never_overlap() {
+        for i in 0..=100 {
+            let p = i as f32 / 100.0;
+            let state = super::ShapeState {
+                width: COMPACT.width,
+                height: COMPACT.height + p * (EXPANDED.height - COMPACT.height),
+                radius: COMPACT.radius,
+            };
+            assert_eq!(
+                state.compact_content_alpha() * state.expanded_content_alpha(),
+                0.0
+            );
+        }
+    }
+
+    #[test]
+    fn reveal_reaches_both_ends() {
+        assert_eq!(COMPACT.compact_content_alpha(), 1.0);
+        assert_eq!(COMPACT.expanded_content_alpha(), 0.0);
+        assert_eq!(EXPANDED.compact_content_alpha(), 0.0);
+        assert_eq!(EXPANDED.expanded_content_alpha(), 1.0);
+    }
+
+    #[test]
+    fn hover_target_change_is_reported_once_and_settles() {
+        let mut animation = Animation::new();
+        assert!(animation.set_hover(true));
+        assert!(!animation.set_hover(true));
+        for _ in 0..120 {
+            animation.advance(1.0 / 120.0);
+        }
+        assert!((animation.hover - 1.0).abs() < 0.01);
     }
 }
