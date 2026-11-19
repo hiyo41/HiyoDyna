@@ -243,7 +243,7 @@ impl Tray {
         );
         append_item(menu, MF_STRING, CMD_RESTART, "Restart");
         append_item(menu, MF_STRING, CMD_OPEN_SETTINGS, "Open settings folder");
-        append_item(menu, MF_STRING, CMD_ABOUT, "About HiyoDyna");
+        append_item(menu, MF_STRING, CMD_ABOUT, "About");
         append_item(menu, MF_SEPARATOR, 0, "");
         append_item(menu, MF_STRING, CMD_RESET, "Reset to defaults");
         append_item(menu, MF_STRING, CMD_EXIT, "Exit");

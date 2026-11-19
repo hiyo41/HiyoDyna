@@ -107,7 +107,7 @@ New-Item -ItemType Directory -Force -Path $startMenuDir | Out-Null
 $shortcut = $shell.CreateShortcut((Join-Path $startMenuDir "HiyoDyna.lnk"))
 $shortcut.TargetPath = $ExePath
 $shortcut.WorkingDirectory = $InstallDir
-$shortcut.Description = "HiyoDyna clock overlay"
+$shortcut.Description = "HiyoDyna"
 $shortcut.IconLocation = "$ExePath,0"
 $shortcut.Save()
 
@@ -115,7 +115,7 @@ $desktopShortcutPath = Join-Path ([Environment]::GetFolderPath("Desktop")) "Hiyo
 $desktopShortcut = $shell.CreateShortcut($desktopShortcutPath)
 $desktopShortcut.TargetPath = $ExePath
 $desktopShortcut.WorkingDirectory = $InstallDir
-$desktopShortcut.Description = "HiyoDyna clock overlay"
+$desktopShortcut.Description = "HiyoDyna"
 $desktopShortcut.IconLocation = "$ExePath,0"
 $desktopShortcut.Save()
 
@@ -128,7 +128,7 @@ if ($NoWatcher) {
     $watcherShortcut.TargetPath = Join-Path $env:SystemRoot "System32\wscript.exe"
     $watcherShortcut.Arguments = "`"$(Join-Path $InstallDir 'watch-update.vbs')`""
     $watcherShortcut.WorkingDirectory = $InstallDir
-    $watcherShortcut.Description = "HiyoDyna auto-update watcher"
+    $watcherShortcut.Description = "HiyoDyna"
     $watcherShortcut.Save()
 }
 

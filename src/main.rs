@@ -46,7 +46,7 @@ fn main() {
 }
 
 #[cfg(all(not(windows), not(test)))]
-compile_error!("HiyoDyna preview is a Windows-only native application.");
+compile_error!("HiyoDyna is a Windows-only application.");
 
 #[cfg(all(not(windows), test))]
 fn main() {}

@@ -85,8 +85,8 @@ pub(crate) fn run() -> Result<(), String> {
             return Err(last_error("GetModuleHandleW"));
         }
 
-        let class_name = wide("HiyoDyna.Preview");
-        let title = wide("HiyoDyna Preview");
+        let class_name = wide("HiyoDyna");
+        let title = wide("HiyoDyna");
         let class = WNDCLASSW {
             lpfnWndProc: Some(window_proc),
             hInstance: instance,
@@ -1030,7 +1030,7 @@ fn apply_tray_command(
 
 fn show_about(hwnd: HWND, text: &str) {
     let message: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
-    let title = wide("About HiyoDyna");
+    let title = wide("HiyoDyna");
     // SAFETY: hwnd is live and both wide strings are NUL-terminated.
     unsafe {
         MessageBoxW(
