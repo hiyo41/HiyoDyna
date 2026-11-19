@@ -15,6 +15,8 @@ mod render;
 #[cfg(any(windows, test))]
 mod settings;
 #[cfg(any(windows, test))]
+mod sha256;
+#[cfg(any(windows, test))]
 mod text;
 #[cfg(any(windows, test))]
 mod tray;
