@@ -407,6 +407,12 @@ unsafe extern "system" fn window_proc(
             unsafe { PostMessageW(hwnd, WM_APP_TRAY_MENU, wparam, lparam) };
             0
         }
+        WM_APP_ANIMATION_FRAME => {
+            // Modal loops (menus, message boxes) dispatch posted frames here instead of
+            // through the main loop, so the pending flag must be released here too.
+            ANIMATION_FRAME_PENDING.store(false, Ordering::Release);
+            0
+        }
         WM_MOUSEACTIVATE => MA_NOACTIVATE as LRESULT,
         WM_ERASEBKGND => 1,
         WM_CLOSE => {
@@ -1056,6 +1062,7 @@ fn wide(text: &str) -> Vec<u16> {
 mod tests {
     use super::{WM_APP_REFRESH_DISPLAY, centered_x, refresh_message_for, scale_shape};
     use crate::animation::COMPACT;
+    use std::sync::atomic::Ordering;
     use windows_sys::Win32::UI::WindowsAndMessaging::{WM_DISPLAYCHANGE, WM_DPICHANGED, WM_TIMER};
 
     #[test]
@@ -1071,6 +1078,18 @@ mod tests {
         assert_eq!(scaled.width, 276.0);
         assert_eq!(scaled.height, 81.0);
         assert_eq!(scaled.radius, 40.5);
+    }
+
+    #[test]
+    fn modal_dispatch_clears_the_pending_animation_frame() {
+        super::ANIMATION_FRAME_PENDING.store(true, Ordering::Release);
+
+        // SAFETY: this branch only clears an atomic and does not touch the null HWND.
+        unsafe {
+            super::window_proc(std::ptr::null_mut(), super::WM_APP_ANIMATION_FRAME, 0, 0);
+        }
+
+        assert!(!super::ANIMATION_FRAME_PENDING.load(Ordering::Acquire));
     }
 
     #[test]
