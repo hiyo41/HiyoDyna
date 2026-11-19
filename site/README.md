@@ -20,7 +20,7 @@ $env:PAGES_BASE="/HiyoDyna"; npm run build
 node tests/check-build.mjs
 ```
 
-`PAGES_BASE` must match the Pages path in CI; without it the site builds for `/`.
+`PAGES_BASE` must match the Pages path in CI; without it the site builds for `/`. The repository must have Pages enabled with Source = GitHub Actions before the first deploy.
 
 ## Structure
 
