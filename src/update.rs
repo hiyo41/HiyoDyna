@@ -1,11 +1,148 @@
 #![allow(dead_code)] // Wired into the message loop in Task 6.
 
+use std::fs;
+use std::path::{Path, PathBuf};
+
 use crate::settings::UpdateChannel;
 
 #[derive(Clone, Debug)]
 struct Release {
     tag: String,
     published: String,
+}
+
+#[derive(Clone, Debug)]
+struct StageManifest {
+    tag: String,
+    published: String,
+    channel: UpdateChannel,
+    sha256: String,
+}
+
+#[derive(Debug, Default, PartialEq)]
+struct UpdateState {
+    applied_tag: Option<String>,
+    applied_published: Option<String>,
+}
+
+struct ApplyPaths {
+    staged: PathBuf,
+    manifest: PathBuf,
+    installed: PathBuf,
+    state: PathBuf,
+}
+
+#[derive(Debug, PartialEq)]
+enum ApplyOutcome {
+    Applied,
+    Discarded,
+}
+
+fn stage_paths(install_dir: &Path) -> ApplyPaths {
+    ApplyPaths {
+        staged: install_dir.join("HiyoDyna.update.exe"),
+        manifest: install_dir.join("HiyoDyna.update.txt"),
+        installed: install_dir.join("HiyoDyna.exe"),
+        state: state_path().unwrap_or_else(|| install_dir.join("update-state.ini")),
+    }
+}
+
+fn state_path() -> Option<PathBuf> {
+    std::env::var_os("LOCALAPPDATA").map(|base| {
+        PathBuf::from(base)
+            .join("HiyoDyna")
+            .join("update-state.ini")
+    })
+}
+
+fn read_manifest(path: &Path) -> Option<StageManifest> {
+    parse_manifest(&fs::read_to_string(path).ok()?)
+}
+
+fn parse_manifest(text: &str) -> Option<StageManifest> {
+    let mut tag = None;
+    let mut published = None;
+    let mut channel = None;
+    let mut sha256 = None;
+    for line in text.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let value = value.trim().to_string();
+        match key.trim() {
+            "tag" => tag = Some(value),
+            "published" => published = Some(value),
+            "channel" => channel = UpdateChannel::parse(&value),
+            "sha256" => sha256 = Some(value),
+            _ => {}
+        }
+    }
+    Some(StageManifest {
+        tag: tag?,
+        published: published?,
+        channel: channel?,
+        sha256: sha256?,
+    })
+}
+
+fn write_manifest(path: &Path, manifest: &StageManifest) -> Result<(), String> {
+    let text = format!(
+        "tag={}\npublished={}\nchannel={}\nsha256={}\n",
+        manifest.tag,
+        manifest.published,
+        manifest.channel.as_str(),
+        manifest.sha256
+    );
+    fs::write(path, text).map_err(|error| format!("could not write {path:?}: {error}"))
+}
+
+fn parse_state(text: &str) -> UpdateState {
+    let mut state = UpdateState::default();
+    for line in text.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let value = value.trim();
+        if value.is_empty() {
+            continue;
+        }
+        match key.trim() {
+            "applied_tag" => state.applied_tag = Some(value.to_string()),
+            "applied_published" => state.applied_published = Some(value.to_string()),
+            _ => {}
+        }
+    }
+    state
+}
+
+fn serialize_state(state: &UpdateState) -> String {
+    let mut text = String::new();
+    if let Some(tag) = &state.applied_tag {
+        text.push_str(&format!("applied_tag={tag}\n"));
+    }
+    if let Some(published) = &state.applied_published {
+        text.push_str(&format!("applied_published={published}\n"));
+    }
+    text
+}
+
+fn read_state_from(path: &Path) -> UpdateState {
+    fs::read_to_string(path)
+        .map(|text| parse_state(&text))
+        .unwrap_or_default()
+}
+
+fn read_state() -> UpdateState {
+    state_path()
+        .map(|path| read_state_from(&path))
+        .unwrap_or_default()
+}
+
+fn write_state(path: &Path, state: &UpdateState) {
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(path, serialize_state(state));
 }
 
 fn repo_slug() -> &'static str {
@@ -208,6 +345,164 @@ fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
     era * 146_097 + day_of_era - 719_468
 }
 
+fn old_path(installed: &Path) -> PathBuf {
+    let mut path = installed.as_os_str().to_os_string();
+    path.push(".old");
+    PathBuf::from(path)
+}
+
+fn apply_staged_update(
+    paths: &ApplyPaths,
+    current_channel: UpdateChannel,
+    launch: &mut dyn FnMut(&Path) -> Result<(), String>,
+) -> Result<ApplyOutcome, String> {
+    let manifest = read_manifest(&paths.manifest).ok_or("staged update has no valid manifest")?;
+    let actual = crate::sha256::to_hex(&crate::sha256::hash_file(&paths.staged)?);
+    if !actual.eq_ignore_ascii_case(manifest.sha256.trim()) {
+        discard_stage(paths);
+        return Err("staged update failed its SHA-256 check".to_string());
+    }
+
+    let state = read_state_from(&paths.state);
+    let applied_time = state.applied_published.as_deref().and_then(parse_rfc3339);
+    let installed_time = fs::metadata(&paths.installed)
+        .ok()
+        .and_then(|metadata| metadata.modified().ok())
+        .and_then(epoch_seconds);
+    let release = Release {
+        tag: manifest.tag.clone(),
+        published: manifest.published.clone(),
+    };
+    let outdated = !should_apply(
+        &release,
+        state.applied_tag.as_deref(),
+        applied_time,
+        installed_time,
+        option_env!("HIYODyna_BUILD_TAG"),
+    );
+    if manifest.channel != current_channel || outdated {
+        discard_stage(paths);
+        return Ok(ApplyOutcome::Discarded);
+    }
+
+    let old = old_path(&paths.installed);
+    let _ = fs::remove_file(&old);
+    if !paths.installed.exists() && old.exists() {
+        fs::rename(&old, &paths.installed)
+            .map_err(|error| format!("could not restore the previous exe: {error}"))?;
+    }
+    let had_installed = paths.installed.exists();
+    if had_installed {
+        fs::rename(&paths.installed, &old)
+            .map_err(|error| format!("could not back up the installed exe: {error}"))?;
+    }
+    fs::rename(&paths.staged, &paths.installed).map_err(|error| {
+        if had_installed {
+            let _ = fs::rename(&old, &paths.installed);
+        }
+        format!("could not install the staged exe: {error}")
+    })?;
+
+    if let Err(error) = launch(&paths.installed) {
+        let _ = fs::rename(&paths.installed, &paths.staged);
+        if had_installed {
+            fs::rename(&old, &paths.installed)
+                .map_err(|restore| format!("could not restore the previous exe: {restore}"))?;
+        }
+        let _ = launch(&paths.installed);
+        return Err(format!("could not launch the updated exe: {error}"));
+    }
+
+    write_state(
+        &paths.state,
+        &UpdateState {
+            applied_tag: Some(manifest.tag.clone()),
+            applied_published: Some(manifest.published.clone()),
+        },
+    );
+    let _ = fs::remove_file(&paths.manifest);
+    Ok(ApplyOutcome::Applied)
+}
+
+fn discard_stage(paths: &ApplyPaths) {
+    let _ = fs::remove_file(&paths.staged);
+    let _ = fs::remove_file(&paths.manifest);
+}
+
+fn epoch_seconds(time: std::time::SystemTime) -> Option<i64> {
+    time.duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|elapsed| elapsed.as_secs() as i64)
+}
+
+fn stage_bytes(
+    install_dir: &Path,
+    bytes: &[u8],
+    manifest: &StageManifest,
+) -> Result<ApplyPaths, String> {
+    if !install_dir.is_dir() {
+        return Err(format!(
+            "install directory {install_dir:?} does not exist or is not writable"
+        ));
+    }
+    let actual = crate::sha256::to_hex(&crate::sha256::hash_bytes(bytes)?);
+    if !actual.eq_ignore_ascii_case(manifest.sha256.trim()) {
+        return Err(format!("SHA-256 mismatch for {}", manifest.tag));
+    }
+
+    let paths = stage_paths(install_dir);
+    let part = install_dir.join("HiyoDyna.update.part");
+    let result = (|| {
+        let _ = fs::remove_file(&paths.staged);
+        let _ = fs::remove_file(&paths.manifest);
+        fs::write(&part, bytes).map_err(|error| format!("could not write {part:?}: {error}"))?;
+        fs::rename(&part, &paths.staged)
+            .map_err(|error| format!("could not stage the update: {error}"))?;
+        write_manifest(&paths.manifest, manifest)
+    })();
+    if let Err(error) = result {
+        let _ = fs::remove_file(&part);
+        discard_stage(&paths);
+        return Err(error);
+    }
+    Ok(paths)
+}
+
+fn download_and_stage(release: &Release, channel: UpdateChannel) -> Result<ApplyPaths, String> {
+    let install_dir = std::env::current_exe()
+        .map_err(|error| format!("could not locate the running exe: {error}"))?
+        .parent()
+        .ok_or("the running exe has no parent directory")?
+        .to_path_buf();
+    let base = format!(
+        "https://github.com/{}/releases/download/{}",
+        repo_slug(),
+        release.tag
+    );
+    let hash = crate::net::get(&format!("{base}/HiyoDyna.exe.sha256"), 1024)
+        .map_err(|error| format!("could not download the update hash: {error}"))?;
+    let hash = String::from_utf8(hash)
+        .map_err(|error| format!("the update hash is not UTF-8: {error}"))?;
+    let sha256 = hash
+        .split_whitespace()
+        .next()
+        .ok_or("the update hash is empty")?
+        .to_string();
+    if sha256.len() != 64 || !sha256.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(format!("the update hash is invalid: {sha256}"));
+    }
+
+    let bytes = crate::net::get(&format!("{base}/HiyoDyna.exe"), 64 * 1024 * 1024)
+        .map_err(|error| format!("could not download the update: {error}"))?;
+    let manifest = StageManifest {
+        tag: release.tag.clone(),
+        published: release.published.clone(),
+        channel,
+        sha256,
+    };
+    stage_bytes(&install_dir, &bytes, &manifest)
+}
+
 #[cfg(test)]
 mod tests {
     use crate::settings::UpdateChannel;
@@ -218,6 +513,182 @@ mod tests {
 <entry><updated>2026-11-18T08:07:44Z</updated>
 <link rel="alternate" href="https://github.com/hiyo41/HiyoDyna/releases/tag/pre-1"/></entry>
 </feed>"#;
+
+    fn unique_temp_dir(label: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("hiyodyna-{label}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn test_stage(
+        dir: &std::path::Path,
+        installed: &[u8],
+        staged: &[u8],
+        channel: UpdateChannel,
+        tag: &str,
+    ) -> super::ApplyPaths {
+        let paths = super::ApplyPaths {
+            staged: dir.join("HiyoDyna.update.exe"),
+            manifest: dir.join("HiyoDyna.update.txt"),
+            installed: dir.join("installed.exe"),
+            state: dir.join("update-state.ini"),
+        };
+        std::fs::write(&paths.installed, installed).unwrap();
+        std::fs::write(&paths.staged, staged).unwrap();
+        let manifest = super::StageManifest {
+            tag: tag.into(),
+            published: "2099-01-01T00:00:00Z".into(),
+            channel,
+            sha256: crate::sha256::to_hex(&crate::sha256::hash_bytes(staged).unwrap()),
+        };
+        super::write_manifest(&paths.manifest, &manifest).unwrap();
+        paths
+    }
+
+    #[test]
+    fn apply_stages_successfully() {
+        let dir = unique_temp_dir("apply-ok");
+        let paths = test_stage(&dir, b"old", b"new", UpdateChannel::Build, "pre-2");
+        let mut calls = Vec::new();
+        let outcome = super::apply_staged_update(&paths, UpdateChannel::Build, &mut |path| {
+            calls.push(path.to_path_buf());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(outcome, super::ApplyOutcome::Applied);
+        assert_eq!(std::fs::read(&paths.installed).unwrap(), b"new");
+        assert_eq!(
+            std::fs::read(format!("{}.old", paths.installed.display())).unwrap(),
+            b"old"
+        );
+        assert!(!paths.staged.exists());
+        assert!(!paths.manifest.exists());
+        assert!(
+            std::fs::read_to_string(&paths.state)
+                .unwrap()
+                .contains("applied_tag=pre-2")
+        );
+        assert_eq!(calls, vec![paths.installed.clone()]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn discards_a_staged_update_from_another_channel() {
+        let dir = unique_temp_dir("apply-channel");
+        let paths = test_stage(&dir, b"old", b"new", UpdateChannel::Stable, "pre-2");
+        let mut calls = 0;
+        let outcome = super::apply_staged_update(&paths, UpdateChannel::Build, &mut |_| {
+            calls += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(outcome, super::ApplyOutcome::Discarded);
+        assert_eq!(calls, 0);
+        assert_eq!(std::fs::read(&paths.installed).unwrap(), b"old");
+        assert!(!paths.staged.exists());
+        assert!(!paths.manifest.exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn restores_the_previous_exe_when_launch_fails() {
+        let dir = unique_temp_dir("apply-rollback");
+        let paths = test_stage(&dir, b"old", b"new", UpdateChannel::Build, "pre-2");
+        let mut calls = Vec::new();
+        let result = super::apply_staged_update(&paths, UpdateChannel::Build, &mut |path| {
+            calls.push(path.to_path_buf());
+            if calls.len() == 1 {
+                Err("boom".into())
+            } else {
+                Ok(())
+            }
+        });
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&paths.installed).unwrap(), b"old");
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0], paths.installed);
+        assert_eq!(calls[1], paths.installed);
+        assert!(!paths.state.exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn rejects_a_staged_update_with_a_bad_hash() {
+        let dir = unique_temp_dir("apply-bad-hash");
+        let paths = test_stage(&dir, b"old", b"new", UpdateChannel::Build, "pre-2");
+        std::fs::write(&paths.staged, b"tampered").unwrap();
+        let mut calls = 0;
+        let result = super::apply_staged_update(&paths, UpdateChannel::Build, &mut |_| {
+            calls += 1;
+            Ok(())
+        });
+        assert!(result.is_err());
+        assert_eq!(calls, 0);
+        assert_eq!(std::fs::read(&paths.installed).unwrap(), b"old");
+        assert!(!paths.staged.exists());
+        assert!(!paths.manifest.exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn stage_bytes_writes_a_verified_update() {
+        let dir = unique_temp_dir("stage-ok");
+        let manifest = super::StageManifest {
+            tag: "pre-2".into(),
+            published: "2026-11-19T08:07:44Z".into(),
+            channel: UpdateChannel::Build,
+            sha256: crate::sha256::to_hex(&crate::sha256::hash_bytes(b"new").unwrap()),
+        };
+        let paths = super::stage_bytes(&dir, b"new", &manifest).unwrap();
+        assert_eq!(std::fs::read(&paths.staged).unwrap(), b"new");
+        assert!(paths.manifest.exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn stage_bytes_rejects_a_hash_mismatch_and_missing_directory() {
+        let dir = unique_temp_dir("stage-bad");
+        let bad = super::StageManifest {
+            tag: "pre-2".into(),
+            published: "2026-11-19T08:07:44Z".into(),
+            channel: UpdateChannel::Build,
+            sha256: "00".repeat(32),
+        };
+        assert!(super::stage_bytes(&dir, b"new", &bad).is_err());
+        assert!(!dir.join("HiyoDyna.update.exe").exists());
+        assert!(!dir.join("HiyoDyna.update.part").exists());
+
+        let good = super::StageManifest {
+            sha256: crate::sha256::to_hex(&crate::sha256::hash_bytes(b"new").unwrap()),
+            ..bad
+        };
+        assert!(super::stage_bytes(&dir.join("missing"), b"new", &good).is_err());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn state_and_manifest_round_trip() {
+        let state = super::UpdateState {
+            applied_tag: Some("pre-2".into()),
+            applied_published: Some("2026-11-19T08:07:44Z".into()),
+        };
+        assert_eq!(super::parse_state(&super::serialize_state(&state)), state);
+
+        let manifest = super::StageManifest {
+            tag: "pre-2".into(),
+            published: "2026-11-19T08:07:44Z".into(),
+            channel: UpdateChannel::Build,
+            sha256: "abc".into(),
+        };
+        let path =
+            std::env::temp_dir().join(format!("hiyodyna-manifest-{}.txt", std::process::id()));
+        super::write_manifest(&path, &manifest).unwrap();
+        let parsed = super::read_manifest(&path).unwrap();
+        assert_eq!(parsed.tag, "pre-2");
+        assert_eq!(parsed.channel, UpdateChannel::Build);
+        let _ = std::fs::remove_file(path);
+    }
 
     #[test]
     fn parses_atom_entries() {

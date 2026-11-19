@@ -1,5 +1,3 @@
-#![allow(dead_code)] // Used by the updater; remove once it is wired.
-
 use std::ffi::c_void;
 use std::mem::size_of;
 use std::ptr::null;

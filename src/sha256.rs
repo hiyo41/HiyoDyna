@@ -1,5 +1,3 @@
-#![allow(dead_code)] // Used by the updater; remove once it is wired.
-
 use std::fmt::Write as _;
 use std::path::Path;
 use std::ptr::null;
