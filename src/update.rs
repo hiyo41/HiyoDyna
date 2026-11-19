@@ -1,9 +1,19 @@
 #![allow(dead_code)] // Wired into the message loop in Task 6.
 
 use std::fs;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::settings::UpdateChannel;
+use windows_sys::Win32::Foundation::{CloseHandle, HWND, SYSTEMTIME, WAIT_OBJECT_0};
+use windows_sys::Win32::System::SystemInformation::GetLocalTime;
+use windows_sys::Win32::System::Threading::{
+    OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
+};
+use windows_sys::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_APP};
+
+use crate::settings::{Settings, UpdateChannel};
 
 #[derive(Clone, Debug)]
 struct Release {
@@ -503,6 +513,362 @@ fn download_and_stage(release: &Release, channel: UpdateChannel) -> Result<Apply
     stage_bytes(&install_dir, &bytes, &manifest)
 }
 
+pub(crate) const WM_APP_UPDATE_READY: u32 = WM_APP + 5;
+pub(crate) const WM_APP_UPDATE_STATUS: u32 = WM_APP + 6;
+pub(crate) const UPDATE_INTERVAL_MILLISECONDS: u32 = 30 * 60 * 1000;
+
+static CHECK_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+static UPDATE_READY: AtomicBool = AtomicBool::new(false);
+static APP_EXITING: AtomicBool = AtomicBool::new(false);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum UpdateResult {
+    UpToDate = 0,
+    NoRelease = 1,
+    Failed = 2,
+}
+
+enum CheckOutcome {
+    Ready,
+    Status(UpdateResult),
+}
+
+#[derive(Debug, PartialEq)]
+enum PendingAction {
+    None,
+    Discard,
+    Apply,
+}
+
+pub(crate) fn request_check(hwnd: HWND, channel: UpdateChannel, manual: bool) {
+    if CHECK_IN_FLIGHT.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let hwnd_value = hwnd as isize;
+    let spawned = std::thread::Builder::new()
+        .name("hiyodyna-update-check".into())
+        .spawn(move || {
+            let outcome = perform_check(channel);
+            match outcome {
+                CheckOutcome::Ready => {
+                    signal_ready();
+                    unsafe {
+                        PostMessageW(hwnd_value as HWND, WM_APP_UPDATE_READY, 0, 0);
+                    }
+                }
+                CheckOutcome::Status(result) if manual => unsafe {
+                    PostMessageW(hwnd_value as HWND, WM_APP_UPDATE_STATUS, 1, result as isize);
+                },
+                CheckOutcome::Status(_) => {}
+            }
+            CHECK_IN_FLIGHT.store(false, Ordering::SeqCst);
+        });
+    if spawned.is_err() {
+        log("could not start the update check thread");
+        CHECK_IN_FLIGHT.store(false, Ordering::SeqCst);
+    }
+}
+
+pub(crate) fn take_ready() -> bool {
+    UPDATE_READY.swap(false, Ordering::SeqCst)
+}
+
+pub(crate) fn mark_app_exiting() {
+    APP_EXITING.store(true, Ordering::SeqCst);
+}
+
+pub(crate) fn discard_staged_for(channel: UpdateChannel) {
+    if pending_action(channel) == PendingAction::Discard
+        && let Some(install_dir) = install_dir()
+    {
+        discard_stage(&stage_paths(&install_dir));
+    }
+}
+
+pub(crate) fn is_apply_helper_invocation() -> bool {
+    std::env::args_os()
+        .nth(1)
+        .is_some_and(|argument| argument.to_string_lossy() == "--apply-update")
+}
+
+pub(crate) fn run_apply_helper() {
+    let Some(pid) = std::env::args_os()
+        .nth(2)
+        .and_then(|argument| argument.to_string_lossy().parse::<u32>().ok())
+    else {
+        log("the update helper was started without a process id");
+        return;
+    };
+    let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+    if handle.is_null() {
+        log(&format!("could not open the previous process {pid}"));
+        return;
+    }
+    let wait = unsafe { WaitForSingleObject(handle, 30_000) };
+    unsafe { CloseHandle(handle) };
+    if wait != WAIT_OBJECT_0 {
+        log("timed out waiting for HiyoDyna to exit");
+        return;
+    }
+
+    let Some(install_dir) = install_dir() else {
+        log("the update helper could not locate its install directory");
+        return;
+    };
+    let channel = Settings::load().update;
+    let paths = stage_paths(&install_dir);
+    let mut launch = |path: &Path| -> Result<(), String> {
+        Command::new(path)
+            .spawn()
+            .map(|_| ())
+            .map_err(|error| format!("{error}"))
+    };
+    match apply_staged_update(&paths, channel, &mut launch) {
+        Ok(ApplyOutcome::Applied) => log("applied the staged update"),
+        Ok(ApplyOutcome::Discarded) => {
+            log("discarded the staged update");
+            launch_installed(&paths.installed);
+        }
+        Err(error) => {
+            log(&format!("could not apply the staged update: {error}"));
+            launch_installed(&paths.installed);
+        }
+    }
+}
+
+pub(crate) fn apply_pending_update() -> bool {
+    let Some(exe) = std::env::current_exe().ok() else {
+        return false;
+    };
+    if is_dev_build_path(&exe) {
+        return false;
+    }
+    let channel = Settings::load().update;
+    match pending_action(channel) {
+        PendingAction::None => false,
+        PendingAction::Discard => {
+            discard_staged_for(channel);
+            false
+        }
+        PendingAction::Apply => {
+            match Command::new(&exe)
+                .arg("--apply-update")
+                .arg(std::process::id().to_string())
+                .spawn()
+            {
+                Ok(_) => true,
+                Err(error) => {
+                    log(&format!(
+                        "could not start the update helper at startup: {error}"
+                    ));
+                    false
+                }
+            }
+        }
+    }
+}
+
+pub(crate) fn cleanup_old_binary() {
+    let Some(exe) = std::env::current_exe().ok() else {
+        return;
+    };
+    let _ = fs::remove_file(old_path(&exe));
+    let Some(install_dir) = exe.parent() else {
+        return;
+    };
+    let paths = stage_paths(install_dir);
+    let _ = fs::remove_file(install_dir.join("HiyoDyna.update.part"));
+    if !paths.staged.exists() {
+        let _ = fs::remove_file(&paths.manifest);
+    }
+}
+
+pub(crate) fn applied_tag() -> Option<String> {
+    read_state()
+        .applied_tag
+        .or_else(|| option_env!("HIYODyna_BUILD_TAG").map(std::string::ToString::to_string))
+}
+
+pub(crate) fn log_path() -> String {
+    std::env::var_os("LOCALAPPDATA")
+        .map(|base| {
+            PathBuf::from(base)
+                .join("HiyoDyna")
+                .join("auto-update.log")
+                .display()
+                .to_string()
+        })
+        .unwrap_or_else(|| "auto-update.log".to_string())
+}
+
+pub(crate) fn log(message: &str) {
+    let path = log_path();
+    let path = Path::new(&path);
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if fs::metadata(path).is_ok_and(|metadata| metadata.len() > 1024 * 1024) {
+        let old = path.with_extension("log.old");
+        let _ = fs::remove_file(&old);
+        let _ = fs::rename(path, old);
+    }
+    let line = format!("[{}] {message}\n", timestamp());
+    if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = file.write_all(line.as_bytes());
+    }
+}
+
+fn perform_check(channel: UpdateChannel) -> CheckOutcome {
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(error) => {
+            log(&format!("could not locate the running exe: {error}"));
+            return CheckOutcome::Status(UpdateResult::Failed);
+        }
+    };
+    if is_dev_build_path(&exe) {
+        return CheckOutcome::Status(UpdateResult::UpToDate);
+    }
+
+    let release = match select_release(channel) {
+        Ok(Some(release)) => release,
+        Ok(None) => {
+            log(&format!("no {} release is available", channel.label()));
+            return CheckOutcome::Status(UpdateResult::NoRelease);
+        }
+        Err(error) => {
+            log(&format!("the {} check failed: {error}", channel.label()));
+            return CheckOutcome::Status(UpdateResult::Failed);
+        }
+    };
+
+    let state = read_state();
+    let applied_time = state.applied_published.as_deref().and_then(parse_rfc3339);
+    let installed_time = fs::metadata(&exe)
+        .ok()
+        .and_then(|metadata| metadata.modified().ok())
+        .and_then(epoch_seconds);
+    if !should_apply(
+        &release,
+        state.applied_tag.as_deref(),
+        applied_time,
+        installed_time,
+        option_env!("HIYODyna_BUILD_TAG"),
+    ) {
+        log(&format!(
+            "{} is up to date ({})",
+            channel.label(),
+            release.tag
+        ));
+        return CheckOutcome::Status(UpdateResult::UpToDate);
+    }
+
+    log(&format!(
+        "downloading {} from the {} channel",
+        release.tag,
+        channel.label()
+    ));
+    let paths = match download_and_stage(&release, channel) {
+        Ok(paths) => paths,
+        Err(error) => {
+            log(&format!("could not download {}: {error}", release.tag));
+            return CheckOutcome::Status(UpdateResult::Failed);
+        }
+    };
+    if APP_EXITING.load(Ordering::SeqCst) {
+        discard_stage(&paths);
+        log("discarded the staged update because HiyoDyna is exiting");
+        return CheckOutcome::Status(UpdateResult::UpToDate);
+    }
+
+    match Command::new(&exe)
+        .arg("--apply-update")
+        .arg(std::process::id().to_string())
+        .spawn()
+    {
+        Ok(_) => {
+            log(&format!(
+                "{} is staged; restarting to apply it",
+                release.tag
+            ));
+            CheckOutcome::Ready
+        }
+        Err(error) => {
+            log(&format!("could not start the update helper: {error}"));
+            CheckOutcome::Status(UpdateResult::Failed)
+        }
+    }
+}
+
+fn pending_action(channel: UpdateChannel) -> PendingAction {
+    let Some(install_dir) = install_dir() else {
+        return PendingAction::None;
+    };
+    let paths = stage_paths(&install_dir);
+    let stage = read_manifest(&paths.manifest);
+    pending_action_from(paths.staged.is_file(), stage.as_ref(), channel)
+}
+
+fn pending_action_from(
+    staged_exists: bool,
+    stage: Option<&StageManifest>,
+    channel: UpdateChannel,
+) -> PendingAction {
+    if !staged_exists {
+        return PendingAction::None;
+    }
+    match stage {
+        Some(stage) if stage.channel == channel => PendingAction::Apply,
+        _ => PendingAction::Discard,
+    }
+}
+
+fn install_dir() -> Option<PathBuf> {
+    std::env::current_exe()
+        .ok()?
+        .parent()
+        .map(Path::to_path_buf)
+}
+
+fn is_dev_build_path(path: &Path) -> bool {
+    let mut components = path.components().peekable();
+    while let Some(component) = components.next() {
+        if component
+            .as_os_str()
+            .to_string_lossy()
+            .eq_ignore_ascii_case("target")
+            && let Some(next) = components.peek()
+        {
+            let next = next.as_os_str().to_string_lossy();
+            if next.eq_ignore_ascii_case("debug") || next.eq_ignore_ascii_case("release") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn launch_installed(path: &Path) {
+    if path.is_file()
+        && let Err(error) = Command::new(path).spawn()
+    {
+        log(&format!("could not relaunch HiyoDyna: {error}"));
+    }
+}
+
+fn signal_ready() {
+    UPDATE_READY.store(true, Ordering::SeqCst);
+}
+
+fn timestamp() -> String {
+    let mut time = SYSTEMTIME::default();
+    unsafe { GetLocalTime(&mut time) };
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+        time.wYear, time.wMonth, time.wDay, time.wHour, time.wMinute, time.wSecond
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use crate::settings::UpdateChannel;
@@ -802,5 +1168,55 @@ mod tests {
             "v0.0.1-3"
         );
         assert_eq!(super::stable_candidate(None, &atom).unwrap().tag, "pre-2");
+    }
+
+    #[test]
+    fn rejects_cargo_target_executables() {
+        assert!(super::is_dev_build_path(std::path::Path::new(
+            r"C:\work\HiyoDyna\target\release\hiyodyna.exe"
+        )));
+        assert!(super::is_dev_build_path(std::path::Path::new(
+            r"C:\work\HiyoDyna\target\debug\deps\test.exe"
+        )));
+        assert!(!super::is_dev_build_path(std::path::Path::new(
+            r"C:\Users\me\AppData\Local\Programs\HiyoDyna\HiyoDyna.exe"
+        )));
+    }
+
+    #[test]
+    fn pending_action_handles_missing_mismatch_and_valid_stage() {
+        let build = super::StageManifest {
+            tag: "pre-2".into(),
+            published: "2026-11-19T08:07:44Z".into(),
+            channel: UpdateChannel::Build,
+            sha256: "abc".into(),
+        };
+        let stable = super::StageManifest {
+            channel: UpdateChannel::Stable,
+            ..build.clone()
+        };
+        assert_eq!(
+            super::pending_action_from(false, None, UpdateChannel::Build),
+            super::PendingAction::None
+        );
+        assert_eq!(
+            super::pending_action_from(true, None, UpdateChannel::Build),
+            super::PendingAction::Discard
+        );
+        assert_eq!(
+            super::pending_action_from(true, Some(&stable), UpdateChannel::Build),
+            super::PendingAction::Discard
+        );
+        assert_eq!(
+            super::pending_action_from(true, Some(&build), UpdateChannel::Build),
+            super::PendingAction::Apply
+        );
+    }
+
+    #[test]
+    fn ready_flag_is_taken_once() {
+        super::signal_ready();
+        assert!(super::take_ready());
+        assert!(!super::take_ready());
     }
 }

@@ -31,6 +31,10 @@ mod window;
 
 #[cfg(windows)]
 fn main() {
+    if update::is_apply_helper_invocation() {
+        update::run_apply_helper();
+        return;
+    }
     if let Err(error) = window::run() {
         eprintln!("HiyoDyna could not start: {error}");
         let message: Vec<u16> = format!("HiyoDyna could not start: {error}")

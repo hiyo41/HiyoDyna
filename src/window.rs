@@ -38,6 +38,7 @@ use crate::render::{RenderParams, render_frame_with_margin};
 use crate::settings::Settings;
 use crate::text::{TextLayer, TextParams};
 use crate::tray::{TRAY_CALLBACK_MESSAGE, Tray, TrayCommand};
+use crate::update;
 
 const CANVAS_WIDTH: f32 = 512.0;
 const CANVAS_HEIGHT: f32 = 224.0;
@@ -79,6 +80,9 @@ pub(crate) fn run() -> Result<(), String> {
             return Ok(());
         }
         let _instance_guard = InstanceGuard(instance_mutex);
+        if update::apply_pending_update() {
+            return Ok(());
+        }
 
         let instance = GetModuleHandleW(null());
         if instance.is_null() {
@@ -182,6 +186,7 @@ fn run_loop(hwnd: HWND) -> Result<bool, String> {
             None
         }
     };
+    update::cleanup_old_binary();
     let mut message = MSG::default();
     loop {
         // At rest the message loop sleeps between input, display and clock messages.

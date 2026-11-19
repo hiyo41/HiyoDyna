@@ -228,7 +228,6 @@ impl BouncePreset {
 }
 
 impl UpdateChannel {
-    #[allow(dead_code)] // Used by the tray menu once it is wired.
     pub fn label(self) -> &'static str {
         match self {
             Self::Build => "Build",
