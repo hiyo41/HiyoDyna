@@ -25,6 +25,12 @@ pub(crate) enum AccentPreset {
     Mint,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum UpdateChannel {
+    Build,
+    Stable,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Settings {
     pub motion: MotionPreset,
@@ -34,6 +40,7 @@ pub(crate) struct Settings {
     pub clock: ClockFormat,
     pub accent: AccentPreset,
     pub show_seconds: bool,
+    pub update: UpdateChannel,
 }
 
 impl Default for Settings {
@@ -46,6 +53,7 @@ impl Default for Settings {
             clock: ClockFormat::TwentyFourHour,
             accent: AccentPreset::Ice,
             show_seconds: true,
+            update: UpdateChannel::Build,
         }
     }
 }
@@ -78,8 +86,16 @@ impl Settings {
         self.accent.bgra()
     }
 
+    #[cfg(test)]
     pub fn parse(text: &str) -> Self {
-        let mut settings = Self::default();
+        Self::parse_with_default(text, UpdateChannel::Build)
+    }
+
+    pub fn parse_with_default(text: &str, update: UpdateChannel) -> Self {
+        let mut settings = Self {
+            update,
+            ..Self::default()
+        };
 
         for line in text.lines() {
             let Some((key, value)) = line.split_once('=') else {
@@ -122,6 +138,11 @@ impl Settings {
                     "off" => settings.show_seconds = false,
                     _ => {}
                 },
+                "update" => {
+                    if let Some(update) = UpdateChannel::parse(value) {
+                        settings.update = update;
+                    }
+                }
                 _ => {}
             }
         }
@@ -131,7 +152,7 @@ impl Settings {
 
     pub fn serialize(&self) -> String {
         format!(
-            "motion={}\nbounce={}\nshadow={}\ntop_gap={}\nclock={}\naccent={}\nseconds={}\n",
+            "motion={}\nbounce={}\nshadow={}\ntop_gap={}\nclock={}\naccent={}\nseconds={}\nupdate={}\n",
             self.motion.as_str(),
             self.bounce.as_str(),
             if self.shadow { "soft" } else { "off" },
@@ -141,15 +162,20 @@ impl Settings {
                 ClockFormat::TwelveHour => "12",
             },
             self.accent.as_str(),
-            if self.show_seconds { "on" } else { "off" }
+            if self.show_seconds { "on" } else { "off" },
+            self.update.as_str()
         )
     }
 
     pub fn load() -> Self {
+        let default_update = default_update_channel();
         config_path()
             .and_then(|path| fs::read_to_string(path).ok())
-            .map(|text| Self::parse(&text))
-            .unwrap_or_default()
+            .map(|text| Self::parse_with_default(&text, default_update))
+            .unwrap_or_else(|| Self {
+                update: default_update,
+                ..Self::default()
+            })
     }
 
     pub fn save(&self) {
@@ -199,6 +225,47 @@ impl BouncePreset {
             _ => None,
         }
     }
+}
+
+impl UpdateChannel {
+    #[allow(dead_code)] // Used by the tray menu once it is wired.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Build => "Build",
+            Self::Stable => "Stable",
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Build => "build",
+            Self::Stable => "stable",
+        }
+    }
+
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value {
+            "build" => Some(Self::Build),
+            "stable" => Some(Self::Stable),
+            _ => None,
+        }
+    }
+}
+
+fn default_update_channel_from(has_install_json: bool) -> UpdateChannel {
+    if has_install_json {
+        UpdateChannel::Build
+    } else {
+        UpdateChannel::Stable
+    }
+}
+
+fn default_update_channel() -> UpdateChannel {
+    let installed = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join("install.json").exists()))
+        .unwrap_or(false);
+    default_update_channel_from(installed)
 }
 
 impl AccentPreset {
@@ -252,7 +319,7 @@ pub(crate) fn config_path() -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{AccentPreset, BouncePreset, MotionPreset, Settings};
+    use super::{AccentPreset, BouncePreset, MotionPreset, Settings, UpdateChannel};
     use crate::clock::ClockFormat;
 
     #[test]
@@ -301,6 +368,7 @@ mod tests {
             clock: ClockFormat::TwelveHour,
             accent: AccentPreset::Mint,
             show_seconds: false,
+            update: UpdateChannel::Stable,
         };
 
         let parsed = Settings::parse(&original.serialize());
@@ -386,6 +454,35 @@ mod tests {
         assert!(!parsed.show_seconds);
         assert!(parsed.serialize().contains("accent=mint"));
         assert!(parsed.serialize().contains("seconds=off"));
+    }
+
+    #[test]
+    fn parses_and_serializes_update_channel() {
+        let parsed = Settings::parse("update=stable\n");
+        assert_eq!(parsed.update, UpdateChannel::Stable);
+        assert!(parsed.serialize().contains("update=stable"));
+    }
+
+    #[test]
+    fn old_settings_files_use_the_supplied_update_default() {
+        let parsed = Settings::parse_with_default("motion=fast\n", UpdateChannel::Stable);
+        assert_eq!(parsed.update, UpdateChannel::Stable);
+        assert_eq!(
+            Settings::parse("motion=fast\n").update,
+            UpdateChannel::Build
+        );
+    }
+
+    #[test]
+    fn setup_installs_default_to_build_and_portable_copies_to_stable() {
+        assert_eq!(
+            super::default_update_channel_from(true),
+            UpdateChannel::Build
+        );
+        assert_eq!(
+            super::default_update_channel_from(false),
+            UpdateChannel::Stable
+        );
     }
 
     #[test]
