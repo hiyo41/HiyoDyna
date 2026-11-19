@@ -1,0 +1,16 @@
+---
+interface Props {
+  class?: string;
+}
+
+const { class: className = 'button button--primary' } = Astro.props;
+const releases = 'https://github.com/hiyo41/HiyoDyna/releases';
+---
+
+<a class={className} href={releases} data-download>Download for Windows</a>
+
+<script>
+  import { initDownload } from '../scripts/download';
+
+  initDownload();
+</script>
