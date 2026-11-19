@@ -123,13 +123,19 @@ pub(crate) fn run() -> Result<(), String> {
             DestroyWindow(hwnd);
         }
         UnregisterClassW(class_name.as_ptr(), instance);
-        result
+        let restart_requested = result?;
+        drop(_instance_guard);
+        if restart_requested && let Ok(executable) = std::env::current_exe() {
+            let _ = std::process::Command::new(executable).spawn();
+        }
+        Ok(())
     }
 }
 
-fn run_loop(hwnd: HWND) -> Result<(), String> {
+fn run_loop(hwnd: HWND) -> Result<bool, String> {
     let mut scale = window_scale(hwnd);
     let mut settings = Settings::load();
+    let mut restart_requested = false;
     let mut clock = ClockSnapshot::now();
     let mut surface = Surface::new(canvas_size(scale), scale)?;
     let mut animation = Animation::new_with_tuning(settings.tuning());
@@ -184,7 +190,7 @@ fn run_loop(hwnd: HWND) -> Result<(), String> {
             return Err(last_error("GetMessageW"));
         }
         if received == 0 {
-            return Ok(());
+            return Ok(restart_requested);
         }
 
         match message.message {
@@ -228,6 +234,7 @@ fn run_loop(hwnd: HWND) -> Result<(), String> {
                     scale,
                     &mut position,
                     &clock,
+                    &mut restart_requested,
                 )?;
             }
             message_id
@@ -371,6 +378,7 @@ fn run_loop(hwnd: HWND) -> Result<(), String> {
                         scale,
                         &mut position,
                         &clock,
+                        &mut restart_requested,
                     )?;
                 }
             }
@@ -899,6 +907,7 @@ fn show_settings_menu(
     scale: f32,
     position: &mut POINT,
     clock: &ClockSnapshot,
+    restart_requested: &mut bool,
 ) -> Result<(), String> {
     let Some(tray) = tray else {
         return Ok(());
@@ -916,6 +925,7 @@ fn show_settings_menu(
         scale,
         position,
         clock,
+        restart_requested,
     )
 }
 
@@ -930,6 +940,7 @@ fn apply_tray_command(
     scale: f32,
     position: &mut POINT,
     clock: &ClockSnapshot,
+    restart_requested: &mut bool,
 ) -> Result<(), String> {
     match command {
         TrayCommand::Motion(motion) => settings.motion = motion,
@@ -946,9 +957,7 @@ fn apply_tray_command(
             return Ok(());
         }
         TrayCommand::Restart => {
-            if let Ok(executable) = std::env::current_exe() {
-                let _ = std::process::Command::new(executable).spawn();
-            }
+            *restart_requested = true;
             unsafe { PostMessageW(hwnd, WM_CLOSE, 0, 0) };
             return Ok(());
         }
