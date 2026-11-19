@@ -40,13 +40,14 @@ Body and secondary text pass AA on ink. Accent is used for indicators and small 
 - Compact capsule: 184×54, radius 27. Expanded: 420×150, radius 30.
 - Exponent-3 superellipse, not a CSS border-radius pill.
 - The island is rendered in SVG so the path, rim, shadow, and halo keep the silhouette.
+- Rim is white 18% at the top fading to 5% at the bottom. Hover deepens the drop shadow instead of lifting the shape. The halo is the accent at 18% behind the path.
 
 ## Motion
 
 - Expand response 0.30s, damping 0.62; collapse 0.32s, damping 0.76.
 - Slow 0.38/0.42, fast 0.22/0.24. Bounce low 0.78/0.85, medium 0.62/0.76, high 0.50/0.64.
-- Hover grace 160ms. Hover, focus, tap, Enter/Space expand; Escape collapses.
-- Reduced motion removes automatic overshoot and halo. The settings playground may preview motion only after an explicit change.
+- Hover grace 160ms. Hover, focus, tap, and Enter/Space expand; Escape collapses and keeps it closed until blur or another explicit open.
+- Reduced motion removes the automatic spring, overshoot, and halo. A Motion/Bounce change or the Preview motion button runs one spring preview with the halo, then records the new setting.
 - One shared animation loop; pause offscreen and on hidden tabs.
 
 ## Layout
@@ -58,7 +59,7 @@ Body and secondary text pass AA on ink. Accent is used for indicators and small 
 
 ## Components
 
-- **Island:** SVG capsule + HTML text overlay; two cross-fading layers; `aria-expanded`; hint below.
+- **Island:** SVG capsule + HTML text overlay; two cross-fading visual layers; a transparent `<button>` overlay carries the stable name and `aria-expanded`; the active clock layer is exposed as content; hint below.
 - **Buttons:** solid ivory primary, hairline ghost secondary, 10px radius, 50px minimum height.
 - **Settings:** native radios/checkboxes, segmented controls, switches, Reset, Preview.
 - **FAQ:** native `<details>` with a drawn plus/minus.
@@ -72,9 +73,8 @@ Body and secondary text pass AA on ink. Accent is used for indicators and small 
 
 ## Accessibility
 
-- Keyboard focus on every control, 2px accent ring, 3px offset.
-- The island is a button with a visible state and an accessible name from the active clock text; the hint is its description.
-- Inactive text layer is hidden from the accessibility tree.
+- Keyboard focus on every control: 2px accent outline at a 3px offset for buttons and form controls; the island uses a 2px accent rim on the capsule because its focus box is larger than the shape.
+- The island is a real button overlay with a stable accessible name (`HiyoDyna clock preview`), `aria-expanded`, and the hint as its description. The visible clock text sits outside that control's name and only the active layer is exposed.
 - `prefers-reduced-motion` respected; touch targets at least 42px.
 - Lighthouse accessibility 100 on the shipped page.
 

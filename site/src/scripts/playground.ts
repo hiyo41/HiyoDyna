@@ -50,6 +50,14 @@ export function initPlayground(): void {
     note.hidden = false;
   }
 
+  const preview = document.querySelector<HTMLButtonElement>('[data-preview]');
+  let previewOpen = false;
+  const startPreview = () => {
+    previewOpen = true;
+    island.previewMotion();
+    if (preview) preview.textContent = 'Collapse preview';
+  };
+
   form.addEventListener('change', (event) => {
     const input = event.target as HTMLInputElement;
     if (!input.name) return;
@@ -57,6 +65,10 @@ export function initPlayground(): void {
     const value = input.type === 'checkbox' ? String(input.checked) : input.value;
     current = applySetting(current, input.name, value);
     island.setSettings(current);
+
+    if (input.name === 'motion' || input.name === 'bounce') {
+      startPreview();
+    }
   });
 
   form.addEventListener('submit', (event) => event.preventDefault());
@@ -67,15 +79,14 @@ export function initPlayground(): void {
     island.setSettings(current);
   });
 
-  const preview = document.querySelector<HTMLButtonElement>('[data-preview]');
-  let open = false;
   preview?.addEventListener('click', () => {
-    open = !open;
-    if (open) {
-      island.open();
-    } else {
+    if (previewOpen) {
+      previewOpen = false;
       island.close();
+      preview.textContent = 'Preview motion';
+      return;
     }
-    preview.textContent = open ? 'Collapse preview' : 'Preview motion';
+
+    startPreview();
   });
 }

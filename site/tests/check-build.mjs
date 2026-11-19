@@ -40,13 +40,28 @@ const assets = readdirSync(join(root, 'dist', '_astro'));
 check('Inter Medium is emitted', assets.some((name) => /^Inter-Medium\..*\.woff2$/.test(name)));
 check('Inter Display is emitted', assets.some((name) => /^InterDisplay-SemiBold\..*\.woff2$/.test(name)));
 
+const inlineStyles = [...html.matchAll(/<style[^>]*>([\s\S]*?)<\/style>/g)].map((match) => match[1]);
+const inlineScripts = [
+  ...html.matchAll(
+    /<script(?![^>]*\bsrc=)(?![^>]*application\/ld\+json)[^>]*>([\s\S]*?)<\/script>/g,
+  ),
+].map((match) => match[1]);
+
 const jsFiles = assets.filter((name) => name.endsWith('.js'));
 const jsBytes = jsFiles.reduce((total, name) => total + statSync(join(root, 'dist', '_astro', name)).size, 0);
-const jsGzip = jsFiles.reduce(
+const externalGzip = jsFiles.reduce(
   (total, name) => total + gzipSync(readFileSync(join(root, 'dist', '_astro', name))).length,
   0,
 );
-check(`JS bundle stays under 15KB gzipped (${jsGzip} bytes)`, jsGzip < 15 * 1024);
+const inlineGzip = inlineScripts.reduce(
+  (total, source) => total + gzipSync(Buffer.from(source)).length,
+  0,
+);
+const jsGzip = externalGzip + inlineGzip;
+check(
+  `JS stays under 15KB gzipped (${jsGzip} bytes; ${jsFiles.length} external, ${inlineScripts.length} inline)`,
+  jsGzip < 15 * 1024,
+);
 check(`JS source is not empty (${jsFiles.length} files, ${jsBytes} bytes)`, jsFiles.length > 0);
 
 const rootAbsolute = /(?:src|href)="\/(?!HiyoDyna(?:\/|"))[^"]*"/g;
@@ -58,8 +73,27 @@ for (const name of cssFiles) {
   check(`CSS ${name} uses the base path`, !/url\(\/(?!HiyoDyna\/)/.test(css));
 }
 
+const inlineCss = inlineStyles.join('\n');
+check('inline CSS uses the base path', !/url\(\/(?!HiyoDyna\/)/.test(inlineCss));
+
+const allCss = `${inlineCss}\n${cssFiles
+  .map((name) => readFileSync(join(root, 'dist', '_astro', name), 'utf8'))
+  .join('\n')}`;
+check('reduced-motion styles ship', /prefers-reduced-motion:\s*reduce/.test(allCss));
+check(
+  'islands expose stable accessible names',
+  html.includes('aria-label="HiyoDyna clock preview"') &&
+    html.includes('aria-label="HiyoDyna clock settings preview"'),
+);
+check('islands use real button controls', (html.match(/class="island__button"/g) ?? []).length === 2);
+
 check('the favicon is copied', existsSync(join(root, 'dist', 'favicon.svg')));
 check('the base path is applied to icons', html.includes(`href="${basePrefix}favicon.svg"`));
+check('sitemap.xml is copied', existsSync(join(root, 'dist', 'sitemap.xml')));
+check(
+  'robots.txt points at the sitemap',
+  /Sitemap: https:\/\/hiyo41\.github\.io\/HiyoDyna\/sitemap\.xml/.test(read('dist/robots.txt')),
+);
 
 if (failures.length > 0) {
   console.error(`Build check failed (${failures.length}/${checks}):`);

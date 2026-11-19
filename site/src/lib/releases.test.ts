@@ -25,12 +25,13 @@ describe('selectRelease', () => {
     expect(info?.tag).toBe('v0.0.1-9');
     expect(info?.prerelease).toBe(false);
     expect(info?.label).toBe('Download v0.0.1-9');
+    expect(info?.meta).toBe('Stable v0.0.1-9 · 847 KB');
   });
 
   it('falls back to the newest pre-release', () => {
     const info = selectRelease([release('pre-5', true)]);
     expect(info?.label).toBe('Download build 5');
-    expect(info?.meta).toBe('Pre-release · 847 KB');
+    expect(info?.meta).toBe('Pre-release build 5 · 847 KB');
   });
 
   it('ignores drafts and releases without a zip asset', () => {

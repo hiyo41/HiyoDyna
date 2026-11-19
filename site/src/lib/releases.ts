@@ -51,6 +51,11 @@ export function selectRelease(releases: Release[]): DownloadInfo | null {
       ? `Download build ${build[1]}`
       : 'Download pre-release'
     : `Download ${chosen.tag_name}`;
+  const releaseName = chosen.prerelease
+    ? build
+      ? `Pre-release build ${build[1]}`
+      : 'Pre-release'
+    : `Stable ${chosen.tag_name}`;
 
   return {
     tag: chosen.tag_name,
@@ -59,6 +64,6 @@ export function selectRelease(releases: Release[]): DownloadInfo | null {
     prerelease: chosen.prerelease,
     zipName: zip.name,
     label,
-    meta: `${chosen.prerelease ? 'Pre-release' : 'Stable'} · ${formatBytes(zip.size)}`,
+    meta: `${releaseName} · ${formatBytes(zip.size)}`,
   };
 }

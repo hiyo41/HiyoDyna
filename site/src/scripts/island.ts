@@ -5,13 +5,13 @@ import { COMPACT, EXPANDED, superellipsePath, type ShapeState } from '../lib/sup
 
 interface IslandOptions {
   settings: IslandSettings;
-  alwaysExpanded?: boolean;
   reducedMotion?: boolean;
 }
 
 export interface IslandController {
   open(): void;
   close(): void;
+  previewMotion(): void;
   setSettings(next: IslandSettings): void;
   destroy(): void;
 }
@@ -30,14 +30,16 @@ const smoothstep = (edge0: number, edge1: number, value: number) => {
 
 class Island implements IslandController {
   private root: HTMLElement;
+  private control: HTMLButtonElement;
   private settings: IslandSettings;
-  private alwaysExpanded: boolean;
   private reducedMotion: boolean;
+  private forceMotion = false;
   private spring: ShapeSpring;
   private target: ShapeState = COMPACT;
   private display: ShapeState = COMPACT;
   private progress = 0;
   private pinned = false;
+  private dismissed = false;
   private pointerInside = false;
   private focused = false;
   private closeTimer = 0;
@@ -48,24 +50,25 @@ class Island implements IslandController {
 
   constructor(root: HTMLElement, options: IslandOptions) {
     this.root = root;
+    const control = root.querySelector<HTMLButtonElement>('.island__button');
+    if (!control) throw new Error('Island is missing its button');
+    this.control = control;
     this.settings = options.settings;
-    this.alwaysExpanded = options.alwaysExpanded ?? false;
     this.reducedMotion = options.reducedMotion ?? prefersReducedMotion();
-    this.pinned = this.alwaysExpanded;
     this.spring = new ShapeSpring(COMPACT, tuningFor(this.settings.motion, this.settings.bounce));
 
-    this.root.dataset.expanded = String(this.alwaysExpanded);
-    this.root.setAttribute('aria-expanded', String(this.alwaysExpanded));
-    this.root.addEventListener('pointerenter', this.onPointerEnter);
-    this.root.addEventListener('pointerleave', this.onPointerLeave);
-    this.root.addEventListener('focus', this.onFocus);
-    this.root.addEventListener('blur', this.onBlur);
-    this.root.addEventListener('click', this.onClick);
-    this.root.addEventListener('keydown', this.onKeyDown);
+    this.root.dataset.expanded = 'false';
+    this.control.setAttribute('aria-expanded', 'false');
+    this.control.addEventListener('pointerenter', this.onPointerEnter);
+    this.control.addEventListener('pointerleave', this.onPointerLeave);
+    this.control.addEventListener('focus', this.onFocus);
+    this.control.addEventListener('blur', this.onBlur);
+    this.control.addEventListener('click', this.onClick);
+    this.control.addEventListener('keydown', this.onKeyDown);
 
     this.observeSize();
     this.applySettings();
-    this.setOpen(this.alwaysExpanded);
+    this.setOpen(false);
 
     this.clockTimer = window.setInterval(this.updateClock, 1000);
     this.updateClock();
@@ -74,12 +77,26 @@ class Island implements IslandController {
 
   open(): void {
     this.pinned = true;
+    this.dismissed = false;
     this.setOpen(true);
   }
 
   close(): void {
     this.pinned = false;
+    this.forceMotion = false;
+    this.root.classList.remove('is-previewing');
     this.setOpen(false);
+  }
+
+  previewMotion(): void {
+    this.pinned = true;
+    this.dismissed = false;
+    this.forceMotion = this.reducedMotion;
+    this.root.classList.add('is-previewing');
+    this.display = { ...COMPACT };
+    this.progress = 0;
+    this.spring = new ShapeSpring(COMPACT, tuningFor(this.settings.motion, this.settings.bounce));
+    this.setOpen(true);
   }
 
   setSettings(next: IslandSettings): void {
@@ -96,19 +113,19 @@ class Island implements IslandController {
     window.clearInterval(this.clockTimer);
     window.clearTimeout(this.closeTimer);
     this.resizeObserver?.disconnect();
-    this.root.removeEventListener('pointerenter', this.onPointerEnter);
-    this.root.removeEventListener('pointerleave', this.onPointerLeave);
-    this.root.removeEventListener('focus', this.onFocus);
-    this.root.removeEventListener('blur', this.onBlur);
-    this.root.removeEventListener('click', this.onClick);
-    this.root.removeEventListener('keydown', this.onKeyDown);
+    this.control.removeEventListener('pointerenter', this.onPointerEnter);
+    this.control.removeEventListener('pointerleave', this.onPointerLeave);
+    this.control.removeEventListener('focus', this.onFocus);
+    this.control.removeEventListener('blur', this.onBlur);
+    this.control.removeEventListener('click', this.onClick);
+    this.control.removeEventListener('keydown', this.onKeyDown);
     live.delete(this);
     this.root.removeAttribute('data-ready');
   }
 
   tick(dtSeconds: number): boolean {
     if (this.destroyed) return false;
-    if (this.reducedMotion) {
+    if (this.reducedMotion && !this.forceMotion) {
       if (!this.dirty) return false;
       this.render();
       this.dirty = false;
@@ -124,18 +141,23 @@ class Island implements IslandController {
       this.dirty = false;
     }
 
+    if (!active && this.forceMotion) {
+      this.forceMotion = false;
+      this.root.classList.remove('is-previewing');
+    }
+
     return active;
   }
 
   private setOpen(open: boolean): void {
-    const next = this.alwaysExpanded || open;
-    this.target = next ? EXPANDED : COMPACT;
-    this.root.dataset.expanded = String(next);
-    this.root.setAttribute('aria-expanded', String(next));
+    this.target = open ? EXPANDED : COMPACT;
+    this.root.dataset.expanded = String(open);
+    this.control.setAttribute('aria-expanded', String(open));
+    this.setLayerAccessibility(open);
 
-    if (this.reducedMotion) {
+    if (this.reducedMotion && !this.forceMotion) {
       this.display = { ...this.target };
-      this.progress = next ? 1 : 0;
+      this.progress = open ? 1 : 0;
       this.dirty = true;
       this.render();
       this.dirty = false;
@@ -145,6 +167,15 @@ class Island implements IslandController {
     this.spring.setTarget(this.target);
     this.dirty = true;
     startLoop();
+  }
+
+  private setLayerAccessibility(expanded: boolean): void {
+    this.root
+      .querySelector('.island__text--compact')
+      ?.setAttribute('aria-hidden', String(expanded));
+    this.root
+      .querySelector('.island__text--expanded')
+      ?.setAttribute('aria-hidden', String(!expanded));
   }
 
   private render(): void {
@@ -163,8 +194,8 @@ class Island implements IslandController {
     this.root.style.setProperty('--p', this.progress.toFixed(3));
     this.root.style.setProperty('--compact-opacity', compactOpacity.toFixed(3));
     this.root.style.setProperty('--expanded-opacity', expandedOpacity.toFixed(3));
-    setLayerState(this.root, '.island__text--compact', compactOpacity);
-    setLayerState(this.root, '.island__text--expanded', expandedOpacity);
+    setLayerVisibility(this.root, '.island__text--compact', compactOpacity);
+    setLayerVisibility(this.root, '.island__text--expanded', expandedOpacity);
   }
 
   private applySettings(): void {
@@ -220,39 +251,52 @@ class Island implements IslandController {
   private onFocus = (): void => {
     this.focused = true;
     window.clearTimeout(this.closeTimer);
-    this.setOpen(true);
+    if (!this.dismissed) this.setOpen(true);
   };
 
   private onBlur = (): void => {
     this.focused = false;
+    this.dismissed = false;
     this.scheduleClose();
   };
 
-  private onClick = (): void => {
-    if (this.alwaysExpanded) return;
+  private togglePinned = (): void => {
+    if (this.dismissed) {
+      this.dismissed = false;
+      this.pinned = true;
+      this.setOpen(true);
+      return;
+    }
+
     this.pinned = !this.pinned;
     this.setOpen(this.pinned || this.pointerInside || this.focused);
+  };
+
+  private onClick = (): void => {
+    this.togglePinned();
   };
 
   private onKeyDown = (event: KeyboardEvent): void => {
     if (event.key === 'Enter' || event.key === ' ') {
       event.preventDefault();
-      if (this.alwaysExpanded) return;
-      this.pinned = !this.pinned;
-      this.setOpen(this.pinned || this.pointerInside || this.focused);
+      this.togglePinned();
+      return;
     }
 
     if (event.key === 'Escape') {
       this.pinned = false;
-      this.setOpen(this.pointerInside || this.focused);
+      this.dismissed = true;
+      this.forceMotion = false;
+      this.root.classList.remove('is-previewing');
+      this.setOpen(false);
     }
   };
 
   private scheduleClose(): void {
-    if (this.alwaysExpanded || this.pinned) return;
+    if (this.pinned) return;
     window.clearTimeout(this.closeTimer);
     this.closeTimer = window.setTimeout(() => {
-      if (!this.pointerInside && !this.focused && !this.pinned && !this.alwaysExpanded) {
+      if (!this.pointerInside && !this.focused && !this.pinned) {
         this.setOpen(false);
       }
     }, 160);
@@ -265,13 +309,11 @@ function setText(root: HTMLElement, selector: string, text: string): void {
   });
 }
 
-function setLayerState(root: HTMLElement, selector: string, opacity: number): void {
+function setLayerVisibility(root: HTMLElement, selector: string, opacity: number): void {
   const layer = root.querySelector<HTMLElement>(selector);
   if (!layer) return;
 
-  const visible = opacity > 0.01;
-  layer.style.visibility = visible ? 'visible' : 'hidden';
-  layer.setAttribute('aria-hidden', String(!visible));
+  layer.style.visibility = opacity > 0.01 ? 'visible' : 'hidden';
 }
 
 function prefersReducedMotion(): boolean {
@@ -313,8 +355,7 @@ export function initIslands(): void {
     const settings = parseSettings(root.dataset.settings);
     const controller = createIsland(root, {
       settings,
-      alwaysExpanded: root.dataset.alwaysExpanded === 'true',
-      reducedMotion: prefersReducedMotion() && root.dataset.motionPreview !== 'true',
+      reducedMotion: prefersReducedMotion(),
     });
 
     root.dataset.ready = 'true';

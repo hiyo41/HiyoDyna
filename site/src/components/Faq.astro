@@ -23,7 +23,7 @@ const faqs = [
   {
     question: 'How do updates work?',
     answer:
-      'The app checks at startup and every 30 minutes. Build follows pre-releases from main; Stable follows official releases. Each download is verified with SHA-256 before it replaces the executable.',
+      'The app checks at startup and every 30 minutes. Build follows pre-releases from main; Stable follows official releases and uses the newest pre-release until the first official release. A portable build starts on Stable; a setup install starts on Build. Each download is verified with SHA-256 before it replaces the executable.',
   },
   {
     question: 'How do I uninstall it?',

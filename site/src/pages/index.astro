@@ -52,7 +52,11 @@ const source = 'https://github.com/hiyo41/HiyoDyna';
             <a class="button button--ghost" href={source}>View source</a>
           </div>
           <p class="hero__meta">Windows 10/11 x64 · Free and open source · AGPL-3.0</p>
-          <p class="hero__release" data-download-meta>Latest release on GitHub</p>
+          <p class="hero__release">
+            <span data-download-meta>Latest release on GitHub</span>
+            <span aria-hidden="true"> · </span>
+            <a href={releases}>All releases</a>
+          </p>
         </div>
       </div>
     </section>
@@ -106,8 +110,8 @@ const source = 'https://github.com/hiyo41/HiyoDyna';
             <div class="playground__glow" aria-hidden="true"></div>
             <Island
               id="playground"
-              motionPreview={true}
               settings={DEFAULT_SETTINGS}
+              label="HiyoDyna clock settings preview"
               hint="Hover or tap to preview"
             />
           </div>
@@ -186,8 +190,9 @@ const source = 'https://github.com/hiyo41/HiyoDyna';
             </ul>
             <h3>Updates</h3>
             <p>
-              Build follows pre-releases; Stable follows official releases. Both verify SHA-256
-              before applying.
+              Build follows pre-releases; Stable follows official releases. Until the first official
+              release, Stable uses the newest pre-release. Portable builds start on Stable; setup
+              installs start on Build. Both verify SHA-256 before applying.
             </p>
             <h3>Uninstall</h3>
             <p>
@@ -200,7 +205,10 @@ const source = 'https://github.com/hiyo41/HiyoDyna';
 
         <div class="install__cta">
           <DownloadButton />
-          <span>Pre-release builds until the first stable release.</span>
+          <span>
+            Pre-release builds until the first stable release.
+            <a href={releases}>All releases</a>
+          </span>
         </div>
       </div>
     </section>
@@ -233,7 +241,7 @@ const source = 'https://github.com/hiyo41/HiyoDyna';
       <nav aria-label="Docs">
         <h3>Docs</h3>
         <a href={source}>README</a>
-        <a href={`${source}/blob/main/README_vn.md`}>Tiếng Việt</a>
+        <a href={`${source}/blob/main/README_vn.md`}>Vietnamese</a>
         <a href={`${source}/blob/main/assets/fonts/OFL.txt`}>Inter OFL</a>
       </nav>
       <div class="site-footer__license">
@@ -409,6 +417,15 @@ const source = 'https://github.com/hiyo41/HiyoDyna';
     color: var(--text-secondary);
   }
 
+  .hero__release a {
+    color: var(--text-secondary);
+    text-underline-offset: 0.22em;
+  }
+
+  .hero__release a:hover {
+    color: var(--text);
+  }
+
   .facts {
     border-block: 1px solid var(--hairline);
   }
@@ -515,7 +532,8 @@ const source = 'https://github.com/hiyo41/HiyoDyna';
       gap: 16px;
     }
 
-    .site-header__nav a:not(.site-header__github) {
+    .site-header__nav a[href='#settings'],
+    .site-header__nav a[href='#faq'] {
       display: none;
     }
 
@@ -689,6 +707,15 @@ const source = 'https://github.com/hiyo41/HiyoDyna';
     letter-spacing: 0.1em;
     text-transform: uppercase;
     color: var(--text-muted);
+  }
+
+  .install__cta a {
+    color: var(--text-secondary);
+    text-underline-offset: 0.22em;
+  }
+
+  .install__cta a:hover {
+    color: var(--text);
   }
 
   .site-footer {
