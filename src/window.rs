@@ -45,6 +45,7 @@ const CANVAS_HEIGHT: f32 = 224.0;
 const TIMER_ID_HOVER_GRACE: usize = 2;
 const TIMER_ID_HOVER_RECHECK: usize = 3;
 const TIMER_ID_CLOCK: usize = 4;
+const TIMER_ID_UPDATE: usize = 5;
 const ANIMATION_TIMER_MILLISECONDS: u32 = 16;
 const ANIMATION_TIMER_RESOLUTION_MILLISECONDS: u32 = 1;
 const CLOCK_TIMER_MILLISECONDS: u32 = 1000;
@@ -56,6 +57,12 @@ const WM_APP_ANIMATION_FRAME: u32 = WM_APP + 4;
 static ANIMATION_FRAME_PENDING: AtomicBool = AtomicBool::new(false);
 static NEXT_ANIMATION_TIMER_GENERATION: AtomicUsize = AtomicUsize::new(0x1000);
 static ACTIVE_ANIMATION_TIMER_GENERATION: AtomicUsize = AtomicUsize::new(0);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExitAction {
+    Exit,
+    Restart,
+}
 
 struct InstanceGuard(HANDLE);
 
@@ -127,19 +134,21 @@ pub(crate) fn run() -> Result<(), String> {
             DestroyWindow(hwnd);
         }
         UnregisterClassW(class_name.as_ptr(), instance);
-        let restart_requested = result?;
+        let exit_action = result?;
         drop(_instance_guard);
-        if restart_requested && let Ok(executable) = std::env::current_exe() {
+        if exit_action == ExitAction::Restart
+            && let Ok(executable) = std::env::current_exe()
+        {
             let _ = std::process::Command::new(executable).spawn();
         }
         Ok(())
     }
 }
 
-fn run_loop(hwnd: HWND) -> Result<bool, String> {
+fn run_loop(hwnd: HWND) -> Result<ExitAction, String> {
     let mut scale = window_scale(hwnd);
     let mut settings = Settings::load();
-    let mut restart_requested = false;
+    let mut exit_action = ExitAction::Exit;
     let mut clock = ClockSnapshot::now();
     let mut surface = Surface::new(canvas_size(scale), scale)?;
     let mut animation = Animation::new_with_tuning(settings.tuning());
@@ -165,6 +174,15 @@ fn run_loop(hwnd: HWND) -> Result<bool, String> {
         if SetTimer(hwnd, TIMER_ID_CLOCK, CLOCK_TIMER_MILLISECONDS, None) == 0 {
             return Err(last_error("SetTimer"));
         }
+        if SetTimer(
+            hwnd,
+            TIMER_ID_UPDATE,
+            update::UPDATE_INTERVAL_MILLISECONDS,
+            None,
+        ) == 0
+        {
+            return Err(last_error("SetTimer"));
+        }
     }
 
     let mut last_frame = Instant::now();
@@ -187,6 +205,7 @@ fn run_loop(hwnd: HWND) -> Result<bool, String> {
         }
     };
     update::cleanup_old_binary();
+    update::request_check(hwnd, settings.update, false);
     let mut message = MSG::default();
     loop {
         // At rest the message loop sleeps between input, display and clock messages.
@@ -195,7 +214,7 @@ fn run_loop(hwnd: HWND) -> Result<bool, String> {
             return Err(last_error("GetMessageW"));
         }
         if received == 0 {
-            return Ok(restart_requested);
+            return Ok(exit_action);
         }
 
         match message.message {
@@ -232,14 +251,14 @@ fn run_loop(hwnd: HWND) -> Result<bool, String> {
             WM_RBUTTONUP if message.hwnd == hwnd => {
                 show_settings_menu(
                     hwnd,
-                    tray.as_mut(),
+                    &mut tray,
                     &mut settings,
                     &mut animation,
                     &mut surface,
                     scale,
                     &mut position,
                     &clock,
-                    &mut restart_requested,
+                    &mut exit_action,
                 )?;
             }
             message_id
@@ -355,6 +374,10 @@ fn run_loop(hwnd: HWND) -> Result<bool, String> {
                 )?;
             }
             WM_TIMER if message.hwnd == hwnd && message.wParam == TIMER_ID_CLOCK => {
+                if update::take_ready() {
+                    update::mark_app_exiting();
+                    return Ok(ExitAction::Exit);
+                }
                 if update_clock(
                     &mut clock,
                     ClockSnapshot::now(),
@@ -363,6 +386,9 @@ fn run_loop(hwnd: HWND) -> Result<bool, String> {
                     surface.draw(animation.current, scale, &settings, &clock, animation.hover);
                     surface.present(hwnd, position)?;
                 }
+            }
+            WM_TIMER if message.hwnd == hwnd && message.wParam == TIMER_ID_UPDATE => {
+                update::request_check(hwnd, settings.update, false);
             }
             WM_APP_REFRESH_DISPLAY if message.hwnd == hwnd => {
                 scale = window_scale(hwnd);
@@ -376,16 +402,38 @@ fn run_loop(hwnd: HWND) -> Result<bool, String> {
                 if event == WM_RBUTTONUP || event == WM_CONTEXTMENU {
                     show_settings_menu(
                         hwnd,
-                        tray.as_mut(),
+                        &mut tray,
                         &mut settings,
                         &mut animation,
                         &mut surface,
                         scale,
                         &mut position,
                         &clock,
-                        &mut restart_requested,
+                        &mut exit_action,
                     )?;
                 }
+            }
+            update::WM_APP_UPDATE_READY if message.hwnd == hwnd => {
+                if update::take_ready() {
+                    update::mark_app_exiting();
+                    return Ok(ExitAction::Exit);
+                }
+            }
+            update::WM_APP_UPDATE_STATUS if message.hwnd == hwnd => {
+                if message.wParam != 0 {
+                    let (text, warning) = match message.lParam {
+                        0 => ("HiyoDyna is up to date.", false),
+                        1 => ("No release is available.", false),
+                        _ => ("The update check failed. See the update log.", true),
+                    };
+                    if let Some(tray) = tray.as_mut() {
+                        tray.notify("Update", text, warning);
+                    }
+                }
+            }
+            WM_CLOSE if message.hwnd == hwnd => {
+                update::mark_app_exiting();
+                return Ok(exit_action);
             }
             _ => unsafe {
                 TranslateMessage(&message);
@@ -418,6 +466,7 @@ unsafe extern "system" fn window_proc(
             ANIMATION_FRAME_PENDING.store(false, Ordering::Release);
             0
         }
+        crate::update::WM_APP_UPDATE_READY | crate::update::WM_APP_UPDATE_STATUS => 0,
         WM_MOUSEACTIVATE => MA_NOACTIVATE as LRESULT,
         WM_ERASEBKGND => 1,
         WM_CLOSE => {
@@ -911,19 +960,29 @@ fn update_clock(clock: &mut ClockSnapshot, updated: ClockSnapshot, ticking: bool
 #[allow(clippy::too_many_arguments)]
 fn show_settings_menu(
     hwnd: HWND,
-    tray: Option<&mut Tray>,
+    tray: &mut Option<Tray>,
     settings: &mut Settings,
     animation: &mut Animation,
     surface: &mut Surface,
     scale: f32,
     position: &mut POINT,
     clock: &ClockSnapshot,
-    restart_requested: &mut bool,
+    exit_action: &mut ExitAction,
 ) -> Result<(), String> {
-    let Some(tray) = tray else {
-        return Ok(());
+    if tray.is_none() {
+        match Tray::create(hwnd, settings.accent) {
+            Ok(created) => *tray = Some(created),
+            Err(error) => {
+                eprintln!("HiyoDyna tray unavailable: {error}");
+                return Ok(());
+            }
+        }
+    }
+    let command = match tray.as_ref() {
+        Some(tray) => tray.show_menu(settings),
+        None => return Ok(()),
     };
-    let Some(command) = tray.show_menu(settings) else {
+    let Some(command) = command else {
         return Ok(());
     };
     apply_tray_command(
@@ -932,11 +991,11 @@ fn show_settings_menu(
         settings,
         animation,
         surface,
-        Some(tray),
+        tray.as_mut(),
         scale,
         position,
         clock,
-        restart_requested,
+        exit_action,
     )
 }
 
@@ -951,7 +1010,7 @@ fn apply_tray_command(
     scale: f32,
     position: &mut POINT,
     clock: &ClockSnapshot,
-    restart_requested: &mut bool,
+    exit_action: &mut ExitAction,
 ) -> Result<(), String> {
     match command {
         TrayCommand::Motion(motion) => settings.motion = motion,
@@ -968,7 +1027,7 @@ fn apply_tray_command(
             return Ok(());
         }
         TrayCommand::Restart => {
-            *restart_requested = true;
+            *exit_action = ExitAction::Restart;
             unsafe { PostMessageW(hwnd, WM_CLOSE, 0, 0) };
             return Ok(());
         }
@@ -987,25 +1046,36 @@ fn apply_tray_command(
             let settings_path = crate::settings::config_path()
                 .map(|path| path.display().to_string())
                 .unwrap_or_else(|| "unavailable".to_string());
-            let log_path = std::env::var_os("LOCALAPPDATA")
-                .map(|base| {
-                    std::path::PathBuf::from(base)
-                        .join("HiyoDyna")
-                        .join("auto-update.log")
-                        .display()
-                        .to_string()
-                })
-                .unwrap_or_else(|| "unavailable".to_string());
+            let tag = update::applied_tag().unwrap_or_else(|| "local".to_string());
             show_about(
                 hwnd,
                 &format!(
-                    "HiyoDyna {}\n\nSettings: {settings_path}\nUpdate log: {log_path}",
-                    env!("CARGO_PKG_VERSION")
+                    "HiyoDyna {}\n\nUpdate: {} ({tag})\nSettings: {settings_path}\nUpdate log: {}",
+                    env!("CARGO_PKG_VERSION"),
+                    settings.update.label(),
+                    update::log_path()
                 ),
             );
             return Ok(());
         }
-        TrayCommand::Reset => *settings = Settings::default(),
+        TrayCommand::UpdateChannel(channel) => {
+            settings.update = channel;
+            update::discard_staged_for(channel);
+            settings.save();
+            update::request_check(hwnd, channel, true);
+            return Ok(());
+        }
+        TrayCommand::CheckForUpdates => {
+            update::request_check(hwnd, settings.update, true);
+            return Ok(());
+        }
+        TrayCommand::Reset => {
+            let update = settings.update;
+            *settings = Settings {
+                update,
+                ..Settings::default()
+            };
+        }
         TrayCommand::Exit => {
             unsafe { PostMessageW(hwnd, WM_CLOSE, 0, 0) };
             return Ok(());

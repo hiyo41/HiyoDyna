@@ -3,8 +3,8 @@ use std::ptr::null_mut;
 
 use windows_sys::Win32::Foundation::{HWND, POINT};
 use windows_sys::Win32::UI::Shell::{
-    NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW,
-    Shell_NotifyIconW,
+    NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_INFO, NIIF_WARNING, NIM_ADD, NIM_DELETE,
+    NIM_MODIFY, NOTIFYICONDATAW, Shell_NotifyIconW,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, MF_CHECKED, MF_POPUP, MF_SEPARATOR,
@@ -13,7 +13,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::clock::ClockFormat;
-use crate::settings::{AccentPreset, BouncePreset, MotionPreset, Settings};
+use crate::settings::{AccentPreset, BouncePreset, MotionPreset, Settings, UpdateChannel};
 use crate::tray_icon::TrayIcon;
 
 pub(crate) const TRAY_CALLBACK_MESSAGE: u32 = WM_APP + 2;
@@ -42,6 +42,9 @@ const CMD_EXIT: usize = 141;
 const CMD_RESTART: usize = 190;
 const CMD_OPEN_SETTINGS: usize = 191;
 const CMD_ABOUT: usize = 192;
+const CMD_UPDATE_BUILD: usize = 200;
+const CMD_UPDATE_STABLE: usize = 201;
+const CMD_CHECK_UPDATES: usize = 202;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum TrayCommand {
@@ -56,6 +59,8 @@ pub(crate) enum TrayCommand {
     Restart,
     OpenSettingsFolder,
     About,
+    UpdateChannel(UpdateChannel),
+    CheckForUpdates,
     Reset,
     Exit,
 }
@@ -93,11 +98,23 @@ impl Tray {
         let Some(icon) = TrayIcon::create(32, accent.bgra()) else {
             return;
         };
-        self.data.hIcon = icon.handle();
-        self._icon = icon;
+        let previous = std::mem::replace(&mut self._icon, icon);
+        self.data.hIcon = self._icon.handle();
         unsafe {
             Shell_NotifyIconW(NIM_MODIFY, &self.data);
         }
+        drop(previous);
+    }
+
+    pub(crate) fn notify(&mut self, title: &str, text: &str, warning: bool) {
+        self.data.uFlags = NIF_INFO;
+        self.data.dwInfoFlags = if warning { NIIF_WARNING } else { NIIF_INFO };
+        copy_wide(&mut self.data.szInfoTitle, title);
+        copy_wide(&mut self.data.szInfo, text);
+        unsafe {
+            Shell_NotifyIconW(NIM_MODIFY, &self.data);
+        }
+        self.data.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     }
 
     pub(crate) fn show_menu(&self, settings: &Settings) -> Option<TrayCommand> {
@@ -113,6 +130,7 @@ impl Tray {
         let clock = unsafe { CreatePopupMenu() };
         let accent = unsafe { CreatePopupMenu() };
         let seconds = unsafe { CreatePopupMenu() };
+        let update = unsafe { CreatePopupMenu() };
         if motion.is_null()
             || bounce.is_null()
             || shadow.is_null()
@@ -120,6 +138,7 @@ impl Tray {
             || clock.is_null()
             || accent.is_null()
             || seconds.is_null()
+            || update.is_null()
         {
             unsafe {
                 DestroyMenu(menu);
@@ -143,6 +162,9 @@ impl Tray {
                 }
                 if !seconds.is_null() {
                     DestroyMenu(seconds);
+                }
+                if !update.is_null() {
+                    DestroyMenu(update);
                 }
             }
             return None;
@@ -226,6 +248,20 @@ impl Tray {
         );
         append_checked(seconds, CMD_SECONDS_ON, "On", settings.show_seconds);
         append_checked(seconds, CMD_SECONDS_OFF, "Off", !settings.show_seconds);
+        append_checked(
+            update,
+            CMD_UPDATE_BUILD,
+            "Build",
+            settings.update == UpdateChannel::Build,
+        );
+        append_checked(
+            update,
+            CMD_UPDATE_STABLE,
+            "Stable",
+            settings.update == UpdateChannel::Stable,
+        );
+        append_item(update, MF_SEPARATOR, 0, "");
+        append_item(update, MF_STRING, CMD_CHECK_UPDATES, "Check now");
 
         append_submenu(menu, motion, "Motion");
         append_submenu(menu, bounce, "Bounce");
@@ -234,6 +270,7 @@ impl Tray {
         append_submenu(menu, seconds, "Seconds");
         append_submenu(menu, position, "Position");
         append_submenu(menu, clock, "Clock");
+        append_submenu(menu, update, "Update");
         append_item(menu, MF_SEPARATOR, 0, "");
         append_checked(
             menu,
@@ -307,10 +344,22 @@ fn command_from_id(id: usize) -> Option<TrayCommand> {
         CMD_RESTART => Some(TrayCommand::Restart),
         CMD_OPEN_SETTINGS => Some(TrayCommand::OpenSettingsFolder),
         CMD_ABOUT => Some(TrayCommand::About),
+        CMD_UPDATE_BUILD => Some(TrayCommand::UpdateChannel(UpdateChannel::Build)),
+        CMD_UPDATE_STABLE => Some(TrayCommand::UpdateChannel(UpdateChannel::Stable)),
+        CMD_CHECK_UPDATES => Some(TrayCommand::CheckForUpdates),
         CMD_RESET => Some(TrayCommand::Reset),
         CMD_EXIT => Some(TrayCommand::Exit),
         _ => None,
     }
+}
+
+fn copy_wide(buffer: &mut [u16], text: &str) {
+    let encoded: Vec<u16> = text
+        .encode_utf16()
+        .take(buffer.len().saturating_sub(1))
+        .collect();
+    buffer.fill(0);
+    buffer[..encoded.len()].copy_from_slice(&encoded);
 }
 
 fn append_checked(
@@ -359,7 +408,7 @@ fn append_item(
 mod tests {
     use super::{TrayCommand, command_from_id};
     use crate::clock::ClockFormat;
-    use crate::settings::{AccentPreset, BouncePreset, MotionPreset};
+    use crate::settings::{AccentPreset, BouncePreset, MotionPreset, UpdateChannel};
 
     #[test]
     fn maps_motion_menu_ids() {
@@ -429,5 +478,18 @@ mod tests {
         assert_eq!(command_from_id(190), Some(TrayCommand::Restart));
         assert_eq!(command_from_id(191), Some(TrayCommand::OpenSettingsFolder));
         assert_eq!(command_from_id(192), Some(TrayCommand::About));
+    }
+
+    #[test]
+    fn maps_update_menu_ids() {
+        assert_eq!(
+            command_from_id(200),
+            Some(TrayCommand::UpdateChannel(UpdateChannel::Build))
+        );
+        assert_eq!(
+            command_from_id(201),
+            Some(TrayCommand::UpdateChannel(UpdateChannel::Stable))
+        );
+        assert_eq!(command_from_id(202), Some(TrayCommand::CheckForUpdates));
     }
 }

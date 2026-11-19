@@ -1,5 +1,3 @@
-#![allow(dead_code)] // Wired into the message loop in Task 6.
-
 use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -775,6 +773,11 @@ fn perform_check(channel: UpdateChannel) -> CheckOutcome {
             return CheckOutcome::Status(UpdateResult::Failed);
         }
     };
+    if Settings::load().update != channel {
+        discard_stage(&paths);
+        log("discarded the staged update because the channel changed");
+        return CheckOutcome::Status(UpdateResult::UpToDate);
+    }
     if APP_EXITING.load(Ordering::SeqCst) {
         discard_stage(&paths);
         log("discarded the staged update because HiyoDyna is exiting");
