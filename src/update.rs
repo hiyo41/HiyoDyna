@@ -861,6 +861,7 @@ pub(crate) fn run_apply_helper() {
     let paths = stage_paths(&exe);
     if !paths.manifest.is_file() {
         log("no staged update is pending");
+        launch_installed(&paths);
         return;
     }
     let mut launch = |path: &Path| -> Result<(), String> {
