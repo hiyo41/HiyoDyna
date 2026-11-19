@@ -860,7 +860,10 @@ pub(crate) fn run_apply_helper() {
     let channel = Settings::load().update;
     let paths = stage_paths(&exe);
     if !paths.manifest.is_file() {
-        log("no staged update is pending");
+        log(&format!(
+            "no staged update is pending at {:?}",
+            paths.manifest
+        ));
         launch_installed(&paths);
         return;
     }
