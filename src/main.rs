@@ -11,6 +11,8 @@ mod geometry;
 #[cfg(any(windows, test))]
 mod hover;
 #[cfg(any(windows, test))]
+mod net;
+#[cfg(any(windows, test))]
 mod render;
 #[cfg(any(windows, test))]
 mod settings;
