@@ -30,7 +30,7 @@ use crate::hover::{
     HOVER_GRACE_MILLISECONDS, HOVER_RECHECK_MILLISECONDS, HoverCommand, HoverTracker,
     pointer_inside_shape,
 };
-use crate::render::render_frame_with_margin;
+use crate::render::{RenderParams, render_frame_with_margin};
 use crate::settings::Settings;
 use crate::text::TextLayer;
 use crate::tray::{TRAY_CALLBACK_MESSAGE, Tray, TrayCommand};
@@ -466,10 +466,14 @@ impl Surface {
         render_frame_with_margin(
             pixels,
             self.size,
-            scale_shape(state, scale),
-            TOP_MARGIN * scale,
-            scale,
-            shadow_opacity,
+            RenderParams {
+                state: scale_shape(state, scale),
+                top_margin: TOP_MARGIN * scale,
+                scale,
+                shadow_opacity,
+                hover: 0.0,
+                accent: [255, 199, 143],
+            },
         );
         self.text.update(clock, format);
         self.text.draw(
