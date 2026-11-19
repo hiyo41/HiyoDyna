@@ -1,0 +1,348 @@
+---
+import { ACCENTS, DEFAULT_SETTINGS, type IslandSettings } from '../lib/settings';
+
+interface Props {
+  settings?: IslandSettings;
+}
+
+const { settings = DEFAULT_SETTINGS } = Astro.props;
+
+const motions = [
+  { value: 'slow', label: 'Slow' },
+  { value: 'normal', label: 'Normal' },
+  { value: 'fast', label: 'Fast' },
+] as const;
+
+const bounces = [
+  { value: 'low', label: 'Low' },
+  { value: 'medium', label: 'Medium' },
+  { value: 'high', label: 'High' },
+] as const;
+
+const accents = [
+  { value: 'ice', label: 'Ice' },
+  { value: 'amber', label: 'Amber' },
+  { value: 'mint', label: 'Mint' },
+] as const;
+
+const gaps = [
+  { value: '0', label: 'Flush' },
+  { value: '8', label: '8 px' },
+  { value: '16', label: '16 px' },
+] as const;
+---
+
+<div class="settings-panel">
+  <form data-settings-form aria-label="HiyoDyna clock settings">
+    <fieldset>
+      <legend>Motion</legend>
+      <div class="segmented">
+        {
+          motions.map(({ value, label }) => (
+            <label>
+              <input
+                type="radio"
+                name="motion"
+                value={value}
+                checked={settings.motion === value}
+              />
+              <span>{label}</span>
+            </label>
+          ))
+        }
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Bounce</legend>
+      <div class="segmented">
+        {
+          bounces.map(({ value, label }) => (
+            <label>
+              <input
+                type="radio"
+                name="bounce"
+                value={value}
+                checked={settings.bounce === value}
+              />
+              <span>{label}</span>
+            </label>
+          ))
+        }
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Accent</legend>
+      <div class="swatches">
+        {
+          accents.map(({ value, label }) => (
+            <label class="swatch-option">
+              <input type="radio" name="accent" value={value} checked={settings.accent === value} />
+              <span class="swatch" style={`--swatch:${ACCENTS[value]}`}></span>
+              <span>{label}</span>
+            </label>
+          ))
+        }
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Clock</legend>
+      <div class="segmented">
+        <label>
+          <input type="radio" name="hour12" value="false" checked={!settings.hour12} />
+          <span>24-hour</span>
+        </label>
+        <label>
+          <input type="radio" name="hour12" value="true" checked={settings.hour12} />
+          <span>12-hour</span>
+        </label>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Display</legend>
+      <div class="switch-list">
+        <label class="switch">
+          <input type="checkbox" name="showSeconds" value="true" checked={settings.showSeconds} />
+          <span class="switch__track" aria-hidden="true"><span class="switch__knob"></span></span>
+          <span>Seconds</span>
+        </label>
+        <label class="switch">
+          <input type="checkbox" name="shadow" value="true" checked={settings.shadow} />
+          <span class="switch__track" aria-hidden="true"><span class="switch__knob"></span></span>
+          <span>Soft shadow</span>
+        </label>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Position gap</legend>
+      <div class="segmented">
+        {
+          gaps.map(({ value, label }) => (
+            <label>
+              <input
+                type="radio"
+                name="gap"
+                value={value}
+                checked={String(settings.gap) === value}
+              />
+              <span>{label}</span>
+            </label>
+          ))
+        }
+      </div>
+    </fieldset>
+
+    <div class="settings-actions">
+      <button class="button button--ghost" type="button" data-preview>Preview motion</button>
+      <button class="reset" type="button" data-reset>Reset defaults</button>
+    </div>
+
+    <p class="settings-note" data-reduced-note hidden>
+      Reduced motion is on. The playground still previews motion when you change a setting.
+    </p>
+  </form>
+</div>
+
+<script>
+  import { initPlayground } from '../scripts/playground';
+
+  initPlayground();
+</script>
+
+<style>
+  .settings-panel {
+    font-size: 14px;
+  }
+
+  fieldset {
+    margin: 0 0 24px;
+    padding: 0;
+    border: 0;
+  }
+
+  legend {
+    padding: 0;
+    margin-bottom: 10px;
+    font-size: 10px;
+    line-height: 1;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+  }
+
+  .segmented {
+    display: inline-flex;
+    gap: 2px;
+    padding: 3px;
+    border: 1px solid var(--hairline);
+    border-radius: 10px;
+    background: rgb(255 255 255 / 2%);
+  }
+
+  .segmented label {
+    position: relative;
+    display: inline-flex;
+    cursor: pointer;
+  }
+
+  .segmented input,
+  .swatch-option input,
+  .switch input {
+    position: absolute;
+    inline-size: 1px;
+    block-size: 1px;
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  .segmented span {
+    display: inline-flex;
+    align-items: center;
+    min-height: 30px;
+    padding: 0 12px;
+    border-radius: 7px;
+    font-size: 12px;
+    color: var(--text-secondary);
+    transition:
+      color 160ms ease-out,
+      background-color 160ms ease-out;
+  }
+
+  .segmented label:hover span {
+    color: var(--text);
+  }
+
+  .segmented input:checked + span {
+    color: var(--ink);
+    background: var(--text);
+  }
+
+  .segmented input:focus-visible + span,
+  .swatch-option input:focus-visible + .swatch,
+  .switch input:focus-visible + .switch__track {
+    outline: 2px solid var(--accent);
+    outline-offset: 3px;
+  }
+
+  .swatches {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 18px;
+  }
+
+  .swatch-option {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    font-size: 12px;
+    color: var(--text-secondary);
+  }
+
+  .swatch {
+    inline-size: 16px;
+    block-size: 16px;
+    border-radius: 50%;
+    background: var(--swatch);
+    box-shadow: inset 0 0 0 1px rgb(0 0 0 / 20%);
+    transition: box-shadow 160ms ease-out;
+  }
+
+  .swatch-option input:checked + .swatch {
+    box-shadow:
+      0 0 0 2px var(--ink),
+      0 0 0 4px var(--swatch);
+  }
+
+  .swatch-option:hover {
+    color: var(--text);
+  }
+
+  .switch-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 18px 26px;
+  }
+
+  .switch {
+    display: inline-flex;
+    align-items: center;
+    gap: 9px;
+    cursor: pointer;
+    font-size: 12px;
+    color: var(--text-secondary);
+  }
+
+  .switch__track {
+    position: relative;
+    inline-size: 32px;
+    block-size: 18px;
+    border-radius: 9px;
+    background: rgb(255 255 255 / 12%);
+    transition: background-color 180ms ease-out;
+  }
+
+  .switch__knob {
+    position: absolute;
+    top: 3px;
+    left: 3px;
+    inline-size: 12px;
+    block-size: 12px;
+    border-radius: 50%;
+    background: var(--text-secondary);
+    transition:
+      transform 180ms var(--ease-out),
+      background-color 180ms ease-out;
+  }
+
+  .switch input:checked + .switch__track {
+    background: var(--accent);
+  }
+
+  .switch input:checked + .switch__track .switch__knob {
+    transform: translateX(14px);
+    background: var(--ink);
+  }
+
+  .settings-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 18px;
+    margin-top: 30px;
+  }
+
+  .settings-actions .button {
+    min-height: 42px;
+    padding-inline: 16px;
+    font-size: 13px;
+  }
+
+  .reset {
+    padding: 0;
+    border: 0;
+    background: none;
+    font-size: 12px;
+    color: var(--text-muted);
+    text-decoration: underline;
+    text-decoration-color: rgb(255 255 255 / 20%);
+    text-underline-offset: 0.25em;
+    cursor: pointer;
+  }
+
+  .reset:hover {
+    color: var(--text);
+  }
+
+  .settings-note {
+    max-width: 28rem;
+    margin-top: 18px;
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--text-muted);
+  }
+</style>

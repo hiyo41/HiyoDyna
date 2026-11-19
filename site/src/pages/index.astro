@@ -1,6 +1,8 @@
 ---
 import Base from '../layouts/Base.astro';
 import Island from '../components/Island.astro';
+import SettingsPanel from '../components/SettingsPanel.astro';
+import { DEFAULT_SETTINGS } from '../lib/settings';
 
 const base = import.meta.env.BASE_URL;
 const releases = 'https://github.com/hiyo41/HiyoDyna/releases';
@@ -67,6 +69,32 @@ const source = 'https://github.com/hiyo41/HiyoDyna';
         <div class="fact">
           <span class="fact__value">Software-rendered</span>
           <span class="fact__label">GDI, every frame</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="section settings-section" id="settings">
+      <div class="wrap">
+        <div class="section-head">
+          <p class="eyebrow">Settings</p>
+          <h2>Every control, live.</h2>
+          <p class="lede">
+            The tray menu, without the tray. Change the spring, the accent, or the clock and watch
+            the capsule respond.
+          </p>
+        </div>
+
+        <div class="playground">
+          <div class="playground__stage">
+            <div class="playground__glow" aria-hidden="true"></div>
+            <Island
+              id="playground"
+              motionPreview={true}
+              settings={DEFAULT_SETTINGS}
+              hint="Hover or tap to preview"
+            />
+          </div>
+          <SettingsPanel />
         </div>
       </div>
     </section>
@@ -228,6 +256,69 @@ const source = 'https://github.com/hiyo41/HiyoDyna';
 
   .facts {
     border-block: 1px solid var(--hairline);
+  }
+
+  .settings-section {
+    scroll-margin-top: 88px;
+  }
+
+  .section-head {
+    max-width: 640px;
+    margin-bottom: clamp(36px, 5vw, 56px);
+  }
+
+  .section-head h2 {
+    margin-top: 16px;
+  }
+
+  .section-head .lede {
+    margin-top: 18px;
+  }
+
+  .playground {
+    display: grid;
+    grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr);
+    gap: clamp(32px, 6vw, 88px);
+    align-items: start;
+  }
+
+  .playground__stage {
+    position: relative;
+    display: grid;
+    place-items: center;
+    min-height: 320px;
+    padding-block: 36px;
+  }
+
+  .playground__glow {
+    position: absolute;
+    inset: 50% auto auto 50%;
+    width: min(520px, 100%);
+    height: 260px;
+    transform: translate(-50%, -50%);
+    background: radial-gradient(
+      closest-side,
+      color-mix(in srgb, var(--accent) 10%, transparent),
+      transparent 72%
+    );
+    filter: blur(36px);
+    pointer-events: none;
+  }
+
+  .playground__stage :global(.island-shell) {
+    position: relative;
+    z-index: 1;
+  }
+
+  @media (max-width: 900px) {
+    .playground {
+      grid-template-columns: 1fr;
+    }
+
+    .playground__stage {
+      min-height: 260px;
+      padding-block: 24px;
+    }
   }
 
   .facts__grid {

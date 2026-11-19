@@ -314,7 +314,7 @@ export function initIslands(): void {
     const controller = createIsland(root, {
       settings,
       alwaysExpanded: root.dataset.alwaysExpanded === 'true',
-      reducedMotion: prefersReducedMotion(),
+      reducedMotion: prefersReducedMotion() && root.dataset.motionPreview !== 'true',
     });
 
     root.dataset.ready = 'true';

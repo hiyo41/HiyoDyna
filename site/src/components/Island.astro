@@ -6,6 +6,7 @@ interface Props {
   id: string;
   settings?: IslandSettings;
   alwaysExpanded?: boolean;
+  motionPreview?: boolean;
   hint?: string;
 }
 
@@ -13,6 +14,7 @@ const {
   id,
   settings = DEFAULT_SETTINGS,
   alwaysExpanded = false,
+  motionPreview = false,
   hint = 'Hover or tap to expand',
 } = Astro.props;
 
@@ -27,6 +29,7 @@ const accent = ACCENTS[settings.accent];
       class="island"
       data-island={id}
       data-always-expanded={String(alwaysExpanded)}
+      data-motion-preview={String(motionPreview)}
       data-expanded={String(alwaysExpanded)}
       data-settings={JSON.stringify(settings)}
       role="button"
