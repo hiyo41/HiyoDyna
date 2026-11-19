@@ -2,6 +2,8 @@
 import Base from '../layouts/Base.astro';
 import Island from '../components/Island.astro';
 import SettingsPanel from '../components/SettingsPanel.astro';
+import FeatureList from '../components/FeatureList.astro';
+import Faq from '../components/Faq.astro';
 import { DEFAULT_SETTINGS } from '../lib/settings';
 
 const base = import.meta.env.BASE_URL;
@@ -73,6 +75,20 @@ const source = 'https://github.com/hiyo41/HiyoDyna';
       </div>
     </section>
 
+    <section class="section" id="features">
+      <div class="wrap">
+        <div class="section-head">
+          <p class="eyebrow">Features</p>
+          <h2>Small surface, real behavior.</h2>
+          <p class="lede">
+            The capsule does one job at the top of the screen. Everything below it is built to stay
+            out of the way.
+          </p>
+        </div>
+        <FeatureList />
+      </div>
+    </section>
+
     <section class="section settings-section" id="settings">
       <div class="wrap">
         <div class="section-head">
@@ -98,7 +114,140 @@ const source = 'https://github.com/hiyo41/HiyoDyna';
         </div>
       </div>
     </section>
+
+    <section class="section" id="native">
+      <div class="wrap native">
+        <div class="native__head">
+          <p class="eyebrow">Under the hood</p>
+          <h2>Nothing between the clock and the screen.</h2>
+        </div>
+        <div class="native__body">
+          <p>
+            HiyoDyna is a single Rust executable. The window is a Win32 layered window; the
+            capsule, shadow, and text are drawn with GDI into a 32-bit buffer every frame.
+          </p>
+          <p>
+            No Electron. No WebView. No HTML or JavaScript. The only runtime it needs is Windows
+            itself.
+          </p>
+          <ul class="native__specs">
+            <li><span>1</span> process</li>
+            <li><span>0</span> webviews</li>
+            <li><span>&lt; 2 MB</span> on disk</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="install">
+      <div class="wrap">
+        <div class="section-head">
+          <p class="eyebrow">Install</p>
+          <h2>Download, extract, run.</h2>
+          <p class="lede">
+            The release is a portable zip. No installer, no admin prompt, and no Rust toolchain.
+          </p>
+        </div>
+
+        <div class="install">
+          <ol class="install__steps">
+            <li>
+              <span class="install__num" aria-hidden="true">01</span>
+              <div>
+                <h3>Download the zip</h3>
+                <p>Take the latest <code>windows-x64.zip</code> from the Releases page.</p>
+              </div>
+            </li>
+            <li>
+              <span class="install__num" aria-hidden="true">02</span>
+              <div>
+                <h3>Extract it anywhere</h3>
+                <p>Keep the folder wherever you want the app to live.</p>
+              </div>
+            </li>
+            <li>
+              <span class="install__num" aria-hidden="true">03</span>
+              <div>
+                <h3>Run HiyoDyna.exe</h3>
+                <p>The capsule appears at the top of the primary display. Start with Windows is in the tray.</p>
+              </div>
+            </li>
+          </ol>
+
+          <aside class="install__notes" aria-label="Install notes">
+            <h3>Before you run it</h3>
+            <ul>
+              <li>Windows 10/11 x64.</li>
+              <li>
+                The build is unsigned, so SmartScreen may ask for confirmation. The SHA-256 is on
+                the release page.
+              </li>
+              <li>Settings live in <code>%APPDATA%\HiyoDyna\settings.ini</code>.</li>
+              <li>Start with Windows is optional, from the tray.</li>
+            </ul>
+            <h3>Updates</h3>
+            <p>
+              Build follows pre-releases; Stable follows official releases. Both verify SHA-256
+              before applying.
+            </p>
+            <h3>Uninstall</h3>
+            <p>
+              Exit the app, delete the extracted folder, and remove
+              <code>%APPDATA%\HiyoDyna</code> if you want a clean slate.
+            </p>
+            <a class="text-link" href={source}>Install from source</a>
+          </aside>
+        </div>
+
+        <div class="install__cta">
+          <a class="button button--primary" href={releases}>Download for Windows</a>
+          <span>Pre-release builds until the first stable release.</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="faq">
+      <div class="wrap">
+        <div class="section-head">
+          <p class="eyebrow">FAQ</p>
+          <h2>Questions, answered.</h2>
+        </div>
+        <Faq />
+      </div>
+    </section>
   </main>
+
+  <footer class="site-footer">
+    <div class="wrap site-footer__grid">
+      <div class="site-footer__brand">
+        <a class="brand" href={base} aria-label="HiyoDyna home">
+          <span class="brand__dot" aria-hidden="true"></span>
+          HiyoDyna
+        </a>
+        <p>A native clock capsule for Windows. Built in Rust, drawn with Win32.</p>
+      </div>
+      <nav aria-label="Project">
+        <h3>Project</h3>
+        <a href={source}>Source</a>
+        <a href={releases}>Releases</a>
+        <a href={`${source}/issues`}>Issues</a>
+      </nav>
+      <nav aria-label="Docs">
+        <h3>Docs</h3>
+        <a href={source}>README</a>
+        <a href={`${source}/blob/main/README_vn.md`}>Tiếng Việt</a>
+        <a href={`${source}/blob/main/assets/fonts/OFL.txt`}>Inter OFL</a>
+      </nav>
+      <div class="site-footer__license">
+        <h3>License</h3>
+        <p>AGPL-3.0. Bundled Inter fonts under the SIL Open Font License.</p>
+      </div>
+    </div>
+    <div class="wrap site-footer__base">
+      <p>Windows 10/11 x64. Free and open source.</p>
+      <p>Not affiliated with Apple. “Dynamic Island” is used descriptively.</p>
+    </div>
+  </footer>
 </Base>
 
 <script>
@@ -258,10 +407,6 @@ const source = 'https://github.com/hiyo41/HiyoDyna';
     border-block: 1px solid var(--hairline);
   }
 
-  .settings-section {
-    scroll-margin-top: 88px;
-  }
-
   .section-head {
     max-width: 640px;
     margin-bottom: clamp(36px, 5vw, 56px);
@@ -392,6 +537,228 @@ const source = 'https://github.com/hiyo41/HiyoDyna';
 
     .fact:nth-child(even) {
       padding-right: 0;
+    }
+  }
+
+  .native {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.05fr);
+    gap: clamp(32px, 6vw, 80px);
+    align-items: start;
+  }
+
+  .native__head h2 {
+    margin-top: 16px;
+  }
+
+  .native__body p {
+    max-width: 36rem;
+    font-size: 14px;
+    line-height: 1.7;
+    color: var(--text-secondary);
+  }
+
+  .native__body p + p {
+    margin-top: 16px;
+  }
+
+  .native__specs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 26px;
+    margin: 30px 0 0;
+    padding: 20px 0 0;
+    border-top: 1px solid var(--hairline);
+    list-style: none;
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+  }
+
+  .native__specs span {
+    display: block;
+    margin-bottom: 5px;
+    font-family: var(--font-display);
+    font-size: 22px;
+    letter-spacing: -0.02em;
+    text-transform: none;
+    color: var(--text);
+  }
+
+  .install {
+    display: grid;
+    grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr);
+    gap: clamp(32px, 6vw, 80px);
+    align-items: start;
+  }
+
+  .install__steps {
+    margin: 0;
+    padding: 0;
+    border-top: 1px solid var(--hairline);
+    list-style: none;
+  }
+
+  .install__steps li {
+    display: grid;
+    grid-template-columns: 46px minmax(0, 1fr);
+    gap: 16px;
+    padding-block: 22px;
+    border-bottom: 1px solid var(--hairline);
+  }
+
+  .install__num {
+    padding-top: 5px;
+    font-size: 10px;
+    letter-spacing: 0.14em;
+    color: var(--text-muted);
+  }
+
+  .install__steps h3 {
+    font-size: 16px;
+  }
+
+  .install__steps p {
+    margin-top: 7px;
+    font-size: 14px;
+    line-height: 1.6;
+    color: var(--text-secondary);
+  }
+
+  .install__notes {
+    padding-top: 20px;
+    border-top: 1px solid var(--hairline);
+  }
+
+  .install__notes h3 {
+    margin: 24px 0 8px;
+    font-family: var(--font-body);
+    font-size: 10px;
+    font-weight: 500;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+  }
+
+  .install__notes h3:first-child {
+    margin-top: 0;
+  }
+
+  .install__notes ul {
+    margin: 0;
+    padding-left: 18px;
+    font-size: 14px;
+    line-height: 1.65;
+    color: var(--text-secondary);
+  }
+
+  .install__notes li + li {
+    margin-top: 6px;
+  }
+
+  .install__notes p {
+    font-size: 14px;
+    line-height: 1.65;
+    color: var(--text-secondary);
+  }
+
+  .install__notes .text-link {
+    display: inline-block;
+    margin-top: 18px;
+    font-size: 13px;
+  }
+
+  .install__cta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 16px;
+    margin-top: 40px;
+  }
+
+  .install__cta span {
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+  }
+
+  .site-footer {
+    padding: 56px 0 36px;
+    border-top: 1px solid var(--hairline);
+  }
+
+  .site-footer__grid {
+    display: grid;
+    grid-template-columns: 1.4fr 0.6fr 0.6fr 1fr;
+    gap: 32px;
+  }
+
+  .site-footer h3 {
+    margin: 0 0 14px;
+    font-family: var(--font-body);
+    font-size: 10px;
+    font-weight: 500;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+  }
+
+  .site-footer nav a {
+    display: block;
+    padding-block: 4px;
+    font-size: 13px;
+    color: var(--text-secondary);
+    text-decoration: none;
+  }
+
+  .site-footer nav a:hover {
+    color: var(--text);
+  }
+
+  .site-footer p {
+    max-width: 28rem;
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--text-secondary);
+  }
+
+  .site-footer__brand p {
+    margin-top: 14px;
+  }
+
+  .site-footer__base {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: 12px 24px;
+    margin-top: 48px;
+    padding-top: 20px;
+    border-top: 1px solid var(--hairline);
+  }
+
+  .site-footer__base p {
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+  }
+
+  @media (max-width: 900px) {
+    .native,
+    .install {
+      grid-template-columns: 1fr;
+    }
+
+    .site-footer__grid {
+      grid-template-columns: 1fr 1fr;
+    }
+  }
+
+  @media (max-width: 520px) {
+    .site-footer__grid {
+      grid-template-columns: 1fr;
     }
   }
 </style>

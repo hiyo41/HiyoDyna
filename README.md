@@ -6,6 +6,8 @@
 
 A native Rust Dynamic Island-style overlay for Windows. The current build provides a live clock capsule that expands on hover, with more system features to come.
 
+Website: [hiyo41.github.io/HiyoDyna](https://hiyo41.github.io/HiyoDyna/)
+
 ## Current features
 
 - Spring-animated capsule that expands on hover and collapses after a short delay
@@ -25,6 +27,16 @@ A native Rust Dynamic Island-style overlay for Windows. The current build provid
 - Rust stable with edition 2024 support when building from source
 
 ## Install
+
+### Install a release
+
+1. Download `HiyoDyna-<tag>-windows-x64.zip` from the [Releases page](https://github.com/hiyo41/HiyoDyna/releases).
+2. Extract it anywhere.
+3. Run `HiyoDyna.exe`.
+
+No installer or admin rights. Windows 10/11 x64 only. Settings live in `%APPDATA%\HiyoDyna\settings.ini`.
+
+### Install from source
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup.ps1
@@ -46,6 +58,12 @@ HiyoDyna updates itself from GitHub. It checks at startup and every 30 minutes, 
 The updater runs inside HiyoDyna. It starts a short-lived helper only while replacing the executable; there is no resident watcher and no Startup shortcut for updates.
 
 ## Uninstall
+
+### Uninstall a release
+
+Turn off Start with Windows from the tray, exit HiyoDyna, and delete the extracted folder. Delete `%APPDATA%\HiyoDyna` as well to remove your settings.
+
+### Uninstall a source install
 
 Use **Settings > Apps** or run:
 
