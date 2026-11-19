@@ -992,7 +992,9 @@ fn apply_tray_command(
         }
     }
 
-    if let Some(tray) = tray.as_mut() {
+    if matches!(command, TrayCommand::Accent(_) | TrayCommand::Reset)
+        && let Some(tray) = tray.as_mut()
+    {
         tray.set_accent(settings.accent);
     }
     animation.set_tuning(settings.tuning());

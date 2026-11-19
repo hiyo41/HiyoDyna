@@ -174,6 +174,11 @@ mod tests {
     use super::render_tray_pixels;
 
     #[test]
+    fn creates_an_icon_handle() {
+        assert!(super::TrayIcon::create(32, [255, 199, 143]).is_some());
+    }
+
+    #[test]
     fn tray_pixels_have_an_opaque_center_and_transparent_corner() {
         let pixels = render_tray_pixels(32, [255, 199, 143]);
         assert_eq!(pixels[(16 * 32 + 16) * 4 + 3], 255);
