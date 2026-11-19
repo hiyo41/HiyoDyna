@@ -75,7 +75,7 @@ Body and secondary text pass AA on ink. Accent is used for indicators and small 
 
 - Keyboard focus on every control: 2px accent outline at a 3px offset for buttons and form controls; the island uses a 2px accent rim on the capsule because its focus box is larger than the shape.
 - The island is a real button overlay with a stable accessible name (`HiyoDyna clock preview`), `aria-expanded`, and the hint as its description. The visible clock text sits outside that control's name and only the active layer is exposed.
-- `prefers-reduced-motion` respected; touch targets at least 42px.
+- `prefers-reduced-motion` respected; primary actions are at least 50px tall, settings controls at least 30px.
 - Lighthouse accessibility 100 on the shipped page.
 
 ## Bans

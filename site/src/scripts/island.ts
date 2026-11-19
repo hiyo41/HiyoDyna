@@ -11,6 +11,7 @@ interface IslandOptions {
 export interface IslandController {
   open(): void;
   close(): void;
+  isOpen(): boolean;
   previewMotion(): void;
   setSettings(next: IslandSettings): void;
   destroy(): void;
@@ -88,6 +89,10 @@ class Island implements IslandController {
     this.setOpen(false);
   }
 
+  isOpen(): boolean {
+    return this.target === EXPANDED;
+  }
+
   previewMotion(): void {
     this.pinned = true;
     this.dismissed = false;
@@ -141,7 +146,7 @@ class Island implements IslandController {
       this.dirty = false;
     }
 
-    if (!active && this.forceMotion) {
+    if (!active && this.root.classList.contains('is-previewing')) {
       this.forceMotion = false;
       this.root.classList.remove('is-previewing');
     }

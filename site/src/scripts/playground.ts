@@ -51,12 +51,25 @@ export function initPlayground(): void {
   }
 
   const preview = document.querySelector<HTMLButtonElement>('[data-preview]');
-  let previewOpen = false;
-  const startPreview = () => {
-    previewOpen = true;
-    island.previewMotion();
-    if (preview) preview.textContent = 'Collapse preview';
+  const islandRoot = document.querySelector<HTMLElement>('[data-island="playground"]');
+  const syncPreview = () => {
+    if (preview) {
+      preview.textContent = island.isOpen() ? 'Collapse preview' : 'Preview motion';
+    }
   };
+
+  if (islandRoot && typeof MutationObserver !== 'undefined') {
+    new MutationObserver(syncPreview).observe(islandRoot, {
+      attributes: true,
+      attributeFilter: ['data-expanded'],
+    });
+  }
+
+  const startPreview = () => {
+    island.previewMotion();
+    syncPreview();
+  };
+  syncPreview();
 
   form.addEventListener('change', (event) => {
     const input = event.target as HTMLInputElement;
@@ -80,13 +93,11 @@ export function initPlayground(): void {
   });
 
   preview?.addEventListener('click', () => {
-    if (previewOpen) {
-      previewOpen = false;
+    if (island.isOpen()) {
       island.close();
-      preview.textContent = 'Preview motion';
-      return;
+    } else {
+      startPreview();
     }
-
-    startPreview();
+    syncPreview();
   });
 }

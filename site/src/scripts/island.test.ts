@@ -36,8 +36,10 @@ describe('island interaction', () => {
     button.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
     expect(button.getAttribute('aria-expanded')).toBe('false');
     expect(root.dataset.expanded).toBe('false');
+    expect(controller.isOpen()).toBe(false);
     button.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
     expect(button.getAttribute('aria-expanded')).toBe('true');
+    expect(controller.isOpen()).toBe(true);
     controller.destroy();
   });
 
@@ -54,6 +56,7 @@ describe('island interaction', () => {
     const controller = createIsland(root, { settings: DEFAULT_SETTINGS, reducedMotion: true });
     controller.previewMotion();
     expect(button.getAttribute('aria-expanded')).toBe('true');
+    expect(controller.isOpen()).toBe(true);
     expect(root.classList.contains('is-previewing')).toBe(true);
     controller.destroy();
   });

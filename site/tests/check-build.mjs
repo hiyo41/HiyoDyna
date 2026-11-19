@@ -79,7 +79,34 @@ check('inline CSS uses the base path', !/url\(\/(?!HiyoDyna\/)/.test(inlineCss))
 const allCss = `${inlineCss}\n${cssFiles
   .map((name) => readFileSync(join(root, 'dist', '_astro', name), 'utf8'))
   .join('\n')}`;
+const reducedBlocks = [];
+for (let from = 0; ; ) {
+  const index = allCss.indexOf('prefers-reduced-motion', from);
+  if (index < 0) break;
+  reducedBlocks.push(allCss.slice(index, index + 900));
+  from = index + 'prefers-reduced-motion'.length;
+}
 check('reduced-motion styles ship', /prefers-reduced-motion:\s*reduce/.test(allCss));
+check(
+  'reduced-motion rules suppress the island halo and keep the preview halo',
+  reducedBlocks.some(
+    (block) =>
+      /island__halo/.test(block) && /is-previewing/.test(block) && /opacity:\s*0/.test(block),
+  ),
+);
+
+const jsSource = jsFiles
+  .map((name) => readFileSync(join(root, 'dist', '_astro', name), 'utf8'))
+  .join('\n');
+check(
+  'island JS honors reduced motion and owns the preview state',
+  /prefers-reduced-motion:\s*reduce/.test(jsSource) && jsSource.includes('is-previewing'),
+);
+check(
+  'compact clock is exposed before JavaScript runs',
+  /island__text--compact[^>]*aria-hidden="false"/.test(html) &&
+    /island__text--expanded[^>]*aria-hidden="true"/.test(html),
+);
 check(
   'islands expose stable accessible names',
   html.includes('aria-label="HiyoDyna clock preview"') &&
