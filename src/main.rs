@@ -24,6 +24,8 @@ mod text;
 mod tray;
 #[cfg(any(windows, test))]
 mod tray_icon;
+#[cfg(any(windows, test))]
+mod update;
 #[cfg(windows)]
 mod window;
 
