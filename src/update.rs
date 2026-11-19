@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use windows_sys::Win32::Foundation::{CloseHandle, HWND, SYSTEMTIME, WAIT_OBJECT_0};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, ERROR_INVALID_PARAMETER, GetLastError, HWND, SYSTEMTIME, WAIT_OBJECT_0,
+};
 use windows_sys::Win32::System::SystemInformation::GetLocalTime;
 use windows_sys::Win32::System::Threading::{
     OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
@@ -371,24 +373,7 @@ fn apply_staged_update(
         return Err("staged update failed its SHA-256 check".to_string());
     }
 
-    let state = read_state_from(&paths.state);
-    let applied_time = state.applied_published.as_deref().and_then(parse_rfc3339);
-    let installed_time = fs::metadata(&paths.installed)
-        .ok()
-        .and_then(|metadata| metadata.modified().ok())
-        .and_then(epoch_seconds);
-    let release = Release {
-        tag: manifest.tag.clone(),
-        published: manifest.published.clone(),
-    };
-    let outdated = !should_apply(
-        &release,
-        state.applied_tag.as_deref(),
-        applied_time,
-        installed_time,
-        option_env!("HIYODyna_BUILD_TAG"),
-    );
-    if manifest.channel != current_channel || outdated {
+    if !stage_should_apply(paths, current_channel, &manifest) {
         discard_stage(paths);
         return Ok(ApplyOutcome::Discarded);
     }
@@ -435,6 +420,45 @@ fn apply_staged_update(
 fn discard_stage(paths: &ApplyPaths) {
     let _ = fs::remove_file(&paths.staged);
     let _ = fs::remove_file(&paths.manifest);
+}
+
+fn stage_should_apply(
+    paths: &ApplyPaths,
+    channel: UpdateChannel,
+    manifest: &StageManifest,
+) -> bool {
+    if manifest.channel != channel {
+        return false;
+    }
+    let state = read_state_from(&paths.state);
+    let applied_time = state.applied_published.as_deref().and_then(parse_rfc3339);
+    let release = Release {
+        tag: manifest.tag.clone(),
+        published: manifest.published.clone(),
+    };
+    should_apply(
+        &release,
+        state.applied_tag.as_deref(),
+        applied_time,
+        installed_time_near(&paths.installed),
+        option_env!("HIYODyna_BUILD_TAG"),
+    )
+}
+
+fn installed_time_near(exe: &Path) -> Option<i64> {
+    let directory = exe.parent()?;
+    let install_json = fs::read_to_string(directory.join("install.json")).ok();
+    installed_time_from(install_json.as_deref()).or_else(|| {
+        fs::metadata(exe)
+            .ok()
+            .and_then(|metadata| metadata.modified().ok())
+            .and_then(epoch_seconds)
+    })
+}
+
+fn installed_time_from(install_json: Option<&str>) -> Option<i64> {
+    let text = install_json?;
+    parse_rfc3339(&json_string(text, "installedAt")?)
 }
 
 fn epoch_seconds(time: std::time::SystemTime) -> Option<i64> {
@@ -599,14 +623,21 @@ pub(crate) fn run_apply_helper() {
     };
     let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
     if handle.is_null() {
-        log(&format!("could not open the previous process {pid}"));
-        return;
-    }
-    let wait = unsafe { WaitForSingleObject(handle, 30_000) };
-    unsafe { CloseHandle(handle) };
-    if wait != WAIT_OBJECT_0 {
-        log("timed out waiting for HiyoDyna to exit");
-        return;
+        let error = unsafe { GetLastError() };
+        if error != ERROR_INVALID_PARAMETER {
+            log(&format!(
+                "could not open the previous process {pid} (Windows error {error})"
+            ));
+            return;
+        }
+        log(&format!("the previous process {pid} already exited"));
+    } else {
+        let wait = unsafe { WaitForSingleObject(handle, 30_000) };
+        unsafe { CloseHandle(handle) };
+        if wait != WAIT_OBJECT_0 {
+            log("timed out waiting for HiyoDyna to exit");
+            return;
+        }
     }
 
     let Some(install_dir) = install_dir() else {
@@ -742,15 +773,11 @@ fn perform_check(channel: UpdateChannel) -> CheckOutcome {
 
     let state = read_state();
     let applied_time = state.applied_published.as_deref().and_then(parse_rfc3339);
-    let installed_time = fs::metadata(&exe)
-        .ok()
-        .and_then(|metadata| metadata.modified().ok())
-        .and_then(epoch_seconds);
     if !should_apply(
         &release,
         state.applied_tag.as_deref(),
         applied_time,
-        installed_time,
+        installed_time_near(&exe),
         option_env!("HIYODyna_BUILD_TAG"),
     ) {
         log(&format!(
@@ -809,7 +836,14 @@ fn pending_action(channel: UpdateChannel) -> PendingAction {
     };
     let paths = stage_paths(&install_dir);
     let stage = read_manifest(&paths.manifest);
-    pending_action_from(paths.staged.is_file(), stage.as_ref(), channel)
+    let action = pending_action_from(paths.staged.is_file(), stage.as_ref(), channel);
+    if action == PendingAction::Apply
+        && let Some(manifest) = stage.as_ref()
+        && !stage_should_apply(&paths, channel, manifest)
+    {
+        return PendingAction::Discard;
+    }
+    action
 }
 
 fn pending_action_from(
@@ -1057,6 +1091,16 @@ mod tests {
         assert_eq!(parsed.tag, "pre-2");
         assert_eq!(parsed.channel, UpdateChannel::Build);
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn reads_installed_at_from_install_json() {
+        let text = r#"{"installDir":"C:\\x","installedAt":"2026-11-19T15:26:51.0835595+07:00"}"#;
+        assert_eq!(
+            super::installed_time_from(Some(text)),
+            super::parse_rfc3339("2026-11-19T08:26:51Z")
+        );
+        assert_eq!(super::installed_time_from(None), None);
     }
 
     #[test]
