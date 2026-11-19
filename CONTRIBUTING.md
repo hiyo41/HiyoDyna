@@ -23,15 +23,18 @@ The app is Windows-only: Win32 + GDI, with no webview or JavaScript. Keep change
 | Path | Responsibility |
 | --- | --- |
 | `src/main.rs` | Module wiring and fatal-error dialog |
-| `src/window.rs` | Window creation, message loop, placement, animation timer |
-| `src/animation.rs` | Spring animation and shape states |
-| `src/geometry.rs` | Rounded-rectangle geometry |
-| `src/render.rs` | Software rendering, shadow, background |
-| `src/text.rs` | Font loading, text masks, blending |
+| `src/window.rs` | Window creation, message loop, placement, animation timer, hover plumbing |
+| `src/animation.rs` | Spring animation, hover spring, and staged reveal |
+| `src/geometry.rs` | Continuous-corner rounded-rectangle geometry |
+| `src/render.rs` | Software rendering, shadow, background, hover glow |
+| `src/text.rs` | Bundled Inter loading, supersampled text masks, blending |
 | `src/clock.rs` | Local time snapshot and formatting |
 | `src/hover.rs` | Pointer checks and hover timing |
-| `src/settings.rs` | INI settings and preset enums |
+| `src/settings.rs` | INI settings, accent, seconds, and presets |
 | `src/tray.rs` | Tray icon and context menus |
+| `src/tray_icon.rs` | Custom tray icon pixels and HICON lifecycle |
+| `src/autostart.rs` | HKCU Run-key autostart |
+| `scripts/` | Per-user setup, auto-update watcher, and uninstaller |
 
 ## Pull requests
 

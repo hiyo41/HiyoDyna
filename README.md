@@ -31,6 +31,8 @@ A native Rust Dynamic Island-style overlay for Windows. The current build provid
 
 The per-user install goes to `%LOCALAPPDATA%\Programs\HiyoDyna`. Setup also creates a Start Menu shortcut, an uninstall entry, and a hidden watcher in the Startup folder. Use `-NoAutostart` or `-NoWatcher` to skip either one.
 
+This installer is for a local checkout and needs Rust to rebuild. Release downloads run the packaged executable without the local watcher.
+
 ## Auto-update
 
 The watcher fingerprints `src\**`, `assets\**`, `Cargo.toml`, and `Cargo.lock`. When they change, it rebuilds the release binary and restarts the installed app. Changes made while it was off are picked up on its next start.
@@ -48,7 +50,6 @@ Use **Settings > Apps** or run:
 ```
 
 Add `-KeepSettings` to keep `%APPDATA%\HiyoDyna` and `%LOCALAPPDATA%\HiyoDyna`.
-
 
 ## Run
 
@@ -91,3 +92,5 @@ Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md).
 ## License
 
 GNU Affero General Public License v3.0 — see [LICENSE](LICENSE).
+
+Bundled Inter fonts are licensed under the SIL Open Font License; see [assets/fonts/OFL.txt](assets/fonts/OFL.txt).
