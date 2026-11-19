@@ -32,7 +32,7 @@ use crate::hover::{
 };
 use crate::render::{RenderParams, render_frame_with_margin};
 use crate::settings::Settings;
-use crate::text::TextLayer;
+use crate::text::{TextLayer, TextParams};
 use crate::tray::{TRAY_CALLBACK_MESSAGE, Tray, TrayCommand};
 
 const CANVAS_WIDTH: f32 = 512.0;
@@ -405,7 +405,7 @@ struct Surface {
 
 impl Surface {
     fn new(size: (u32, u32), scale: f32) -> Result<Self, String> {
-        let text = TextLayer::new(size, scale)?;
+        let text = TextLayer::new(scale)?;
         // SAFETY: The DIB is top-down, 32-bit BGRA. Handles are cleaned up on every exit path.
         unsafe {
             let dc = CreateCompatibleDC(null_mut());
@@ -478,10 +478,15 @@ impl Surface {
         self.text.update(clock, format);
         self.text.draw(
             pixels,
-            self.size,
-            scale_shape(state, scale),
-            TOP_MARGIN * scale,
-            scale,
+            TextParams {
+                size: self.size,
+                state,
+                top_margin: TOP_MARGIN * scale,
+                scale,
+                accent: [255, 199, 143],
+                show_seconds: true,
+                hover: 0.0,
+            },
         );
     }
 

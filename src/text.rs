@@ -1,13 +1,15 @@
 use std::mem::size_of;
-use std::ptr::null_mut;
+use std::path::PathBuf;
+use std::ptr::{null, null_mut};
 
 use windows_sys::Win32::Foundation::SIZE;
 use windows_sys::Win32::Graphics::Gdi::{
-    ANTIALIASED_QUALITY, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CLIP_DEFAULT_PRECIS,
-    CreateCompatibleDC, CreateDIBSection, CreateFontW, DEFAULT_CHARSET, DEFAULT_PITCH,
-    DIB_RGB_COLORS, DeleteDC, DeleteObject, FF_DONTCARE, FW_SEMIBOLD, GdiFlush,
-    GetTextExtentPoint32W, GetTextMetricsW, HBITMAP, HDC, HFONT, HGDIOBJ, OUT_TT_PRECIS,
-    SelectObject, SetBkMode, SetTextColor, TEXTMETRICW, TRANSPARENT, TextOutW,
+    ANTIALIASED_QUALITY, AddFontResourceExW, BI_RGB, BITMAPINFO, BITMAPINFOHEADER,
+    CLIP_DEFAULT_PRECIS, CreateCompatibleDC, CreateDIBSection, CreateFontW, DEFAULT_CHARSET,
+    DEFAULT_PITCH, DIB_RGB_COLORS, DeleteDC, DeleteObject, FF_DONTCARE, FR_NOT_ENUM, FR_PRIVATE,
+    FW_SEMIBOLD, GdiFlush, GetTextExtentPoint32W, GetTextFaceW, GetTextMetricsW, HBITMAP, HDC,
+    HFONT, HGDIOBJ, OUT_TT_PRECIS, RemoveFontResourceExW, SelectObject, SetBkMode,
+    SetTextCharacterExtra, SetTextColor, TEXTMETRICW, TRANSPARENT, TextOutW,
 };
 
 use crate::animation::ShapeState;
@@ -15,26 +17,222 @@ use crate::clock::{ClockFormat, ClockSnapshot};
 use crate::geometry::rounded_rect_distance;
 use crate::render::blend_pixel;
 
-const COMPACT_TIME_PX: f32 = 26.0;
-const EXPANDED_TIME_PX: f32 = 48.0;
+const TEXT_SUPERSAMPLE: usize = 3;
+const SUPERSAMPLE_SCALE: f32 = TEXT_SUPERSAMPLE as f32;
+const COMPACT_TIME_PX: f32 = 27.0;
+const EXPANDED_TIME_PX: f32 = 50.0;
 const COMPACT_SUFFIX_PX: f32 = 11.0;
 const EXPANDED_SUFFIX_PX: f32 = 14.0;
-const DATE_PX: f32 = 15.0;
-const COMPACT_SECONDS_PX: f32 = 11.0;
-const EXPANDED_SECONDS_PX: f32 = 14.0;
+const COMPACT_SECONDS_PX: f32 = 12.0;
+const EXPANDED_SECONDS_PX: f32 = 15.0;
+const DATE_PX: f32 = 13.0;
 const DIGIT_GAP_PX: f32 = 2.0;
 const MERIDIEM_GAP_PX: f32 = 6.0;
-const DATE_GAP_PX: f32 = 7.0;
-const SECONDS_GAP_PX: f32 = 4.0;
-const ACCENT_COLOR: [u8; 3] = [228, 177, 122];
-const SCRATCH_ORIGIN: i32 = 8;
-const TEXT_COLOR: [u8; 3] = [255, 255, 255];
-const DATE_COLOR: [u8; 3] = [200, 194, 188];
+const DATE_GAP_PX: f32 = 9.0;
+const COMPACT_SECONDS_GAP_PX: f32 = 5.0;
+const EXPANDED_SECONDS_GAP_PX: f32 = 6.0;
+const DIVIDER_GAP_PX: f32 = 12.0;
+const DIVIDER_WIDTH_PX: f32 = 28.0;
+const DIVIDER_HEIGHT_PX: f32 = 2.0;
+const DOT_PX: f32 = 5.0;
+const DOT_GAP_PX: f32 = 8.0;
+const DATE_TRACKING_EM: f32 = 0.1;
+const SCRATCH_ORIGIN_PX: f32 = 8.0;
+const SCRATCH_DESIGN: (f32, f32) = (280.0, 90.0);
+const TEXT_COLOR: [u8; 3] = [250, 248, 247];
+const SECONDARY_COLOR: [u8; 3] = [184, 172, 169];
+const DATE_COLOR: [u8; 3] = [169, 157, 154];
+const EMBEDDED_FONTS: [(&str, &[u8]); 3] = [
+    (
+        "Inter-Medium.ttf",
+        include_bytes!("../assets/fonts/Inter-Medium.ttf"),
+    ),
+    (
+        "Inter-SemiBold.ttf",
+        include_bytes!("../assets/fonts/Inter-SemiBold.ttf"),
+    ),
+    (
+        "InterDisplay-SemiBold.ttf",
+        include_bytes!("../assets/fonts/InterDisplay-SemiBold.ttf"),
+    ),
+];
 
 struct Mask {
     width: u32,
     height: u32,
+    advance: u32,
     coverage: Vec<u8>,
+}
+
+struct FontResources {
+    paths: Vec<Vec<u16>>,
+}
+
+impl Drop for FontResources {
+    fn drop(&mut self) {
+        for path in &self.paths {
+            // SAFETY: path is a NUL-terminated wide string previously loaded with the same flags.
+            unsafe {
+                RemoveFontResourceExW(path.as_ptr(), FR_PRIVATE | FR_NOT_ENUM, null());
+            }
+        }
+    }
+}
+
+struct Fonts {
+    compact_time: HFONT,
+    compact_suffix: HFONT,
+    expanded_time: HFONT,
+    expanded_suffix: HFONT,
+    compact_seconds: HFONT,
+    expanded_seconds: HFONT,
+    date: HFONT,
+}
+
+impl Fonts {
+    fn all(&self) -> [HFONT; 7] {
+        [
+            self.compact_time,
+            self.compact_suffix,
+            self.expanded_time,
+            self.expanded_suffix,
+            self.compact_seconds,
+            self.expanded_seconds,
+            self.date,
+        ]
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct TextRect {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+impl TextRect {
+    fn center_y(self) -> f32 {
+        self.y + self.height * 0.5
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct CompactLayout {
+    pub dot: TextRect,
+    pub time: TextRect,
+    pub seconds: Option<TextRect>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ExpandedLayout {
+    pub date: Option<TextRect>,
+    pub time: TextRect,
+    pub seconds: Option<TextRect>,
+    pub divider: TextRect,
+}
+
+pub(crate) fn compact_layout(
+    canvas_width: f32,
+    center_y: f32,
+    time: (f32, f32),
+    seconds: Option<(f32, f32)>,
+    scale: f32,
+) -> CompactLayout {
+    let dot = DOT_PX * scale;
+    let dot_gap = DOT_GAP_PX * scale;
+    let seconds_gap = COMPACT_SECONDS_GAP_PX * scale;
+    let group_width = dot + dot_gap + time.0 + seconds.map_or(0.0, |value| seconds_gap + value.0);
+    let start = canvas_width * 0.5 - group_width * 0.5;
+    let dot_rect = TextRect {
+        x: start,
+        y: center_y - dot * 0.5,
+        width: dot,
+        height: dot,
+    };
+    let time_rect = TextRect {
+        x: start + dot + dot_gap,
+        y: center_y - time.1 * 0.5,
+        width: time.0,
+        height: time.1,
+    };
+    let seconds_rect = seconds.map(|(width, height)| TextRect {
+        x: time_rect.x + time.0 + seconds_gap,
+        y: center_y - height * 0.5,
+        width,
+        height,
+    });
+
+    CompactLayout {
+        dot: dot_rect,
+        time: time_rect,
+        seconds: seconds_rect,
+    }
+}
+
+pub(crate) fn expanded_layout(
+    canvas_width: f32,
+    top: f32,
+    shape_height: f32,
+    date: Option<(f32, f32)>,
+    time: (f32, f32),
+    seconds: Option<(f32, f32)>,
+    scale: f32,
+) -> ExpandedLayout {
+    let date_gap = DATE_GAP_PX * scale;
+    let divider_gap = DIVIDER_GAP_PX * scale;
+    let divider_width = DIVIDER_WIDTH_PX * scale;
+    let divider_height = DIVIDER_HEIGHT_PX * scale;
+    let seconds_gap = EXPANDED_SECONDS_GAP_PX * scale;
+    let date_height = date.map_or(0.0, |value| value.1 + date_gap);
+    let block_height = date_height + time.1 + divider_gap + divider_height;
+    let block_top = top + (shape_height - block_height).max(0.0) * 0.5;
+
+    let date_rect = date.map(|(width, height)| TextRect {
+        x: canvas_width * 0.5 - width * 0.5,
+        y: block_top,
+        width,
+        height,
+    });
+    let row_y = block_top + date_height;
+    let row_width = time.0 + seconds.map_or(0.0, |value| seconds_gap + value.0);
+    let row_left = canvas_width * 0.5 - row_width * 0.5;
+    let time_rect = TextRect {
+        x: row_left,
+        y: row_y,
+        width: time.0,
+        height: time.1,
+    };
+    let seconds_rect = seconds.map(|(width, height)| TextRect {
+        x: time_rect.x + time.0 + seconds_gap,
+        y: row_y + time.1 * 0.10,
+        width,
+        height,
+    });
+    let divider_rect = TextRect {
+        x: canvas_width * 0.5 - divider_width * 0.5,
+        y: row_y + time.1 + divider_gap,
+        width: divider_width,
+        height: divider_height,
+    };
+
+    ExpandedLayout {
+        date: date_rect,
+        time: time_rect,
+        seconds: seconds_rect,
+        divider: divider_rect,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct TextParams {
+    pub size: (u32, u32),
+    pub state: ShapeState,
+    pub top_margin: f32,
+    pub scale: f32,
+    pub accent: [u8; 3],
+    pub show_seconds: bool,
+    pub hover: f32,
 }
 
 pub(crate) struct TextLayer {
@@ -43,14 +241,11 @@ pub(crate) struct TextLayer {
     previous_bitmap: HGDIOBJ,
     previous_font: HGDIOBJ,
     bits: *mut u8,
-    size: (u32, u32),
-    compact_font: HFONT,
-    compact_suffix_font: HFONT,
-    expanded_font: HFONT,
-    expanded_suffix_font: HFONT,
-    compact_seconds_font: HFONT,
-    expanded_seconds_font: HFONT,
-    date_font: HFONT,
+    scratch_size: (u32, u32),
+    origin: i32,
+    scale: f32,
+    fonts: Fonts,
+    _font_resources: Option<FontResources>,
     key: Option<(ClockSnapshot, ClockFormat)>,
     compact: Option<Mask>,
     expanded: Option<Mask>,
@@ -60,34 +255,24 @@ pub(crate) struct TextLayer {
 }
 
 impl TextLayer {
-    pub(crate) fn new(size: (u32, u32), scale: f32) -> Result<Self, String> {
-        // SAFETY: This memory DC and its DIB are owned by the returned TextLayer.
+    pub(crate) fn new(scale: f32) -> Result<Self, String> {
+        let scale = scale.max(0.5);
+        let scratch_size = (
+            supersampled(SCRATCH_DESIGN.0, scale),
+            supersampled(SCRATCH_DESIGN.1, scale),
+        );
+        let origin = (SCRATCH_ORIGIN_PX * scale * SUPERSAMPLE_SCALE).round() as i32;
+
+        // SAFETY: The memory DC, DIB, fonts, and resources are owned by the returned TextLayer.
         unsafe {
             let dc = CreateCompatibleDC(null_mut());
             if dc.is_null() {
                 return Err("CreateCompatibleDC failed for text".to_string());
             }
-            let info = BITMAPINFO {
-                bmiHeader: BITMAPINFOHEADER {
-                    biSize: size_of::<BITMAPINFOHEADER>() as u32,
-                    biWidth: size.0 as i32,
-                    biHeight: -(size.1 as i32),
-                    biPlanes: 1,
-                    biBitCount: 32,
-                    biCompression: BI_RGB,
-                    ..Default::default()
-                },
-                ..Default::default()
-            };
-            let mut bits = null_mut();
-            let bitmap = CreateDIBSection(dc, &info, DIB_RGB_COLORS, &mut bits, null_mut(), 0);
-            if bitmap.is_null() || bits.is_null() {
-                if !bitmap.is_null() {
-                    DeleteObject(bitmap);
-                }
+            let Some((bitmap, bits)) = create_scratch_bitmap(dc, scratch_size) else {
                 DeleteDC(dc);
                 return Err("CreateDIBSection failed for text".to_string());
-            }
+            };
             let previous_bitmap = SelectObject(dc, bitmap);
             if previous_bitmap.is_null() || previous_bitmap as isize == -1 {
                 DeleteObject(bitmap);
@@ -98,47 +283,28 @@ impl TextLayer {
             SetBkMode(dc, TRANSPARENT as i32);
             SetTextColor(dc, 0x00FF_FFFF);
 
-            let face = wide("Segoe UI Variable Display");
-            let text_face = wide("Segoe UI Variable Text");
-            let mut fonts = Vec::with_capacity(7);
-            let specs: [(f32, i32, &[u16]); 7] = [
-                (COMPACT_TIME_PX, FW_SEMIBOLD as i32, face.as_slice()),
-                (COMPACT_SUFFIX_PX, FW_SEMIBOLD as i32, text_face.as_slice()),
-                (EXPANDED_TIME_PX, FW_SEMIBOLD as i32, face.as_slice()),
-                (EXPANDED_SUFFIX_PX, FW_SEMIBOLD as i32, text_face.as_slice()),
-                (COMPACT_SECONDS_PX, 400, text_face.as_slice()),
-                (EXPANDED_SECONDS_PX, 400, text_face.as_slice()),
-                (DATE_PX, 400, text_face.as_slice()),
-            ];
-            for (design_px, weight, face) in specs {
-                let font = create_font(design_px * scale, weight, face);
-                if font.is_null() {
-                    for font in fonts {
-                        DeleteObject(font);
-                    }
+            let (fonts, font_resources) = match create_fonts(dc, scale) {
+                Ok(value) => value,
+                Err(error) => {
                     SelectObject(dc, previous_bitmap);
                     DeleteObject(bitmap);
                     DeleteDC(dc);
-                    return Err("CreateFontW failed for text".to_string());
+                    return Err(error);
                 }
-                fonts.push(font);
-            }
-            let previous_font = SelectObject(dc, fonts[0]);
+            };
+            let previous_font = SelectObject(dc, fonts.compact_time);
 
             Ok(Self {
                 dc,
                 bitmap,
                 previous_bitmap,
                 previous_font,
-                bits: bits.cast(),
-                size,
-                compact_font: fonts[0],
-                compact_suffix_font: fonts[1],
-                expanded_font: fonts[2],
-                expanded_suffix_font: fonts[3],
-                compact_seconds_font: fonts[4],
-                expanded_seconds_font: fonts[5],
-                date_font: fonts[6],
+                bits,
+                scratch_size,
+                origin,
+                scale,
+                fonts,
+                _font_resources: font_resources,
                 key: None,
                 compact: None,
                 expanded: None,
@@ -156,14 +322,18 @@ impl TextLayer {
             let time = clock.time_text(format);
             let meridiem = clock.meridiem(format);
             self.clear();
-            self.compact =
-                self.draw_time(&time, meridiem, self.compact_font, self.compact_suffix_font);
+            self.compact = self.draw_time(
+                &time,
+                meridiem,
+                self.fonts.compact_time,
+                self.fonts.compact_suffix,
+            );
             self.clear();
             self.expanded = self.draw_time(
                 &time,
                 meridiem,
-                self.expanded_font,
-                self.expanded_suffix_font,
+                self.fonts.expanded_time,
+                self.fonts.expanded_suffix,
             );
         }
         if self
@@ -172,9 +342,9 @@ impl TextLayer {
         {
             let seconds = clock.seconds_text();
             self.clear();
-            self.compact_seconds = self.draw_seconds(&seconds, self.compact_seconds_font);
+            self.compact_seconds = self.draw_seconds(&seconds, self.fonts.compact_seconds);
             self.clear();
-            self.expanded_seconds = self.draw_seconds(&seconds, self.expanded_seconds_font);
+            self.expanded_seconds = self.draw_seconds(&seconds, self.fonts.expanded_seconds);
         }
         if self.key.is_none_or(|(previous, _)| {
             (previous.weekday, previous.month, previous.day)
@@ -186,114 +356,191 @@ impl TextLayer {
         self.key = Some((*clock, format));
     }
 
-    pub(crate) fn draw(
-        &self,
-        pixels: &mut [u8],
-        size: (u32, u32),
-        state: ShapeState,
-        top_margin: f32,
-        scale: f32,
-    ) {
-        let content = state.expanded_content_alpha().clamp(0.0, 1.0);
-        let top = top_margin;
-        let center = (size.0 as f32 * 0.5, top + state.height * 0.5);
+    pub(crate) fn draw(&self, pixels: &mut [u8], params: TextParams) {
+        let shape = scale_shape(params.state, params.scale);
+        let center = (
+            params.size.0 as f32 * 0.5,
+            params.top_margin + shape.height * 0.5,
+        );
+        let compact_alpha = params.state.compact_content_alpha().clamp(0.0, 1.0);
+        let compact_center_y =
+            params.top_margin + shape.height * 0.5 + params.state.compact_lift() * params.scale;
 
-        if content < 1.0
+        if compact_alpha > 0.0
             && let Some(mask) = &self.compact
         {
-            let seconds = self.compact_seconds.as_ref();
-            let seconds_gap = seconds.map_or(0.0, |_| SECONDS_GAP_PX * scale);
-            let indicator = 4.0 * scale;
-            let indicator_gap = 7.0 * scale;
-            let seconds_width = seconds.map_or(0.0, |value| value.width as f32);
-            let group_width =
-                indicator + indicator_gap + mask.width as f32 + seconds_gap + seconds_width;
-            let start = size.0 as f32 * 0.5 - group_width * 0.5;
-            let x = start + indicator + indicator_gap;
-            let y = top + state.height * 0.5 - mask.height as f32 * 0.5;
-            blend_mask(
-                pixels,
-                size,
-                mask,
-                x,
-                y,
-                1.0 - content,
-                TEXT_COLOR,
-                state,
-                center,
+            let seconds = params
+                .show_seconds
+                .then_some(self.compact_seconds.as_ref())
+                .flatten();
+            let layout = compact_layout(
+                params.size.0 as f32,
+                compact_center_y,
+                (mask.width as f32, mask.height as f32),
+                seconds.map(|value| (value.advance as f32, value.height as f32)),
+                params.scale,
             );
+            let dot_center = (layout.dot.x + layout.dot.width * 0.5, layout.dot.center_y());
+            if params.hover > 0.0 {
+                fill_circle(
+                    pixels,
+                    params.size,
+                    dot_center,
+                    layout.dot.width * 0.95,
+                    compact_alpha * params.hover * 0.08,
+                    params.accent,
+                    shape,
+                    center,
+                );
+            }
             fill_circle(
                 pixels,
-                size,
-                (start + indicator * 0.5, top + state.height * 0.5),
-                indicator * 0.5,
-                1.0 - content,
-                ACCENT_COLOR,
-                state,
+                params.size,
+                dot_center,
+                layout.dot.width * 0.5,
+                compact_alpha,
+                params.accent,
+                shape,
                 center,
             );
-            if let Some(seconds) = seconds {
-                let seconds_y = top + state.height * 0.5 - seconds.height as f32 * 0.5;
+            blend_mask(
+                pixels,
+                params.size,
+                mask,
+                layout.time.x,
+                layout.time.y,
+                compact_alpha,
+                TEXT_COLOR,
+                shape,
+                center,
+            );
+            if let (Some(seconds), Some(rect)) = (seconds, layout.seconds) {
                 blend_mask(
                     pixels,
-                    size,
+                    params.size,
                     seconds,
-                    x + mask.width as f32 + seconds_gap,
-                    seconds_y,
-                    1.0 - content,
-                    DATE_COLOR,
-                    state,
+                    rect.x + (rect.width - seconds.width as f32) * 0.5,
+                    rect.y,
+                    compact_alpha,
+                    SECONDARY_COLOR,
+                    shape,
                     center,
                 );
             }
         }
 
-        if content > 0.0
+        let expanded_alpha = params.state.expanded_content_alpha().clamp(0.0, 1.0);
+        if expanded_alpha > 0.0
             && let Some(mask) = &self.expanded
         {
             let date = self.date.as_ref();
-            let seconds = self.expanded_seconds.as_ref();
-            let date_gap = DATE_GAP_PX * scale;
-            let seconds_gap = SECONDS_GAP_PX * scale;
-            let date_height = date.map_or(0.0, |label| label.height as f32 + date_gap);
-            let seconds_height = seconds.map_or(0.0, |label| label.height as f32 + seconds_gap);
-            let divider_gap = 5.0 * scale;
-            let divider_height = 1.0 * scale;
-            let block_height =
-                date_height + mask.height as f32 + divider_gap + divider_height + seconds_height;
-            let mut y = top + (state.height - block_height).max(0.0) * 0.5;
-            if let Some(date) = date {
-                let x = size.0 as f32 * 0.5 - date.width as f32 * 0.5;
-                blend_mask(pixels, size, date, x, y, content, DATE_COLOR, state, center);
-                y += date.height as f32 + date_gap;
-            }
-            let x = size.0 as f32 * 0.5 - mask.width as f32 * 0.5;
-            blend_mask(pixels, size, mask, x, y, content, TEXT_COLOR, state, center);
-            y += mask.height as f32 + divider_gap;
-            fill_rect(
-                pixels,
-                size,
-                (size.0 as f32 * 0.5 - 15.0 * scale, y),
-                (30.0 * scale, divider_height),
-                content,
-                ACCENT_COLOR,
-                state,
-                center,
+            let seconds = params
+                .show_seconds
+                .then_some(self.expanded_seconds.as_ref())
+                .flatten();
+            let content_scale = params.state.expanded_scale();
+            let lift = params.state.expanded_lift() * params.scale;
+            let layout = expanded_layout(
+                params.size.0 as f32,
+                params.top_margin + lift,
+                shape.height,
+                date.map(|value| (value.width as f32, value.height as f32)),
+                (mask.width as f32, mask.height as f32),
+                seconds.map(|value| (value.advance as f32, value.height as f32)),
+                params.scale,
             );
-            if let Some(seconds) = seconds {
-                let x = size.0 as f32 * 0.5 - seconds.width as f32 * 0.5;
-                y += divider_height + seconds_gap;
-                blend_mask(
-                    pixels, size, seconds, x, y, content, DATE_COLOR, state, center,
+            if let (Some(date), Some(rect)) = (date, layout.date) {
+                blend_mask_scaled(
+                    pixels,
+                    params.size,
+                    date,
+                    rect.x,
+                    rect.y,
+                    expanded_alpha,
+                    DATE_COLOR,
+                    shape,
+                    center,
+                    content_scale,
                 );
             }
+            blend_mask_scaled(
+                pixels,
+                params.size,
+                mask,
+                layout.time.x,
+                layout.time.y,
+                expanded_alpha,
+                TEXT_COLOR,
+                shape,
+                center,
+                content_scale,
+            );
+            if let (Some(seconds), Some(rect)) = (seconds, layout.seconds) {
+                blend_mask_scaled(
+                    pixels,
+                    params.size,
+                    seconds,
+                    rect.x + (rect.width - seconds.width as f32) * 0.5,
+                    rect.y,
+                    expanded_alpha,
+                    SECONDARY_COLOR,
+                    shape,
+                    center,
+                    content_scale,
+                );
+            }
+            fill_rect(
+                pixels,
+                params.size,
+                (layout.divider.x, layout.divider.y),
+                (layout.divider.width, layout.divider.height),
+                expanded_alpha,
+                params.accent,
+                shape,
+                center,
+            );
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn scratch_size(&self) -> (u32, u32) {
+        self.scratch_size
+    }
+
     fn clear(&mut self) {
-        let length = self.size.0 as usize * self.size.1 as usize * 4;
+        let length = self.scratch_size.0 as usize * self.scratch_size.1 as usize * 4;
         // SAFETY: The DIB allocated exactly this many bytes and is owned by self.
         unsafe { std::ptr::write_bytes(self.bits, 0, length) };
+    }
+
+    fn ensure_scratch(&mut self, required: (u32, u32)) -> bool {
+        if required.0 <= self.scratch_size.0 && required.1 <= self.scratch_size.1 {
+            return true;
+        }
+        let width = required
+            .0
+            .max((self.scratch_size.0 as f32 * 1.15) as u32)
+            .max(1);
+        let height = required
+            .1
+            .max((self.scratch_size.1 as f32 * 1.15) as u32)
+            .max(1);
+        // SAFETY: The new DIB replaces the old one in the same live DC.
+        unsafe {
+            let Some((bitmap, bits)) = create_scratch_bitmap(self.dc, (width, height)) else {
+                return false;
+            };
+            let previous = SelectObject(self.dc, bitmap);
+            if previous.is_null() || previous as isize == -1 {
+                DeleteObject(bitmap);
+                return false;
+            }
+            DeleteObject(self.bitmap);
+            self.bitmap = bitmap;
+            self.bits = bits;
+            self.scratch_size = (width, height);
+        }
+        true
     }
 
     fn draw_time(
@@ -303,6 +550,7 @@ impl TextLayer {
         time_font: HFONT,
         suffix_font: HFONT,
     ) -> Option<Mask> {
+        let gap = (DIGIT_GAP_PX * self.scale * SUPERSAMPLE_SCALE).round() as i32;
         // SAFETY: dc is a live memory DC and every string pointer is valid for the call.
         unsafe {
             SelectObject(self.dc, time_font);
@@ -313,29 +561,46 @@ impl TextLayer {
                 .unwrap_or(1);
             let colon_width = text_extent(self.dc, ":").0;
 
-            let mut x = SCRATCH_ORIGIN;
+            let mut glyphs = Vec::with_capacity(time.chars().count());
+            let mut required_width = self.origin;
             for character in time.chars() {
                 let glyph = character.to_string();
                 let (glyph_width, _) = text_extent(self.dc, &glyph);
                 let cell = if character == ':' {
                     (colon_width as f32 * 1.2).round() as i32
                 } else {
-                    digit_width + DIGIT_GAP_PX as i32
+                    digit_width + gap
                 };
-                draw_text(
-                    self.dc,
-                    &glyph,
-                    x + (cell - glyph_width) / 2,
-                    SCRATCH_ORIGIN,
-                );
+                required_width += cell.max(glyph_width);
+                glyphs.push((glyph, glyph_width, cell));
+            }
+            required_width += self.origin;
+
+            let mut suffix_height = 0;
+            if let Some(meridiem) = meridiem {
+                SelectObject(self.dc, suffix_font);
+                let suffix_metrics = text_metrics(self.dc);
+                suffix_height = suffix_metrics.tmHeight;
+                required_width += (MERIDIEM_GAP_PX * self.scale * SUPERSAMPLE_SCALE).round() as i32
+                    + text_extent(self.dc, meridiem).0;
+            }
+            let required_height = self.origin + metrics.tmHeight.max(suffix_height) + self.origin;
+            if !self.ensure_scratch((required_width.max(1) as u32, required_height.max(1) as u32)) {
+                return None;
+            }
+
+            SelectObject(self.dc, time_font);
+            let mut x = self.origin;
+            for (glyph, glyph_width, cell) in glyphs {
+                draw_text(self.dc, &glyph, x + (cell - glyph_width) / 2, self.origin);
                 x += cell.max(glyph_width);
             }
 
             if let Some(meridiem) = meridiem {
                 SelectObject(self.dc, suffix_font);
                 let suffix_metrics = text_metrics(self.dc);
-                x += MERIDIEM_GAP_PX as i32;
-                let baseline = SCRATCH_ORIGIN + metrics.tmAscent;
+                x += (MERIDIEM_GAP_PX * self.scale * SUPERSAMPLE_SCALE).round() as i32;
+                let baseline = self.origin + metrics.tmAscent;
                 let suffix_y = baseline - suffix_metrics.tmAscent;
                 draw_text(self.dc, meridiem, x, suffix_y);
             }
@@ -346,36 +611,61 @@ impl TextLayer {
     fn draw_date(&mut self, date: &str) -> Option<Mask> {
         // SAFETY: dc is live and the text pointer is valid for the duration of TextOutW.
         unsafe {
-            SelectObject(self.dc, self.date_font);
-            draw_text(self.dc, date, SCRATCH_ORIGIN, SCRATCH_ORIGIN);
+            SelectObject(self.dc, self.fonts.date);
+            let tracking =
+                (DATE_TRACKING_EM * DATE_PX * self.scale * SUPERSAMPLE_SCALE).round() as i32;
+            SetTextCharacterExtra(self.dc, tracking);
+            let (width, _) = text_extent(self.dc, date);
+            let height = text_metrics(self.dc).tmHeight;
+            let ready = self.ensure_scratch((
+                (self.origin + width + self.origin).max(1) as u32,
+                (self.origin + height + self.origin).max(1) as u32,
+            ));
+            if !ready {
+                SetTextCharacterExtra(self.dc, 0);
+                return None;
+            }
+            draw_text(self.dc, date, self.origin, self.origin);
+            SetTextCharacterExtra(self.dc, 0);
         }
         self.extract_mask()
     }
 
-    fn draw_seconds(&self, seconds: &str, font: HFONT) -> Option<Mask> {
-        // Use fixed-width digit cells and keep the font's full height in the mask.
-        unsafe { SelectObject(self.dc, font) };
-        let cell = ('0'..='9')
-            .map(|digit| text_extent(self.dc, &digit.to_string()).0)
-            .max()?;
-        let height = text_metrics(self.dc).tmHeight;
-        for (index, digit) in seconds.chars().enumerate() {
-            let glyph = digit.to_string();
-            let width = text_extent(self.dc, &glyph).0;
-            draw_text(
-                self.dc,
-                &glyph,
-                SCRATCH_ORIGIN + index as i32 * cell + (cell - width) / 2,
-                SCRATCH_ORIGIN,
-            );
-        }
-        let start = SCRATCH_ORIGIN as usize;
-        self.read_mask(start, start, (2 * cell) as usize, height as usize)
+    fn draw_seconds(&mut self, seconds: &str, font: HFONT) -> Option<Mask> {
+        // SAFETY: dc is a live memory DC and every string pointer is valid for the call.
+        let advance = unsafe {
+            SelectObject(self.dc, font);
+            let cell = ('0'..='9')
+                .map(|digit| text_extent(self.dc, &digit.to_string()).0)
+                .max()?;
+            let height = text_metrics(self.dc).tmHeight;
+            let required_width = self.origin + cell * seconds.chars().count() as i32 + self.origin;
+            if !self.ensure_scratch((
+                required_width.max(1) as u32,
+                (self.origin + height + self.origin).max(1) as u32,
+            )) {
+                return None;
+            }
+            for (index, digit) in seconds.chars().enumerate() {
+                let glyph = digit.to_string();
+                let width = text_extent(self.dc, &glyph).0;
+                draw_text(
+                    self.dc,
+                    &glyph,
+                    self.origin + index as i32 * cell + (cell - width) / 2,
+                    self.origin,
+                );
+            }
+            ((cell * seconds.chars().count() as i32) as f32 / SUPERSAMPLE_SCALE).ceil() as u32
+        };
+        let mut mask = self.extract_mask()?;
+        mask.advance = advance.max(mask.width);
+        Some(mask)
     }
 
     fn extract_mask(&self) -> Option<Mask> {
-        let width = self.size.0 as usize;
-        let height = self.size.1 as usize;
+        let width = self.scratch_size.0 as usize;
+        let height = self.scratch_size.1 as usize;
         // SAFETY: Flush queued GDI writes before reading our mapped DIB.
         unsafe { GdiFlush() };
         let pixels = unsafe { std::slice::from_raw_parts(self.bits, width * height * 4) };
@@ -400,34 +690,66 @@ impl TextLayer {
             return None;
         }
 
-        self.read_mask(min_x, min_y, max_x - min_x + 1, max_y - min_y + 1)
+        self.downsample(pixels, width, height, (min_x, min_y, max_x, max_y))
     }
 
-    fn read_mask(&self, left: usize, top: usize, width: usize, height: usize) -> Option<Mask> {
-        let stride = self.size.0 as usize;
-        if width == 0
-            || height == 0
-            || width > stride.saturating_sub(left)
-            || height > (self.size.1 as usize).saturating_sub(top)
-        {
+    fn downsample(
+        &self,
+        pixels: &[u8],
+        stride: usize,
+        height: usize,
+        bounds: (usize, usize, usize, usize),
+    ) -> Option<Mask> {
+        let (min_x, min_y, max_x, max_y) = bounds;
+        let left = min_x / TEXT_SUPERSAMPLE;
+        let top = min_y / TEXT_SUPERSAMPLE;
+        let right = ((max_x + 1).div_ceil(TEXT_SUPERSAMPLE)).min(stride / TEXT_SUPERSAMPLE);
+        let bottom = ((max_y + 1).div_ceil(TEXT_SUPERSAMPLE)).min(height / TEXT_SUPERSAMPLE);
+        if left >= right || top >= bottom {
             return None;
         }
-        // SAFETY: Flush queued writes; the DIB contains stride * height_of_surface * 4 bytes.
-        unsafe { GdiFlush() };
-        let pixels =
-            unsafe { std::slice::from_raw_parts(self.bits, stride * self.size.1 as usize * 4) };
-        let mut coverage = Vec::with_capacity(width * height);
-        for y in top..top + height {
-            for x in left..left + width {
-                let index = (y * stride + x) * 4;
-                coverage.push(pixels[index].max(pixels[index + 1]).max(pixels[index + 2]));
+        let width = right - left;
+        let sample_count = (TEXT_SUPERSAMPLE * TEXT_SUPERSAMPLE) as u32;
+        let mut coverage = vec![0_u8; width * (bottom - top)];
+        for row in 0..bottom - top {
+            for column in 0..width {
+                let mut sum = 0_u32;
+                for sy in 0..TEXT_SUPERSAMPLE {
+                    let source_y = (top + row) * TEXT_SUPERSAMPLE + sy;
+                    for sx in 0..TEXT_SUPERSAMPLE {
+                        let source_x = (left + column) * TEXT_SUPERSAMPLE + sx;
+                        let index = (source_y * stride + source_x) * 4;
+                        sum += pixels[index].max(pixels[index + 1]).max(pixels[index + 2]) as u32;
+                    }
+                }
+                coverage[row * width + column] = (sum / sample_count) as u8;
+            }
+        }
+
+        let first_column =
+            (0..width).find(|&x| (0..bottom - top).any(|y| coverage[y * width + x] > 0))?;
+        let last_column = (0..width)
+            .rev()
+            .find(|&x| (0..bottom - top).any(|y| coverage[y * width + x] > 0))?;
+        let first_row =
+            (0..bottom - top).find(|&y| (0..width).any(|x| coverage[y * width + x] > 0))?;
+        let last_row = (0..bottom - top)
+            .rev()
+            .find(|&y| (0..width).any(|x| coverage[y * width + x] > 0))?;
+        let trimmed_width = last_column - first_column + 1;
+        let trimmed_height = last_row - first_row + 1;
+        let mut trimmed = Vec::with_capacity(trimmed_width * trimmed_height);
+        for y in first_row..=last_row {
+            for x in first_column..=last_column {
+                trimmed.push(coverage[y * width + x]);
             }
         }
 
         Some(Mask {
-            width: width as u32,
-            height: height as u32,
-            coverage,
+            width: trimmed_width as u32,
+            height: trimmed_height as u32,
+            advance: trimmed_width as u32,
+            coverage: trimmed,
         })
     }
 }
@@ -438,15 +760,7 @@ impl Drop for TextLayer {
         // bitmap, and the memory DC.
         unsafe {
             SelectObject(self.dc, self.previous_font);
-            for font in [
-                self.compact_font,
-                self.compact_suffix_font,
-                self.expanded_font,
-                self.expanded_suffix_font,
-                self.compact_seconds_font,
-                self.expanded_seconds_font,
-                self.date_font,
-            ] {
+            for font in self.fonts.all() {
                 DeleteObject(font);
             }
             SelectObject(self.dc, self.previous_bitmap);
@@ -454,6 +768,180 @@ impl Drop for TextLayer {
             DeleteDC(self.dc);
         }
     }
+}
+
+fn supersampled(design_px: f32, scale: f32) -> u32 {
+    (design_px * scale * SUPERSAMPLE_SCALE).ceil().max(1.0) as u32
+}
+
+unsafe fn create_scratch_bitmap(dc: HDC, size: (u32, u32)) -> Option<(HBITMAP, *mut u8)> {
+    let info = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: size.0 as i32,
+            biHeight: -(size.1 as i32),
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut bits = null_mut();
+    // SAFETY: info describes a valid 32-bit top-down DIB owned by the caller.
+    let bitmap = unsafe { CreateDIBSection(dc, &info, DIB_RGB_COLORS, &mut bits, null_mut(), 0) };
+    if bitmap.is_null() || bits.is_null() {
+        if !bitmap.is_null() {
+            // SAFETY: bitmap was just created and is not selected anywhere.
+            unsafe { DeleteObject(bitmap) };
+        }
+        return None;
+    }
+    Some((bitmap, bits.cast()))
+}
+
+fn install_fonts() -> Option<FontResources> {
+    let directory = PathBuf::from(std::env::var_os("LOCALAPPDATA")?)
+        .join("HiyoDyna")
+        .join("fonts");
+    std::fs::create_dir_all(&directory).ok()?;
+    let mut paths = Vec::with_capacity(EMBEDDED_FONTS.len());
+    for (name, data) in EMBEDDED_FONTS {
+        let path = directory.join(name);
+        let needs_write = std::fs::metadata(&path)
+            .map(|metadata| metadata.len() != data.len() as u64)
+            .unwrap_or(true);
+        if needs_write && std::fs::write(&path, data).is_err() {
+            continue;
+        }
+        let wide_path = wide(&path.to_string_lossy());
+        // SAFETY: wide_path is a NUL-terminated wide string for the duration of the call.
+        let added =
+            unsafe { AddFontResourceExW(wide_path.as_ptr(), FR_PRIVATE | FR_NOT_ENUM, null()) };
+        if added > 0 {
+            paths.push(wide_path);
+        }
+    }
+    if paths.is_empty() {
+        None
+    } else {
+        Some(FontResources { paths })
+    }
+}
+
+fn create_fonts(dc: HDC, scale: f32) -> Result<(Fonts, Option<FontResources>), String> {
+    let resources = install_fonts();
+    if resources.is_some()
+        && let Some(fonts) = build_fonts(dc, scale, true)
+    {
+        return Ok((fonts, resources));
+    }
+    let fonts = build_fonts(dc, scale, false).ok_or("CreateFontW failed for text")?;
+    Ok((fonts, None))
+}
+
+fn build_fonts(dc: HDC, scale: f32, inter: bool) -> Option<Fonts> {
+    let time_weight = if inter { 400 } else { FW_SEMIBOLD as i32 };
+    let secondary_weight = 400;
+    let medium: &[&str] = if inter {
+        &["Inter Medium", "Inter"]
+    } else {
+        &["Segoe UI"]
+    };
+    let semibold: &[&str] = if inter {
+        &["Inter SemiBold", "Inter"]
+    } else {
+        &["Segoe UI"]
+    };
+    let display: &[&str] = if inter {
+        &[
+            "Inter Display SemiBold",
+            "Inter Display",
+            "Inter SemiBold",
+            "Inter",
+        ]
+    } else {
+        &["Segoe UI"]
+    };
+    let size = |design_px: f32| design_px * scale * SUPERSAMPLE_SCALE;
+    let specs: [(f32, i32, &[&str]); 7] = [
+        (size(COMPACT_TIME_PX), time_weight, semibold),
+        (size(COMPACT_SUFFIX_PX), time_weight, medium),
+        (size(EXPANDED_TIME_PX), time_weight, display),
+        (size(EXPANDED_SUFFIX_PX), time_weight, medium),
+        (size(COMPACT_SECONDS_PX), secondary_weight, medium),
+        (size(EXPANDED_SECONDS_PX), secondary_weight, medium),
+        (size(DATE_PX), secondary_weight, medium),
+    ];
+    let mut handles = Vec::with_capacity(specs.len());
+    for (physical_px, weight, candidates) in specs {
+        let Some(font) = pick_font(dc, physical_px, weight, candidates, inter) else {
+            // SAFETY: every handle was created here and none are selected.
+            unsafe {
+                for font in handles {
+                    DeleteObject(font);
+                }
+            }
+            return None;
+        };
+        handles.push(font);
+    }
+
+    Some(Fonts {
+        compact_time: handles[0],
+        compact_suffix: handles[1],
+        expanded_time: handles[2],
+        expanded_suffix: handles[3],
+        compact_seconds: handles[4],
+        expanded_seconds: handles[5],
+        date: handles[6],
+    })
+}
+
+fn pick_font(
+    dc: HDC,
+    physical_px: f32,
+    weight: i32,
+    candidates: &[&str],
+    inter: bool,
+) -> Option<HFONT> {
+    for name in candidates {
+        let font = create_font(physical_px, weight, &wide(name));
+        if font.is_null() {
+            continue;
+        }
+        // SAFETY: dc is live and font was just created.
+        unsafe {
+            let previous = SelectObject(dc, font);
+            let face = selected_face(dc);
+            SelectObject(dc, previous);
+            let matches = if inter {
+                face.to_ascii_lowercase().contains("inter")
+            } else {
+                !face.is_empty()
+            };
+            if matches {
+                return Some(font);
+            }
+            DeleteObject(font);
+        }
+    }
+    None
+}
+
+fn selected_face(dc: HDC) -> String {
+    let mut buffer = [0_u16; 64];
+    // SAFETY: dc is live and buffer is writable for its full length.
+    let length = unsafe { GetTextFaceW(dc, buffer.len() as i32, buffer.as_mut_ptr()) };
+    if length <= 0 {
+        return String::new();
+    }
+    let length = (length as usize).min(buffer.len());
+    let end = buffer[..length]
+        .iter()
+        .position(|&value| value == 0)
+        .unwrap_or(length);
+    String::from_utf16_lossy(&buffer[..end])
 }
 
 fn create_font(physical_px: f32, weight: i32, face: &[u16]) -> HFONT {
@@ -507,6 +995,14 @@ fn draw_text(dc: HDC, text: &str, x: i32, y: i32) {
     }
 }
 
+fn scale_shape(state: ShapeState, scale: f32) -> ShapeState {
+    ShapeState {
+        width: state.width * scale,
+        height: state.height * scale,
+        radius: state.radius * scale,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn blend_mask(
     pixels: &mut [u8],
@@ -519,33 +1015,109 @@ fn blend_mask(
     state: ShapeState,
     center: (f32, f32),
 ) {
+    blend_mask_scaled(
+        pixels, size, mask, x, y, opacity, color_bgra, state, center, 1.0,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn blend_mask_scaled(
+    pixels: &mut [u8],
+    size: (u32, u32),
+    mask: &Mask,
+    x: f32,
+    y: f32,
+    opacity: f32,
+    color_bgra: [u8; 3],
+    state: ShapeState,
+    center: (f32, f32),
+    mask_scale: f32,
+) {
     if opacity <= 0.0 || mask.width == 0 || mask.height == 0 {
         return;
     }
     let canvas_width = size.0 as i32;
     let canvas_height = size.1 as i32;
-    let base_x = x.round() as i32;
-    let base_y = y.round() as i32;
-    for row in 0..mask.height as i32 {
-        let py = base_y + row;
-        if py < 0 || py >= canvas_height {
-            continue;
+    let mask_scale = if mask_scale.is_finite() && mask_scale > 0.0 {
+        mask_scale
+    } else {
+        1.0
+    };
+
+    if (mask_scale - 1.0).abs() < 0.001 {
+        let base_x = x.round() as i32;
+        let base_y = y.round() as i32;
+        for row in 0..mask.height as i32 {
+            let py = base_y + row;
+            if py < 0 || py >= canvas_height {
+                continue;
+            }
+            for column in 0..mask.width as i32 {
+                let px = base_x + column;
+                if px < 0 || px >= canvas_width {
+                    continue;
+                }
+                let coverage = mask.coverage[(row * mask.width as i32 + column) as usize];
+                if coverage == 0 {
+                    continue;
+                }
+                let distance =
+                    rounded_rect_distance(px as f32 + 0.5, py as f32 + 0.5, state, center);
+                let alpha = (coverage as f32 / 255.0) * opacity * (0.5 - distance).clamp(0.0, 1.0);
+                if alpha > 0.0 {
+                    blend_pixel_at(pixels, size, px, py, color_bgra, alpha);
+                }
+            }
         }
-        for column in 0..mask.width as i32 {
-            let px = base_x + column;
-            if px < 0 || px >= canvas_width {
+        return;
+    }
+
+    let destination_width = mask.width as f32 * mask_scale;
+    let destination_height = mask.height as f32 * mask_scale;
+    let left = (x + mask.width as f32 * 0.5 - destination_width * 0.5)
+        .floor()
+        .max(0.0) as i32;
+    let right = (x + mask.width as f32 * 0.5 + destination_width * 0.5)
+        .ceil()
+        .min(canvas_width as f32) as i32;
+    let top = (y + mask.height as f32 * 0.5 - destination_height * 0.5)
+        .floor()
+        .max(0.0) as i32;
+    let bottom = (y + mask.height as f32 * 0.5 + destination_height * 0.5)
+        .ceil()
+        .min(canvas_height as f32) as i32;
+    let destination_left = x + mask.width as f32 * 0.5 - destination_width * 0.5;
+    let destination_top = y + mask.height as f32 * 0.5 - destination_height * 0.5;
+
+    for py in top..bottom {
+        for px in left..right {
+            let u = (px as f32 + 0.5 - destination_left) / mask_scale - 0.5;
+            let v = (py as f32 + 0.5 - destination_top) / mask_scale - 0.5;
+            if u < -0.5 || v < -0.5 || u > mask.width as f32 - 0.5 || v > mask.height as f32 - 0.5 {
                 continue;
             }
-            let coverage = mask.coverage[(row * mask.width as i32 + column) as usize];
-            if coverage == 0 {
-                continue;
-            }
+            let x0 = u.floor() as i32;
+            let y0 = v.floor() as i32;
+            let tx = u - x0 as f32;
+            let ty = v - y0 as f32;
+            let coverage = sample(mask, x0, y0) as f32 * (1.0 - tx) * (1.0 - ty)
+                + sample(mask, x0 + 1, y0) as f32 * tx * (1.0 - ty)
+                + sample(mask, x0, y0 + 1) as f32 * (1.0 - tx) * ty
+                + sample(mask, x0 + 1, y0 + 1) as f32 * tx * ty;
             let distance = rounded_rect_distance(px as f32 + 0.5, py as f32 + 0.5, state, center);
-            let alpha = (coverage as f32 / 255.0) * opacity * (0.5 - distance).clamp(0.0, 1.0);
+            let alpha = (coverage / 255.0) * opacity * (0.5 - distance).clamp(0.0, 1.0);
             if alpha > 0.0 {
                 blend_pixel_at(pixels, size, px, py, color_bgra, alpha);
             }
         }
+    }
+}
+
+fn sample(mask: &Mask, x: i32, y: i32) -> u8 {
+    if x < 0 || y < 0 || x >= mask.width as i32 || y >= mask.height as i32 {
+        0
+    } else {
+        mask.coverage[(y * mask.width as i32 + x) as usize]
     }
 }
 
@@ -616,9 +1188,11 @@ fn wide(text: &str) -> Vec<u16> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Mask, TextLayer, blend_mask};
-    use crate::animation::{COMPACT, EXPANDED, ShapeState};
+    use super::{Mask, TextLayer, TextParams, blend_mask, compact_layout, expanded_layout};
+    use crate::animation::{COMPACT, EXPANDED};
     use crate::clock::{ClockFormat, ClockSnapshot};
+
+    const ICE: [u8; 3] = [255, 199, 143];
 
     fn snapshot() -> ClockSnapshot {
         snapshot_with_second(17)
@@ -635,9 +1209,55 @@ mod tests {
         }
     }
 
+    fn layer(scale: f32) -> TextLayer {
+        TextLayer::new(scale).expect("text layer should initialize")
+    }
+
+    fn params(
+        size: (u32, u32),
+        state: crate::animation::ShapeState,
+        show_seconds: bool,
+    ) -> TextParams {
+        TextParams {
+            size,
+            state,
+            top_margin: 0.0,
+            scale: 1.0,
+            accent: ICE,
+            show_seconds,
+            hover: 0.0,
+        }
+    }
+
+    fn mask_touches_all_edges(mask: &Mask) -> bool {
+        let width = mask.width as usize;
+        let height = mask.height as usize;
+        (0..width).any(|x| mask.coverage[x] > 0)
+            && (0..width).any(|x| mask.coverage[(height - 1) * width + x] > 0)
+            && (0..height).any(|y| mask.coverage[y * width] > 0)
+            && (0..height).any(|y| mask.coverage[y * width + width - 1] > 0)
+    }
+
+    #[test]
+    fn bundled_inter_fonts_are_selected() {
+        let layer = layer(1.0);
+        // SAFETY: dc is live and the fonts are owned by the layer.
+        unsafe {
+            for font in [layer.fonts.compact_time, layer.fonts.expanded_time] {
+                let previous = windows_sys::Win32::Graphics::Gdi::SelectObject(layer.dc, font);
+                let face = super::selected_face(layer.dc);
+                windows_sys::Win32::Graphics::Gdi::SelectObject(layer.dc, previous);
+                assert!(
+                    face.to_ascii_lowercase().contains("inter"),
+                    "expected bundled Inter, got {face}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn renders_compact_and_expanded_clock_masks() {
-        let mut layer = TextLayer::new((512, 224), 1.0).expect("text layer should initialize");
+        let mut layer = layer(1.0);
         layer.update(&snapshot(), ClockFormat::TwentyFourHour);
 
         let compact = layer.compact.as_ref().expect("compact time should render");
@@ -647,22 +1267,27 @@ mod tests {
             .expect("expanded time should render");
         assert!(compact.width > 10 && compact.height > 5);
         assert!(expanded.width > compact.width);
+        assert!(mask_touches_all_edges(compact));
+        assert!(mask_touches_all_edges(expanded));
         assert!(layer.compact_seconds.is_some());
         assert!(layer.expanded_seconds.is_some());
         assert!(layer.date.is_some());
+        assert!(mask_touches_all_edges(
+            layer.compact_seconds.as_ref().unwrap()
+        ));
     }
 
     #[test]
     fn changing_only_seconds_changes_the_rendered_clock() {
         let size = (512, 224);
-        let mut layer = TextLayer::new(size, 1.0).expect("text layer should initialize");
+        let mut layer = layer(1.0);
         for state in [COMPACT, EXPANDED] {
             let mut first = vec![0_u8; size.0 as usize * size.1 as usize * 4];
             let mut next = first.clone();
             layer.update(&snapshot_with_second(11), ClockFormat::TwentyFourHour);
-            layer.draw(&mut first, size, state, 0.0, 1.0);
+            layer.draw(&mut first, params(size, state, true));
             layer.update(&snapshot_with_second(58), ClockFormat::TwentyFourHour);
-            layer.draw(&mut next, size, state, 0.0, 1.0);
+            layer.draw(&mut next, params(size, state, true));
 
             assert!(first != next, "a second rollover should refresh the clock");
             let bright_glyph = |pixel: &[u8; 4]| pixel[..3].iter().all(|&channel| channel > 230);
@@ -681,11 +1306,9 @@ mod tests {
 
     #[test]
     fn text_masks_scale_with_the_display_scale() {
-        let regular = TextLayer::new((512, 224), 1.0).expect("text layer should initialize");
-        let scaled = TextLayer::new((768, 336), 1.5).expect("scaled text layer should initialize");
+        let mut regular = layer(1.0);
+        let mut scaled = layer(1.5);
         let snapshot = snapshot();
-        let mut regular = regular;
-        let mut scaled = scaled;
         regular.update(&snapshot, ClockFormat::TwentyFourHour);
         scaled.update(&snapshot, ClockFormat::TwentyFourHour);
         let regular_time = regular.expanded.as_ref().unwrap();
@@ -700,15 +1323,120 @@ mod tests {
     }
 
     #[test]
+    fn text_masks_scale_at_200_percent_dpi() {
+        let mut regular = layer(1.0);
+        let mut doubled = layer(2.0);
+        let snapshot = snapshot();
+        regular.update(&snapshot, ClockFormat::TwentyFourHour);
+        doubled.update(&snapshot, ClockFormat::TwentyFourHour);
+
+        let regular_time = regular.expanded.as_ref().unwrap();
+        let doubled_time = doubled.expanded.as_ref().unwrap();
+        assert!(doubled_time.width as f32 >= regular_time.width as f32 * 1.8);
+        assert!(doubled_time.height as f32 >= regular_time.height as f32 * 1.8);
+    }
+
+    #[test]
+    fn scratch_starts_at_design_size_and_grows() {
+        let mut layer = layer(1.0);
+        let initial = layer.scratch_size();
+        assert!(initial.0 >= 280 * 3);
+        assert!(initial.1 >= 90 * 3);
+        assert!(layer.ensure_scratch((initial.0 + 100, initial.1 + 100)));
+        let grown = layer.scratch_size();
+        assert!(grown.0 > initial.0);
+        assert!(grown.1 > initial.1);
+    }
+
+    #[test]
+    fn compact_layout_centers_seconds_on_the_time_ink() {
+        let layout = compact_layout(512.0, 100.0, (80.0, 24.0), Some((20.0, 14.0)), 1.0);
+        let time = layout.time;
+        let seconds = layout.seconds.expect("seconds should be present");
+        assert_eq!(seconds.center_y(), time.center_y());
+        assert!(layout.dot.x < time.x);
+        assert!(seconds.x >= time.x + time.width);
+        let left = layout.dot.x;
+        let right = seconds.x + seconds.width;
+        assert!(((left + right) * 0.5 - 256.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn compact_layout_drops_seconds_when_hidden() {
+        let layout = compact_layout(512.0, 100.0, (80.0, 24.0), None, 1.0);
+        assert!(layout.seconds.is_none());
+        let right = layout.time.x + layout.time.width;
+        let left = layout.dot.x;
+        assert!(((left + right) * 0.5 - 256.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn expanded_layout_keeps_seconds_and_divider_clear() {
+        let layout = expanded_layout(
+            512.0,
+            0.0,
+            150.0,
+            Some((195.0, 13.0)),
+            (300.0, 50.0),
+            Some((20.0, 15.0)),
+            1.0,
+        );
+        let time = layout.time;
+        let seconds = layout.seconds.expect("seconds should be present");
+        assert!(seconds.x >= time.x + time.width);
+        assert!(layout.divider.y >= time.y + time.height);
+        let date = layout.date.expect("date should be present");
+        let top = date.y;
+        let bottom = layout.divider.y + layout.divider.height;
+        assert!(((top + bottom) * 0.5 - 75.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn twenty_four_and_twelve_hour_rows_do_not_overlap() {
+        let mut layer = layer(1.0);
+        for format in [ClockFormat::TwentyFourHour, ClockFormat::TwelveHour] {
+            layer.update(&snapshot(), format);
+            let time = layer.expanded.as_ref().unwrap();
+            let seconds = layer.expanded_seconds.as_ref().unwrap();
+            let layout = expanded_layout(
+                512.0,
+                0.0,
+                150.0,
+                None,
+                (time.width as f32, time.height as f32),
+                Some((seconds.advance as f32, seconds.height as f32)),
+                1.0,
+            );
+            assert!(
+                layout.seconds.unwrap().x >= layout.time.x + layout.time.width,
+                "seconds must clear the time mask in {format:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn twelve_hour_mode_adds_a_meridiem_suffix() {
+        let mut layer = layer(1.0);
+        layer.update(&snapshot(), ClockFormat::TwelveHour);
+        let twelve_hour_width = layer.compact.as_ref().unwrap().width;
+
+        layer.update(&snapshot(), ClockFormat::TwentyFourHour);
+        let twenty_four_hour_width = layer.compact.as_ref().unwrap().width;
+
+        assert!(twelve_hour_width > twenty_four_hour_width);
+    }
+
+    #[test]
     fn mask_blending_clips_to_the_rounded_shape() {
         let size = (20, 20);
         let mut pixels = vec![0_u8; size.0 as usize * size.1 as usize * 4];
         let mask = Mask {
             width: 10,
             height: 10,
+            advance: 10,
             coverage: vec![255; 100],
         };
-        let shape = ShapeState {
+        let shape = crate::animation::ShapeState {
             width: 10.0,
             height: 10.0,
             radius: 5.0,
@@ -746,10 +1474,10 @@ mod tests {
         for pixel in pixels.chunks_mut(4) {
             pixel.copy_from_slice(&[20, 20, 20, 255]);
         }
-        let mut layer = TextLayer::new(size, 1.0).expect("text layer should initialize");
+        let mut layer = layer(1.0);
         layer.update(&snapshot(), ClockFormat::TwentyFourHour);
 
-        layer.draw(&mut pixels, size, EXPANDED, 0.0, 1.0);
+        layer.draw(&mut pixels, params(size, EXPANDED, true));
 
         let bright = pixels.chunks(4).filter(|pixel| pixel[0] > 200).count();
         assert!(bright > 100, "expected clock pixels, got {bright}");
@@ -762,24 +1490,39 @@ mod tests {
         for pixel in pixels.chunks_mut(4) {
             pixel.copy_from_slice(&[20, 20, 20, 255]);
         }
-        let mut layer = TextLayer::new(size, 1.0).expect("text layer should initialize");
+        let mut layer = layer(1.0);
         layer.update(&snapshot(), ClockFormat::TwentyFourHour);
 
-        layer.draw(&mut pixels, size, COMPACT, 0.0, 1.0);
+        layer.draw(&mut pixels, params(size, COMPACT, true));
 
         let bright = pixels.chunks(4).filter(|pixel| pixel[0] > 200).count();
         assert!(bright > 50, "expected compact clock pixels, got {bright}");
     }
 
     #[test]
-    fn twelve_hour_mode_adds_a_meridiem_suffix() {
-        let mut layer = TextLayer::new((512, 224), 1.0).expect("text layer should initialize");
-        layer.update(&snapshot(), ClockFormat::TwelveHour);
-        let twelve_hour_width = layer.compact.as_ref().unwrap().width;
-
+    fn hidden_seconds_leave_the_compact_clock_centered() {
+        let size = (512, 224);
+        let mut layer = layer(1.0);
         layer.update(&snapshot(), ClockFormat::TwentyFourHour);
-        let twenty_four_hour_width = layer.compact.as_ref().unwrap().width;
+        let time = layer.compact.as_ref().unwrap();
+        let seconds = layer.compact_seconds.as_ref().unwrap();
 
-        assert!(twelve_hour_width > 0 && twenty_four_hour_width > 0);
+        let with_seconds = compact_layout(
+            size.0 as f32,
+            100.0,
+            (time.width as f32, time.height as f32),
+            Some((seconds.advance as f32, seconds.height as f32)),
+            1.0,
+        );
+        let without_seconds = compact_layout(
+            size.0 as f32,
+            100.0,
+            (time.width as f32, time.height as f32),
+            None,
+            1.0,
+        );
+
+        assert!(with_seconds.seconds.unwrap().x > with_seconds.time.x);
+        assert_eq!(without_seconds.seconds, None);
     }
 }
