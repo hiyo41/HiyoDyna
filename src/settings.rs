@@ -18,6 +18,13 @@ pub(crate) enum BouncePreset {
     High,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AccentPreset {
+    Ice,
+    Amber,
+    Mint,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Settings {
     pub motion: MotionPreset,
@@ -25,6 +32,8 @@ pub(crate) struct Settings {
     pub shadow: bool,
     pub top_gap: f32,
     pub clock: ClockFormat,
+    pub accent: AccentPreset,
+    pub show_seconds: bool,
 }
 
 impl Default for Settings {
@@ -35,6 +44,8 @@ impl Default for Settings {
             shadow: true,
             top_gap: 0.0,
             clock: ClockFormat::TwentyFourHour,
+            accent: AccentPreset::Ice,
+            show_seconds: true,
         }
     }
 }
@@ -42,14 +53,14 @@ impl Default for Settings {
 impl Settings {
     pub fn tuning(&self) -> SpringTuning {
         let (expand_response_seconds, collapse_response_seconds) = match self.motion {
-            MotionPreset::Slow => (0.36, 0.40),
-            MotionPreset::Normal => (0.28, 0.30),
+            MotionPreset::Slow => (0.38, 0.42),
+            MotionPreset::Normal => (0.30, 0.32),
             MotionPreset::Fast => (0.22, 0.24),
         };
         let (expand_damping, collapse_damping) = match self.bounce {
-            BouncePreset::Low => (0.75, 0.82),
-            BouncePreset::Medium => (0.55, 0.68),
-            BouncePreset::High => (0.50, 0.62),
+            BouncePreset::Low => (0.78, 0.85),
+            BouncePreset::Medium => (0.62, 0.76),
+            BouncePreset::High => (0.50, 0.64),
         };
         SpringTuning {
             expand_response_seconds,
@@ -61,6 +72,11 @@ impl Settings {
 
     pub fn shadow_opacity(&self) -> f32 {
         if self.shadow { 0.22 } else { 0.0 }
+    }
+
+    #[allow(dead_code)]
+    pub fn accent_bgra(&self) -> [u8; 3] {
+        self.accent.bgra()
     }
 
     pub fn parse(text: &str) -> Self {
@@ -97,6 +113,16 @@ impl Settings {
                     "12" => settings.clock = ClockFormat::TwelveHour,
                     _ => {}
                 },
+                "accent" => {
+                    if let Some(accent) = AccentPreset::parse(value) {
+                        settings.accent = accent;
+                    }
+                }
+                "seconds" => match value {
+                    "on" => settings.show_seconds = true,
+                    "off" => settings.show_seconds = false,
+                    _ => {}
+                },
                 _ => {}
             }
         }
@@ -106,7 +132,7 @@ impl Settings {
 
     pub fn serialize(&self) -> String {
         format!(
-            "motion={}\nbounce={}\nshadow={}\ntop_gap={}\nclock={}\n",
+            "motion={}\nbounce={}\nshadow={}\ntop_gap={}\nclock={}\naccent={}\nseconds={}\n",
             self.motion.as_str(),
             self.bounce.as_str(),
             if self.shadow { "soft" } else { "off" },
@@ -114,7 +140,9 @@ impl Settings {
             match self.clock {
                 ClockFormat::TwentyFourHour => "24",
                 ClockFormat::TwelveHour => "12",
-            }
+            },
+            self.accent.as_str(),
+            if self.show_seconds { "on" } else { "off" }
         )
     }
 
@@ -174,6 +202,42 @@ impl BouncePreset {
     }
 }
 
+impl AccentPreset {
+    pub fn bgra(self) -> [u8; 3] {
+        match self {
+            Self::Ice => [255, 199, 143],
+            Self::Amber => [120, 196, 255],
+            Self::Mint => [200, 240, 150],
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Ice => "Ice",
+            Self::Amber => "Amber",
+            Self::Mint => "Mint",
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Ice => "ice",
+            Self::Amber => "amber",
+            Self::Mint => "mint",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "ice" => Some(Self::Ice),
+            "amber" => Some(Self::Amber),
+            "mint" => Some(Self::Mint),
+            _ => None,
+        }
+    }
+}
+
 fn parse_top_gap(value: &str) -> Option<f32> {
     match value {
         "0" => Some(0.0),
@@ -190,7 +254,7 @@ fn config_path() -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{BouncePreset, MotionPreset, Settings};
+    use super::{AccentPreset, BouncePreset, MotionPreset, Settings};
     use crate::clock::ClockFormat;
 
     #[test]
@@ -237,6 +301,8 @@ mod tests {
             shadow: false,
             top_gap: 16.0,
             clock: ClockFormat::TwelveHour,
+            accent: AccentPreset::Mint,
+            show_seconds: false,
         };
 
         let parsed = Settings::parse(&original.serialize());
@@ -265,10 +331,10 @@ mod tests {
         }
         .tuning();
 
-        assert_eq!(slow.expand_response_seconds, 0.36);
-        assert_eq!(slow.collapse_response_seconds, 0.40);
-        assert_eq!(normal.expand_response_seconds, 0.28);
-        assert_eq!(normal.collapse_response_seconds, 0.30);
+        assert_eq!(slow.expand_response_seconds, 0.38);
+        assert_eq!(slow.collapse_response_seconds, 0.42);
+        assert_eq!(normal.expand_response_seconds, 0.30);
+        assert_eq!(normal.collapse_response_seconds, 0.32);
         assert_eq!(fast.expand_response_seconds, 0.22);
         assert_eq!(fast.collapse_response_seconds, 0.24);
     }
@@ -287,12 +353,12 @@ mod tests {
         }
         .tuning();
 
-        assert_eq!(low.expand_damping, 0.75);
-        assert_eq!(low.collapse_damping, 0.82);
-        assert_eq!(medium.expand_damping, 0.55);
-        assert_eq!(medium.collapse_damping, 0.68);
+        assert_eq!(low.expand_damping, 0.78);
+        assert_eq!(low.collapse_damping, 0.85);
+        assert_eq!(medium.expand_damping, 0.62);
+        assert_eq!(medium.collapse_damping, 0.76);
         assert_eq!(high.expand_damping, 0.50);
-        assert_eq!(high.collapse_damping, 0.62);
+        assert_eq!(high.collapse_damping, 0.64);
     }
 
     #[test]
@@ -306,5 +372,35 @@ mod tests {
             .shadow_opacity(),
             0.0
         );
+    }
+
+    #[test]
+    fn defaults_include_ice_accent_and_visible_seconds() {
+        let settings = Settings::default();
+        assert_eq!(settings.accent, AccentPreset::Ice);
+        assert!(settings.show_seconds);
+    }
+
+    #[test]
+    fn parses_and_serializes_accent_and_seconds() {
+        let parsed = Settings::parse("accent=mint\nseconds=off\n");
+        assert_eq!(parsed.accent, AccentPreset::Mint);
+        assert!(!parsed.show_seconds);
+        assert!(parsed.serialize().contains("accent=mint"));
+        assert!(parsed.serialize().contains("seconds=off"));
+    }
+
+    #[test]
+    fn old_files_default_new_fields() {
+        let parsed = Settings::parse("motion=fast\nbounce=high\nshadow=off\ntop_gap=8\nclock=12\n");
+        assert_eq!(parsed.accent, AccentPreset::Ice);
+        assert!(parsed.show_seconds);
+    }
+
+    #[test]
+    fn accent_presets_map_to_bgra() {
+        assert_eq!(AccentPreset::Ice.bgra(), [255, 199, 143]);
+        assert_eq!(AccentPreset::Amber.bgra(), [120, 196, 255]);
+        assert_eq!(AccentPreset::Mint.bgra(), [200, 240, 150]);
     }
 }
