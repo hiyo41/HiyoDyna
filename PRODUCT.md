@@ -14,9 +14,9 @@ Windows users who want a compact clock at the top of the screen without another 
 
 - Glance at the time, date, and seconds without leaving the current app.
 - Tune motion, bounce, accent, clock format, seconds, position, and shadow.
-- Install from a portable zip and start it without an installer.
+- Install from a portable executable and start it without an installer.
 - Trust that an update came from GitHub and matches its SHA-256.
-- Remove it cleanly by deleting a folder.
+- Remove the app cleanly by deleting one executable.
 
 ## Differentiators
 

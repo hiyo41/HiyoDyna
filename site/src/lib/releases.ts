@@ -16,7 +16,7 @@ export interface DownloadInfo {
   url: string;
   size: number;
   prerelease: boolean;
-  zipName: string;
+  fileName: string;
   label: string;
   meta: string;
 }
@@ -39,11 +39,11 @@ export function selectRelease(releases: Release[]): DownloadInfo | null {
   if (!chosen) return null;
 
   const assets = chosen.assets ?? [];
-  const zip =
-    assets.find((asset) => asset.name.toLowerCase().endsWith('-windows-x64.zip')) ??
-    assets.find((asset) => asset.name.toLowerCase().endsWith('.zip'));
+  const executable =
+    assets.find((asset) => asset.name.toLowerCase() === 'hiyodyna.exe') ??
+    assets.find((asset) => asset.name.toLowerCase().endsWith('.exe'));
 
-  if (!zip) return null;
+  if (!executable) return null;
 
   const build = /^pre-(\d+)$/.exec(chosen.tag_name);
   const label = chosen.prerelease
@@ -59,11 +59,11 @@ export function selectRelease(releases: Release[]): DownloadInfo | null {
 
   return {
     tag: chosen.tag_name,
-    url: zip.browser_download_url,
-    size: zip.size,
+    url: executable.browser_download_url,
+    size: executable.size,
     prerelease: chosen.prerelease,
-    zipName: zip.name,
+    fileName: executable.name,
     label,
-    meta: `${releaseName} · ${formatBytes(zip.size)}`,
+    meta: `${releaseName} · ${formatBytes(executable.size)}`,
   };
 }

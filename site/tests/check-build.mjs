@@ -29,6 +29,8 @@ check('title mentions HiyoDyna', /<title>[^<]*HiyoDyna/.test(html));
 check('canonical uses the project URL', /rel="canonical" href="https:\/\/hiyo41\.github\.io\/HiyoDyna\/"/.test(html));
 check('Open Graph image is absolute', /property="og:image" content="https:\/\/hiyo41\.github\.io\/HiyoDyna\/og\.png"/.test(html));
 check('static Releases fallback is present', html.includes('https://github.com/hiyo41/HiyoDyna/releases'));
+check('install copy points at the executable', /<code[^>]*>HiyoDyna\.exe<\/code>/.test(html));
+check('download is presented as a portable exe', html.includes('Portable exe'));
 check('SoftwareApplication JSON-LD is present', html.includes('"@type":"SoftwareApplication"'));
 check('404 is generated', existsSync(join(root, 'dist', '404.html')));
 check('404 is noindex', /name="robots" content="noindex"/.test(notFound));

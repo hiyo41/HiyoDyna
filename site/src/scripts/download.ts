@@ -12,7 +12,7 @@ export function applyDownloadInfo(info: DownloadInfo): void {
   document.querySelectorAll<HTMLAnchorElement>('[data-download]').forEach((link) => {
     link.href = info.url;
     link.textContent = info.label;
-    link.title = `${info.zipName} · ${info.meta}`;
+    link.title = `${info.fileName} · ${info.meta}`;
   });
 
   document.querySelectorAll<HTMLElement>('[data-download-meta]').forEach((meta) => {
