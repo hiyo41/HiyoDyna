@@ -4,3 +4,8 @@
 /.superpowers/
 /docs/superpowers/
 **/*.rs.bk
+
+# Local AI tooling and design-review runtime state.
+/.opencode/
+/.impeccable/*
+!/.impeccable/config.json

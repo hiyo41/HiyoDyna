@@ -6,6 +6,8 @@
 
 Một overlay kiểu Dynamic Island viết bằng Rust native cho Windows. Bản hiện tại cung cấp capsule đồng hồ trực tiếp, mở rộng khi rê chuột; sẽ bổ sung thêm nhiều tính năng hệ thống.
 
+Website: [hiyo41.github.io/HiyoDyna](https://hiyo41.github.io/HiyoDyna/)
+
 ## Tính năng hiện có
 
 - Capsule mở rộng khi rê chuột và thu lại sau một khoảng ngắn với hiệu ứng lò xo
@@ -25,6 +27,16 @@ Một overlay kiểu Dynamic Island viết bằng Rust native cho Windows. Bản
 - Rust stable hỗ trợ edition 2024 khi build từ mã nguồn
 
 ## Cài đặt
+
+### Cài đặt từ bản phát hành
+
+1. Tải `HiyoDyna-<tag>-windows-x64.zip` từ [trang Releases](https://github.com/hiyo41/HiyoDyna/releases).
+2. Giải nén ở bất kỳ đâu.
+3. Chạy `HiyoDyna.exe`.
+
+Không cần installer hay quyền admin. Chỉ hỗ trợ Windows 10/11 x64. Cài đặt nằm ở `%APPDATA%\HiyoDyna\settings.ini`.
+
+### Cài đặt từ mã nguồn
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup.ps1
@@ -46,6 +58,12 @@ HiyoDyna tự cập nhật từ GitHub. App kiểm tra lúc khởi động và m
 Bộ cập nhật chạy trong HiyoDyna. Chỉ một tiến trình phụ ngắn hạn được tạo khi thay executable; không có watcher thường trú và không có shortcut Startup cho việc cập nhật.
 
 ## Gỡ cài đặt
+
+### Gỡ bản phát hành
+
+Tắt Start with Windows trong tray, thoát HiyoDyna và xoá thư mục đã giải nén. Xoá luôn `%APPDATA%\HiyoDyna` nếu muốn xoá cài đặt.
+
+### Gỡ bản cài từ mã nguồn
 
 Dùng **Settings > Apps** hoặc chạy:
 

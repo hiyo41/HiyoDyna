@@ -18,6 +18,24 @@ Requirements and build commands are in the [README](README.md). Run `.\scripts\c
 
 The app is Windows-only: Win32 + GDI, with no webview or JavaScript. Keep changes native and avoid new dependencies unless they are clearly justified.
 
+## Website
+
+The landing page lives in `site/` and is built with Astro for GitHub Pages.
+
+```powershell
+cd site
+npm ci
+npm run dev
+npm test
+npm run check
+$env:PAGES_BASE="/HiyoDyna"; npm run build
+node tests/check-build.mjs
+```
+
+Set `PAGES_BASE` to `/HiyoDyna` for the deployed build; omit it for local development. The repository must have Pages enabled with Source = GitHub Actions before the first deploy.
+
+Design context lives in `PRODUCT.md` and `DESIGN.md`. Run `npx impeccable install` locally for the design skill; the installer stays out of the repository.
+
 ## Code map
 
 | Path | Responsibility |
