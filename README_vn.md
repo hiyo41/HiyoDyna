@@ -30,8 +30,8 @@ Website: [hiyo41.github.io/HiyoDyna](https://hiyo41.github.io/HiyoDyna/)
 
 ### Cài đặt từ bản phát hành
 
-1. Tải `HiyoDyna-<tag>-windows-x64.zip` từ [trang Releases](https://github.com/hiyo41/HiyoDyna/releases).
-2. Giải nén ở bất kỳ đâu.
+1. Tải `HiyoDyna.exe` từ [trang Releases](https://github.com/hiyo41/HiyoDyna/releases).
+2. Chuyển nó vào một thư mục cố định.
 3. Chạy `HiyoDyna.exe`.
 
 Không cần installer hay quyền admin. Chỉ hỗ trợ Windows 10/11 x64. Cài đặt nằm ở `%APPDATA%\HiyoDyna\settings.ini`.
@@ -61,7 +61,7 @@ Bộ cập nhật chạy trong HiyoDyna. Chỉ một tiến trình phụ ngắn 
 
 ### Gỡ bản phát hành
 
-Tắt Start with Windows trong tray, thoát HiyoDyna và xoá thư mục đã giải nén. Xoá luôn `%APPDATA%\HiyoDyna` nếu muốn xoá cài đặt.
+Tắt Start with Windows trong tray, thoát HiyoDyna và xoá `HiyoDyna.exe`. Xoá luôn `%APPDATA%\HiyoDyna` nếu muốn xoá cài đặt.
 
 ### Gỡ bản cài từ mã nguồn
 
@@ -93,7 +93,7 @@ Tệp thực thi được ghi vào `target\release\hiyodyna.exe`.
 
 ## Phát hành
 
-Tải bản dựng từ [trang Releases](https://github.com/hiyo41/HiyoDyna/releases). Mỗi bản phát hành có một file zip gồm executable, hai bản README, giấy phép và giấy phép font Inter, cùng executable thô và SHA-256 cho bộ cập nhật trong app.
+Tải bản dựng từ [trang Releases](https://github.com/hiyo41/HiyoDyna/releases). Mỗi bản phát hành có executable thô và SHA-256 cho bộ cập nhật trong app, cùng một file zip gồm executable, hai bản README, giấy phép và giấy phép font Inter.
 
 Bản pre-release là bản thử nghiệm từ `main` và cấp cho kênh Build. Bản chính thức cấp cho kênh Stable và có changelog đầy đủ.
 
