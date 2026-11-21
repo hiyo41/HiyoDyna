@@ -1120,6 +1120,10 @@ impl PageFade {
     fn moving(&self) -> bool {
         self.value != if self.music { 1.0 } else { 0.0 }
     }
+    fn snap_to_music(&mut self) {
+        self.value = 1.0;
+        self.music = true;
+    }
 }
 
 struct HoverEntry {
@@ -1394,18 +1398,28 @@ impl Surface {
         if (goal - self.visibility).abs() < 0.002 {
             self.visibility = goal;
         }
-        let candidate = if state.compact_content_alpha() > 0.0 {
-            self.player
-                .compact_lyric(now, settings.lyric_offset_ms)
-                .map(|(line, at)| (line.clone(), at))
-        } else {
-            None
-        };
+        let candidate = self
+            .player
+            .compact_lyric(now, settings.lyric_offset_ms)
+            .map(|(line, at)| (line.clone(), at));
+        // Content remains current while hidden. Only invalid or replaced media
+        // discards the presentation, so collapse never revives a stale line.
+        if candidate.is_none()
+            || !self
+                .compact
+                .matches(&self.player.snapshot.key, self.player.snapshot.generation)
+        {
+            self.compact = crate::compact::Presentation::default();
+            if let Some(fade) = &mut self.compact_fade {
+                fade.value = 0.0;
+                fade.music = false;
+            }
+        }
         let compact_lyric = candidate
             .as_ref()
             .filter(|_| self.player.music && settings.compact_lyrics);
         self.compact_active = compact_lyric.is_some();
-        if let Some((line, at)) = compact_lyric {
+        if let Some((line, at)) = &candidate {
             self.compact.update(
                 &self.player.snapshot.key,
                 self.player.snapshot.generation,
@@ -1420,14 +1434,10 @@ impl Surface {
             fade.value = if fade.music { 1.0 } else { 0.0 };
             fade
         });
-        // Invalid or replaced media must never reveal a cached lyric during a fade.
-        if candidate.is_none()
-            || !self
-                .compact
-                .matches(&self.player.snapshot.key, self.player.snapshot.generation)
-        {
-            fade.value = 0.0;
-            fade.music = false;
+        // Prime the destination while compact content is fully hidden, before
+        // the first compact frame of a collapse can reveal clock glyphs.
+        if compact_lyric.is_some() && state.compact_content_alpha() == 0.0 {
+            fade.snap_to_music();
         }
         let compact_mix = fade.advance(compact_lyric.is_some(), now);
         let length = self.size.0 as usize * self.size.1 as usize * 4;
@@ -2539,6 +2549,68 @@ mod tests {
             previous == next,
             "a content switch must begin with its visible outgoing frame"
         );
+    }
+
+    #[test]
+    fn collapse_keeps_lyrics_selected_from_the_first_compact_frame() {
+        use super::*;
+        for dt in [1.0 / 30.0, 1.0 / 120.0] {
+            let mut surface = compact_icon_test_surface(1.0, true);
+            let settings = Settings::default();
+            let clock = compact_icon_test_clock();
+            let mut animation = Animation::new();
+            animation.current = ShapeState {
+                height: 500.0,
+                ..crate::animation::EXPANDED
+            };
+            animation.target = animation.current;
+            // Begin with the clock mix, as when lyrics arrive while expanded.
+            surface.compact_fade = Some(PageFade::new(Instant::now()));
+            surface.draw(animation.current, 1.0, &settings, &clock, 0.0);
+            animation.target = surface.compact_shape(&settings);
+            let mut compact_frames = 0;
+            for frame in 0..120 {
+                animation.advance(dt);
+                surface.draw(animation.current, 1.0, &settings, &clock, 0.0);
+                if animation.current.compact_content_alpha() > 0.0 {
+                    compact_frames += 1;
+                    assert_eq!(
+                        surface.compact_fade.as_ref().unwrap().value,
+                        1.0,
+                        "clock leaked into compact lyrics on collapse frame {frame}"
+                    );
+                }
+                if animation.current == animation.target {
+                    break;
+                }
+            }
+            assert!(compact_frames > 0);
+            assert_eq!(animation.current, animation.target);
+        }
+    }
+
+    #[test]
+    fn collapse_tracks_lyric_changes_while_compact_content_is_hidden() {
+        use super::*;
+        let mut surface = compact_icon_test_surface(1.0, true);
+        let settings = Settings::default();
+        let clock = compact_icon_test_clock();
+        surface.draw(crate::animation::EXPANDED, 1.0, &settings, &clock, 0.0);
+        assert!(
+            surface.compact.matches("compact-icon-fixture", 0),
+            "expanded frames must retain a current compact lyric presentation"
+        );
+        surface.player.snapshot.generation += 1;
+        surface.player.snapshot.lyrics =
+            crate::lyrics::parse_lrc("[00:00]Replacement lyric").map(std::sync::Arc::new);
+        surface.draw(crate::animation::EXPANDED, 1.0, &settings, &clock, 0.0);
+        assert!(surface.compact.matches("compact-icon-fixture", 1));
+        assert_eq!(surface.compact_fade.as_ref().unwrap().value, 1.0);
+        surface.player.snapshot.lyrics = None;
+        surface.draw(crate::animation::COMPACT, 1.0, &settings, &clock, 0.0);
+        assert!(!surface.compact_active);
+        assert_eq!(surface.compact_fade.as_ref().unwrap().value, 0.0);
+        assert!(!surface.compact.matches("compact-icon-fixture", 1));
     }
 
     fn compact_icon_test_surface(scale: f32, lyrics: bool) -> super::Surface {

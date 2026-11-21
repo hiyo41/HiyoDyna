@@ -385,6 +385,58 @@ pub(crate) fn draw_source(c: &mut Canvas<'_>, right: f32, height: f32, source: &
 #[cfg(test)]
 mod tests {
     #[test]
+    fn collapse_line_change_preserves_one_continuous_composition() {
+        use std::time::{Duration, Instant};
+        let now = Instant::now();
+        let lyrics = crate::lyrics::parse_lrc("[00:00]First line\n[00:04]Second line").unwrap();
+        let mut presentation = super::Presentation::default();
+        // Keep receiving snapshots during the expanded page, then change line
+        // exactly when collapse begins.
+        for frame in 0..60 {
+            presentation.update(
+                "track",
+                1,
+                &lyrics.lines[0],
+                3.9,
+                now + Duration::from_millis(frame * 16),
+            );
+        }
+        let collapse = now + Duration::from_millis(960);
+        for frame in 0..60 {
+            let when = collapse + Duration::from_millis(frame * 16);
+            presentation.update(
+                "track",
+                1,
+                &lyrics.lines[1],
+                4.0 + frame as f64 * 0.016,
+                when,
+            );
+            let layers = presentation.layers(when);
+            assert!((layers.iter().map(|layer| layer.opacity).sum::<f32>() - 1.0).abs() < 0.001);
+            for start in [0.0, 4.0] {
+                assert!(
+                    layers
+                        .iter()
+                        .filter(|layer| layer.frame.line.start == start)
+                        .count()
+                        <= 1,
+                    "collapse must not duplicate a lyric layer"
+                );
+            }
+            if frame == 0 {
+                assert_eq!(layers.len(), 1);
+                assert_eq!(layers[0].frame.line.start, 0.0);
+                assert_eq!(layers[0].offset, 0.0);
+            }
+            if frame >= 10 {
+                assert_eq!(layers.len(), 1);
+                assert_eq!(layers[0].frame.line.start, 4.0);
+                assert_eq!(layers[0].offset, 0.0);
+            }
+        }
+    }
+
+    #[test]
     fn countdown_space_retracts_continuously_after_the_numeric_cutoff() {
         let lyrics =
             crate::lyrics::parse_lrc("[00:10]A sufficiently long upcoming sentence").unwrap();
