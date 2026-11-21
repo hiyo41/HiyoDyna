@@ -25,50 +25,164 @@ const COMMAND: u32 = WM_APP + 40;
 const RELAYOUT: u32 = WM_APP + 41;
 pub(crate) const MESSAGE: u32 = WM_APP + 42;
 const REMEMBER_FOCUS: u32 = WM_APP + 43;
-const WIDTH: f32 = 360.0;
-const CONTENT: f32 = 1275.0;
-const CONTENT_TOP: f32 = 68.0;
-const CONTENT_BOTTOM: f32 = 62.0;
+const HEADER_HEIGHT: f32 = 64.0;
+const FOOTER_HEIGHT: f32 = 64.0;
+const NAV_FIRST: usize = 0x7000;
 const WINDOW_STYLE: u32 = WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN;
 const UPDATE_POLL: usize = 0x5544;
 const SCROLL_FRAME: u32 = WM_APP + 44;
 
 #[derive(Clone, Copy)]
 struct SettingsLayout {
-    column: f32,
     wide: bool,
-    zoom: f32,
+    sidebar: Rect,
+    content: Rect,
+    header: Rect,
+    footer: Rect,
 }
 
 impl SettingsLayout {
-    fn new(width: f32) -> Self {
-        let wide = width >= 760.0;
-        let column = if wide { (width - 16.0) * 0.5 } else { width };
-        let zoom = ((column - 48.0) / (WIDTH - 48.0)).clamp(0.85, 1.25);
-        Self { column, wide, zoom }
+    fn new(width: f32, height: f32) -> Self {
+        let wide = width >= 700.0;
+        let top = HEADER_HEIGHT + if wide { 0.0 } else { 40.0 };
+        let footer = Rect::new(0.0, (height - FOOTER_HEIGHT).max(top), width, FOOTER_HEIGHT);
+        Self {
+            wide,
+            sidebar: Rect::new(
+                0.0,
+                HEADER_HEIGHT,
+                if wide { 208.0 } else { 0.0 },
+                (footer.y - HEADER_HEIGHT).max(0.0),
+            ),
+            content: Rect::new(
+                if wide { 232.0 } else { 24.0 },
+                top,
+                (width - if wide { 256.0 } else { 48.0 }).max(0.0),
+                (footer.y - top).max(0.0),
+            ),
+            header: Rect::new(0.0, 0.0, width, HEADER_HEIGHT),
+            footer,
+        }
     }
 
+    // Existing row coordinates remain stable; only their horizontal geometry
+    // changes. Section membership never depends on a column or a y threshold.
     fn rect(self, rect: Rect) -> Rect {
-        let second = self.wide && rect.y >= 627.0;
-        let stretch = (self.column - 48.0).max(1.0) / (WIDTH - 48.0);
+        let stretch = self.content.w / 312.0;
         Rect::new(
-            24.0 + (rect.x - 24.0) * stretch + if second { self.column + 16.0 } else { 0.0 },
-            (rect.y - if second { 627.0 } else { 0.0 }) * self.zoom,
+            self.content.x + (rect.x - 24.0) * stretch,
+            rect.y,
             rect.w * stretch,
-            rect.h * self.zoom,
+            rect.h,
         )
     }
 
     fn content_height(self) -> f32 {
-        (if self.wide { CONTENT - 627.0 } else { CONTENT }) * self.zoom
+        let last = self.section_rect(4);
+        last.y + last.h
     }
 
     fn text_scale(self) -> f32 {
-        self.zoom
+        1.0
     }
 
-    fn max_scroll(self, height: f32) -> f32 {
-        (self.content_height() - (height - CONTENT_TOP - CONTENT_BOTTOM).max(0.0)).max(0.0)
+    fn max_scroll(self) -> f32 {
+        (self.content_height() - self.content.h).max(0.0)
+    }
+
+    fn section_rect(self, index: usize) -> Rect {
+        let section = SettingsSection::ALL[index];
+        let top = section.top();
+        let bottom = SettingsSection::ALL
+            .get(index + 1)
+            .map_or(1275.0, |next| next.top());
+        Rect::new(self.content.x, top, self.content.w, bottom - top)
+    }
+
+    fn sidebar_rect(self, index: usize) -> Rect {
+        if self.wide {
+            Rect::new(
+                16.0,
+                self.sidebar.y + 16.0 + index as f32 * 48.0,
+                176.0,
+                40.0,
+            )
+        } else {
+            let width = self.header.w / 5.0;
+            Rect::new(index as f32 * width, self.header.h, width, 40.0)
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SettingsSection {
+    Appearance,
+    Motion,
+    ClockPosition,
+    MusicLyrics,
+    Application,
+}
+
+impl SettingsSection {
+    const ALL: [Self; 5] = [
+        Self::Appearance,
+        Self::Motion,
+        Self::ClockPosition,
+        Self::MusicLyrics,
+        Self::Application,
+    ];
+
+    fn index(self) -> usize {
+        self as usize
+    }
+
+    fn label(self) -> &'static str {
+        tr(match self {
+            Self::Appearance => "Appearance",
+            Self::Motion => "Motion",
+            Self::ClockPosition => "Clock & position",
+            Self::MusicLyrics => "Music & lyrics",
+            Self::Application => "Application",
+        })
+    }
+
+    fn rows(self) -> &'static [f32] {
+        match self {
+            Self::Appearance => &[34.0, 71.0],
+            Self::Motion => &[151.0, 188.0],
+            Self::ClockPosition => &[268.0, 305.0, 342.0, 379.0],
+            Self::MusicLyrics => &[462.0, 499.0, 539.0, 578.0],
+            Self::Application => &[
+                658.0, 726.0, 763.0, 800.0, 837.0, 906.0, 976.0, 1013.0, 1050.0, 1110.0, 1155.0,
+                1195.0, 1235.0,
+            ],
+        }
+    }
+
+    fn top(self) -> f32 {
+        match self {
+            Self::Appearance => 0.0,
+            Self::Motion => 117.0,
+            Self::ClockPosition => 234.0,
+            Self::MusicLyrics => 428.0,
+            Self::Application => 627.0,
+        }
+    }
+
+    fn for_command(command: TrayCommand) -> Self {
+        match command {
+            TrayCommand::Accent(_) | TrayCommand::Shadow(_) => Self::Appearance,
+            TrayCommand::Motion(_) | TrayCommand::Bounce(_) => Self::Motion,
+            TrayCommand::Clock(_)
+            | TrayCommand::ShowSeconds(_)
+            | TrayCommand::TopGap(_)
+            | TrayCommand::Dock(_) => Self::ClockPosition,
+            TrayCommand::Lyrics(_)
+            | TrayCommand::LyricOffset(_)
+            | TrayCommand::CompactLyrics(_)
+            | TrayCommand::ClearLyricsCache => Self::MusicLyrics,
+            _ => Self::Application,
+        }
     }
 }
 
@@ -78,6 +192,7 @@ thread_local! {
 }
 
 struct Control {
+    section: SettingsSection,
     rect: Rect,
     label: String,
     command: TrayCommand,
@@ -259,16 +374,16 @@ unsafe fn draw_button(hwnd: HWND, dc: HDC) {
 }
 
 fn reveal_control(state: &mut State, index: usize) {
-    let layout = SettingsLayout::new(state.width);
+    let layout = SettingsLayout::new(state.width, state.height);
     let rect = layout.rect(state.controls[index].rect);
-    let visible = (state.height - CONTENT_TOP - CONTENT_BOTTOM).max(0.0);
+    let visible = layout.content.h;
     if rect.y < state.scroll {
         state.scroll = rect.y;
     }
     if rect.y + rect.h > state.scroll + visible {
         state.scroll = rect.y + rect.h - visible;
     }
-    state.scroll = state.scroll.clamp(0.0, layout.max_scroll(state.height));
+    state.scroll = state.scroll.clamp(0.0, layout.max_scroll());
     state.scroll_motion.jump(state.scroll);
     unsafe {
         state.frame_pump.stop();
@@ -276,6 +391,7 @@ fn reveal_control(state: &mut State, index: usize) {
 }
 
 struct State {
+    active_section: SettingsSection,
     painter: Painter,
     surface: WindowSurface,
     frame_pump: FramePump,
@@ -335,6 +451,10 @@ fn button_raster(state: &mut State, item: &DRAWITEMSTRUCT, enabled: bool) -> std
         1 => (if state.about { "‹" } else { "×" }, false),
         2 => (tr("Restart"), false),
         3 => (tr("Exit"), false),
+        id if (NAV_FIRST..NAV_FIRST + 5).contains(&(id as usize)) => {
+            let section = SettingsSection::ALL[id as usize - NAV_FIRST];
+            (section.label(), state.active_section == section)
+        }
         _ => control.map_or(("", false), |c| (c.label.as_str(), c.selected)),
     };
     let key = ButtonRasterKey {
@@ -344,7 +464,9 @@ fn button_raster(state: &mut State, item: &DRAWITEMSTRUCT, enabled: bool) -> std
             (item.rcItem.bottom - item.rcItem.top).max(0) as u32,
         ),
         scale: state.scale.to_bits(),
-        text_scale: SettingsLayout::new(state.width).text_scale().to_bits(),
+        text_scale: SettingsLayout::new(state.width, state.height)
+            .text_scale()
+            .to_bits(),
         label: label.into(),
         accent: state.settings.accent_bgra(),
         item_state: item.itemState,
@@ -405,7 +527,7 @@ fn button_raster(state: &mut State, item: &DRAWITEMSTRUCT, enabled: bool) -> std
 fn copy_scrolled_content(state: &mut State, pixels: &mut [u8], size: (u32, u32)) {
     let scale = state.scale;
     let language = crate::i18n::language();
-    let layout = SettingsLayout::new(state.width);
+    let layout = SettingsLayout::new(state.width, state.height);
     let content = state.content.get_or_insert_with(|| ContentBackground {
         scale: 0,
         language,
@@ -414,7 +536,7 @@ fn copy_scrolled_content(state: &mut State, pixels: &mut [u8], size: (u32, u32))
     });
     let desired_size = (
         (state.width * scale).round() as u32,
-        ((CONTENT_TOP + layout.content_height()) * scale).ceil() as u32,
+        ((layout.content.y + layout.content_height()) * scale).ceil() as u32,
     );
     if content.scale != scale.to_bits()
         || content.language != language
@@ -427,8 +549,8 @@ fn copy_scrolled_content(state: &mut State, pixels: &mut [u8], size: (u32, u32))
         content.scale = scale.to_bits();
         content.language = language;
     }
-    let first = (CONTENT_TOP * scale).ceil().max(0.0) as usize;
-    let last = ((state.height - CONTENT_BOTTOM) * scale)
+    let first = (layout.content.y * scale).ceil().max(0.0) as usize;
+    let last = (layout.footer.y * scale)
         .floor()
         .max(first as f32)
         .min(size.1 as f32) as usize;
@@ -446,10 +568,10 @@ fn copy_scrolled_content(state: &mut State, pixels: &mut [u8], size: (u32, u32))
 }
 
 fn draw_settings_content(c: &mut Canvas<'_>) {
-    let layout = SettingsLayout::new(c.clip.w);
+    let layout = SettingsLayout::new(c.clip.w, c.clip.h);
     let map = |rect: Rect| {
         let mut rect = layout.rect(rect);
-        rect.y += CONTENT_TOP;
+        rect.y += layout.content.y;
         rect
     };
     for (y, h, title, detail) in [
@@ -461,7 +583,7 @@ fn draw_settings_content(c: &mut Canvas<'_>) {
     ] {
         // Keep the separator in the section's column, including its last edge.
         let mut separator = map(Rect::new(26.0, y, 308.0, 1.0));
-        separator.y += h * layout.zoom;
+        separator.y += h;
         c.rect(separator, 0.0, WHITE, 0.06);
         c.text(
             tr(title),
@@ -606,6 +728,7 @@ fn controls_with_autostart(settings: &Settings, autostart: bool) -> Vec<Control>
     let mut out = Vec::new();
     let mut add = |x, y, w, label: &str, command, selected| {
         out.push(Control {
+            section: SettingsSection::for_command(command),
             rect: Rect::new(x, y, w, 29.0),
             label: tr(label).into(),
             command,
@@ -803,6 +926,7 @@ fn controls_with_autostart(settings: &Settings, autostart: bool) -> Vec<Control>
         out.insert(
             placement + i,
             Control {
+                section: SettingsSection::ClockPosition,
                 rect: Rect::new(132.0 + i as f32 * 64.0, 379.0, 59.0, 29.0),
                 label: tr(["Left", "Center", "Right"][i]).into(),
                 command: TrayCommand::Dock(anchor),
@@ -813,6 +937,7 @@ fn controls_with_autostart(settings: &Settings, autostart: bool) -> Vec<Control>
         );
     }
     out.push(Control {
+        section: SettingsSection::Application,
         rect: Rect::new(32.0, 782.0, 287.0, 29.0),
         label: tr("Fade and click through ({shortcut})")
             .replace("{shortcut}", &settings.shortcut.label()),
@@ -836,6 +961,7 @@ fn controls_with_autostart(settings: &Settings, autostart: bool) -> Vec<Control>
         }
     }
     out.push(Control {
+        section: SettingsSection::MusicLyrics,
         rect: Rect::new(242.0, 539.0, 77.0, 29.0),
         label: tr(if settings.compact_lyrics { "On" } else { "Off" }).into(),
         command: TrayCommand::CompactLyrics(!settings.compact_lyrics),
@@ -848,6 +974,7 @@ fn controls_with_autostart(settings: &Settings, autostart: bool) -> Vec<Control>
         .enumerate()
     {
         out.push(Control {
+            section: SettingsSection::Application,
             rect: Rect::new(32.0 + i as f32 * 97.0, 906.0, 93.0, 29.0),
             label: match language {
                 Language::System => tr("System"),
@@ -924,6 +1051,7 @@ fn controls_with_autostart(settings: &Settings, autostart: bool) -> Vec<Control>
             LocalAction::ShortcutStatus | LocalAction::UpdateStatus
         );
         out.push(Control {
+            section: SettingsSection::Application,
             rect: Rect::new(
                 x,
                 y,
@@ -949,6 +1077,10 @@ fn controls_with_autostart(settings: &Settings, autostart: bool) -> Vec<Control>
             .total_cmp(&b.rect.y)
             .then(a.rect.x.total_cmp(&b.rect.x))
     });
+    debug_assert!(
+        out.iter()
+            .all(|control| control.section.rows().contains(&control.rect.y))
+    );
     out
 }
 
@@ -973,8 +1105,8 @@ struct PopupGeometry {
 fn popup_geometry(anchor: POINT, work: RECT, dpi: u32) -> PopupGeometry {
     let scale = if dpi == 0 { 96 } else { dpi } as f32 / 96.0;
     let available = (work.bottom - work.top - 24).max(1);
-    let height = 760.0_f32.min(available as f32 / scale);
-    let width_px = ((WIDTH * scale) as i32).min((work.right - work.left).max(1));
+    let height = 680.0_f32.min(available as f32 / scale);
+    let width_px = ((760.0 * scale) as i32).min((work.right - work.left).max(1));
     let height_px = (height * scale) as i32;
     PopupGeometry {
         scale,
@@ -1053,6 +1185,7 @@ pub(crate) fn show(
         };
         let popup = Box::new(Popup {
             state: RefCell::new(State {
+                active_section: SettingsSection::Appearance,
                 painter,
                 surface,
                 frame_pump: FramePump::new(SCROLL_FRAME),
@@ -1063,8 +1196,8 @@ pub(crate) fn show(
                     shortcut_available,
                 ),
                 scale,
-                height: 760.0,
-                width: WIDTH,
+                height: 680.0,
+                width: 760.0,
                 scroll: 0.0,
                 scroll_motion: SmoothScroll::default(),
                 about: false,
@@ -1153,6 +1286,7 @@ pub(crate) fn show(
             SetWindowSubclass(button, Some(button_proc), 1, 0);
             SetWindowSubclass(button, Some(crate::native_ui::hover_proc), 2, 0);
         }
+        install_navigation(hwnd);
         if let Err(error) = initial_layout(hwnd, state, anchor) {
             DestroyWindow(hwnd);
             UnregisterClassW(class_name.as_ptr(), instance);
@@ -1198,6 +1332,11 @@ pub(crate) fn update(settings: &Settings, shortcut_available: bool) {
         SetWindowTextW(hwnd, wide(tr("HiyoDyna Settings")).as_ptr());
         for (id, key) in [(2, "Restart"), (3, "Exit")] {
             SetWindowTextW(GetDlgItem(hwnd, id), wide(tr(key)).as_ptr());
+        }
+        for section in SettingsSection::ALL {
+            let button = GetDlgItem(hwnd, (NAV_FIRST + section.index()) as i32);
+            SetWindowTextW(button, wide(section.label()).as_ptr());
+            InvalidateRect(button, null(), 0);
         }
         let about = (*ptr).state.borrow().about;
         SetWindowTextW(
@@ -1331,6 +1470,45 @@ unsafe fn refresh_local(hwnd: HWND, state: &RefCell<State>) {
     }
 }
 
+unsafe fn install_navigation(hwnd: HWND) {
+    unsafe {
+        for section in SettingsSection::ALL {
+            let button = CreateWindowExW(
+                0,
+                wide("BUTTON").as_ptr(),
+                wide(section.label()).as_ptr(),
+                WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON as u32,
+                0,
+                0,
+                1,
+                1,
+                hwnd,
+                (NAV_FIRST + section.index()) as *mut _,
+                GetModuleHandleW(null()),
+                null(),
+            );
+            SetWindowSubclass(button, Some(button_proc), 1, 0);
+            SetWindowSubclass(button, Some(crate::native_ui::hover_proc), 2, 0);
+        }
+    }
+}
+
+unsafe fn select_section(hwnd: HWND, state: &RefCell<State>, section: SettingsSection) {
+    let target = {
+        let mut state = state.borrow_mut();
+        state.active_section = section;
+        SettingsLayout::new(state.width, state.height)
+            .section_rect(section.index())
+            .y
+    };
+    unsafe {
+        for index in 0..5 {
+            InvalidateRect(GetDlgItem(hwnd, (NAV_FIRST + index) as i32), null(), 0);
+        }
+        queue_scroll(hwnd, state, target);
+    }
+}
+
 // Called by the application's ordinary message loop before Translate/Dispatch.
 pub(crate) fn translate_message(message: &MSG) -> bool {
     unsafe {
@@ -1374,6 +1552,22 @@ pub(crate) fn translate_message(message: &MSG) -> bool {
         {
             return true;
         }
+        if message.message == WM_KEYDOWN && !state.borrow().about {
+            let id = GetDlgCtrlID(GetFocus()) as usize;
+            if (NAV_FIRST..NAV_FIRST + 5).contains(&id)
+                && matches!(message.wParam, 13 | 32 | 37..=40)
+            {
+                let index = id - NAV_FIRST;
+                let index = match message.wParam {
+                    37 | 38 => (index + 4) % 5,
+                    39 | 40 => (index + 1) % 5,
+                    _ => index,
+                };
+                select_section(hwnd, state, SettingsSection::ALL[index]);
+                SetFocus(GetDlgItem(hwnd, (NAV_FIRST + index) as i32));
+                return true;
+            }
+        }
         if message.message == WM_KEYDOWN && message.wParam == 9 && !state.borrow().about {
             let mut order = [
                 crate::window_chrome::MINIMIZE,
@@ -1382,6 +1576,7 @@ pub(crate) fn translate_message(message: &MSG) -> bool {
             ]
             .map(|id| GetDlgItem(hwnd, id))
             .to_vec();
+            order.extend((0..5).map(|index| GetDlgItem(hwnd, (NAV_FIRST + index) as i32)));
             order.extend(
                 state
                     .borrow()
@@ -1448,7 +1643,7 @@ pub(crate) fn translate_message(message: &MSG) -> bool {
                 match message.wParam {
                     33 => state.scroll_motion.target() - 180.0,
                     34 => state.scroll_motion.target() + 180.0,
-                    35 => CONTENT,
+                    35 => SettingsLayout::new(state.width, state.height).max_scroll(),
                     _ => 0.0,
                 }
             };
@@ -1475,7 +1670,7 @@ unsafe fn queue_scroll(hwnd: HWND, state: &RefCell<State>, target: f32) {
             let scroll = state.scroll;
             state.scroll_motion.jump(scroll);
         }
-        let max = SettingsLayout::new(state.width).max_scroll(state.height);
+        let max = SettingsLayout::new(state.width, state.height).max_scroll();
         state.scroll_motion.scroll_to(target, max, Instant::now());
         unsafe {
             if state.scroll_motion.moving() {
@@ -1522,11 +1717,6 @@ unsafe fn client_outer_size(width: i32, height: i32, dpi: u32) -> (i32, i32) {
 
 unsafe fn initial_layout(hwnd: HWND, state: &RefCell<State>, anchor: POINT) -> Result<(), String> {
     unsafe {
-        let owner = GetWindow(hwnd, GW_OWNER);
-        if !owner.is_null() {
-            crate::island_surface::place(hwnd, owner, (420.0, 640.0));
-            return reflow(hwnd, state);
-        }
         let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
         let mut info = MONITORINFO {
             cbSize: size_of::<MONITORINFO>() as u32,
@@ -1585,7 +1775,7 @@ unsafe fn reflow(hwnd: HWND, state: &RefCell<State>) -> Result<(), String> {
             state.height = rect.bottom.max(0) as f32 / scale;
             state.scroll = state.scroll.clamp(
                 0.0,
-                SettingsLayout::new(state.width).max_scroll(state.height),
+                SettingsLayout::new(state.width, state.height).max_scroll(),
             );
             let scroll = state.scroll;
             state.scroll_motion.jump(scroll);
@@ -1601,16 +1791,19 @@ unsafe fn reflow(hwnd: HWND, state: &RefCell<State>) -> Result<(), String> {
 
 unsafe fn position_controls(hwnd: HWND, state: &RefCell<State>) {
     let started = trace_start();
+    let layout = {
+        let state = state.borrow();
+        SettingsLayout::new(state.width, state.height)
+    };
     let (positions, scale, height) = {
         let state = state.borrow();
         let positions: Vec<_> = state
             .controls
             .iter()
             .map(|control| {
-                let rect = SettingsLayout::new(state.width).rect(control.rect);
-                let y = CONTENT_TOP + rect.y - state.scroll;
-                let visible =
-                    !state.about && y + rect.h > CONTENT_TOP && y < state.height - CONTENT_BOTTOM;
+                let rect = layout.rect(control.rect);
+                let y = layout.content.y + rect.y - state.scroll;
+                let visible = !state.about && y + rect.h > layout.content.y && y < layout.footer.y;
                 (control.hwnd, rect.x, y, rect.w, rect.h, visible)
             })
             .collect();
@@ -1654,9 +1847,9 @@ unsafe fn position_controls(hwnd: HWND, state: &RefCell<State>) {
             // Child windows must share the software background's viewport clip.
             // A native region also clips hit testing and WS_CLIPCHILDREN, avoiding
             // missing whole rows or controls drawing across the fixed chrome.
-            let clip_top = ((CONTENT_TOP * scale).ceil() as i32 - top).clamp(0, height_px);
-            let clip_bottom = (((height - CONTENT_BOTTOM) * scale).floor() as i32 - top)
-                .clamp(clip_top, height_px);
+            let clip_top = ((layout.content.y * scale).ceil() as i32 - top).clamp(0, height_px);
+            let clip_bottom =
+                ((layout.footer.y * scale).floor() as i32 - top).clamp(clip_top, height_px);
             let region = CreateRectRgn(0, clip_top, width, clip_bottom);
             if SetWindowRgn(button, region, 0) == 0 {
                 DeleteObject(region);
@@ -1664,6 +1857,24 @@ unsafe fn position_controls(hwnd: HWND, state: &RefCell<State>) {
             if GetWindowLongW(button, GWL_STYLE) as u32 & WS_VISIBLE == 0 {
                 ShowWindow(button, SW_SHOWNA);
             }
+            InvalidateRect(button, null(), 0);
+        }
+        for section in SettingsSection::ALL {
+            let button = GetDlgItem(hwnd, (NAV_FIRST + section.index()) as i32);
+            if button.is_null() {
+                continue;
+            }
+            let rect = layout.sidebar_rect(section.index());
+            SetWindowPos(
+                button,
+                null_mut(),
+                (rect.x * scale).round() as i32,
+                (rect.y * scale).round() as i32,
+                ((rect.x + rect.w) * scale).round() as i32 - (rect.x * scale).round() as i32,
+                (rect.h * scale).round() as i32,
+                SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOCOPYBITS | SWP_NOREDRAW,
+            );
+            ShowWindow(button, if about { SW_HIDE } else { SW_SHOWNA });
             InvalidateRect(button, null(), 0);
         }
         for (id, x, y, w) in [
@@ -1729,8 +1940,8 @@ unsafe extern "system" fn proc(
                 let scale =
                     windows_sys::Win32::UI::HiDpi::GetDpiForWindow(hwnd).max(96) as f32 / 96.0;
                 let (x, y) = client_outer_size(
-                    (WIDTH * scale).round() as i32,
-                    (300.0 * scale).round() as i32,
+                    (420.0 * scale).round() as i32,
+                    (560.0 * scale).round() as i32,
                     (scale * 96.0) as u32,
                 );
                 (*(lparam as *mut MINMAXINFO)).ptMinTrackSize = POINT { x, y };
@@ -1819,6 +2030,10 @@ unsafe extern "system" fn proc(
             COMMAND => {
                 let state = &(*ptr).state;
                 let id = wparam;
+                if (NAV_FIRST..NAV_FIRST + 5).contains(&id) {
+                    select_section(hwnd, state, SettingsSection::ALL[id - NAV_FIRST]);
+                    return 0;
+                }
                 if id == 1 && !state.borrow().about {
                     DestroyWindow(hwnd);
                     return 0;
@@ -1986,12 +2201,17 @@ unsafe extern "system" fn proc(
                             MUTED,
                         );
                         let old_clip = c.clip;
-                        c.clip = Rect::new(
-                            0.0,
-                            CONTENT_TOP,
-                            state.width,
-                            (state.height - CONTENT_TOP - CONTENT_BOTTOM).max(0.0),
-                        );
+                        let layout = SettingsLayout::new(state.width, state.height);
+                        c.clip = if state.about {
+                            Rect::new(
+                                0.0,
+                                layout.header.h,
+                                state.width,
+                                layout.footer.y - layout.header.h,
+                            )
+                        } else {
+                            layout.content
+                        };
                         if state.about {
                             c.text(
                                 tr("A little space. More possibility."),
@@ -2029,13 +2249,13 @@ unsafe extern "system" fn proc(
                         }
                         c.clip = old_clip;
                         if !state.about {
-                            let visible = (state.height - CONTENT_TOP - CONTENT_BOTTOM).max(0.0);
-                            let content_height = SettingsLayout::new(state.width).content_height();
+                            let visible = layout.content.h;
+                            let content_height = layout.content_height();
                             let thumb = (visible * visible / content_height).min(visible);
                             c.rect(
                                 Rect::new(
                                     state.width - 14.0,
-                                    68.0 + state.scroll / content_height * visible,
+                                    layout.content.y + state.scroll / content_height * visible,
                                     2.0,
                                     thumb,
                                 ),
@@ -2107,32 +2327,207 @@ pub(crate) mod tests {
         std::sync::atomic::AtomicBool::new(false);
 
     #[test]
-    fn expanded_settings_reflow_groups_and_reduce_scrolling() {
-        let layout = SettingsLayout::new(920.0);
-        let left = layout.rect(Rect::new(32.0, 34.0, 287.0, 29.0));
-        let right = layout.rect(Rect::new(32.0, 658.0, 287.0, 29.0));
-        assert!(right.x > 460.0, "Application belongs in the second column");
-        assert!(
-            right.y < 50.0,
-            "Application starts at the top when expanded"
-        );
-        assert!(left.w > 350.0, "controls should grow with the content area");
-        assert!(
-            layout.content_height() < 850.0,
-            "wide layout should need less scrolling"
-        );
-        assert!((1.0..=1.25).contains(&layout.text_scale()));
+    fn layout_wide_sidebar_and_narrow_chips() {
+        assert!(!SettingsLayout::new(699.0, 680.0).wide);
+        assert!(SettingsLayout::new(700.0, 680.0).wide);
+        let wide = SettingsLayout::new(920.0, 760.0);
+        assert!(wide.wide);
+        assert_eq!(wide.sidebar.w, 208.0);
+        assert_eq!(wide.content.x, 232.0);
+        assert_eq!(wide.header.h, 64.0);
+        assert_eq!(wide.footer.h, 64.0);
+        for section in SettingsSection::ALL {
+            let r = wide.sidebar_rect(section.index());
+            assert!(r.x >= wide.sidebar.x && r.y >= wide.sidebar.y);
+            assert!(r.x + r.w <= wide.sidebar.x + wide.sidebar.w);
+            assert!(r.y + r.h <= wide.sidebar.y + wide.sidebar.h);
+            for next in section.index() + 1..5 {
+                let overlap = r.intersect(wide.sidebar_rect(next));
+                assert!(overlap.w == 0.0 || overlap.h == 0.0);
+            }
+        }
+        let narrow = SettingsLayout::new(640.0, 640.0);
+        assert!(!narrow.wide);
+        assert_eq!(narrow.sidebar.w, 0.0);
+        for index in 0..5 {
+            let r = narrow.sidebar_rect(index);
+            assert_eq!(r.y, 64.0);
+            assert_eq!(r.h, 40.0);
+            assert!(r.x >= 0.0 && r.x + r.w <= 640.0);
+        }
+    }
+
+    #[test]
+    fn layout_sections_contain_controls_and_scroll_matches_viewport() {
         let controls = controls_with_autostart(&Settings::default(), false);
-        for (i, control) in controls.iter().enumerate() {
-            let r = layout.rect(control.rect);
-            assert!(r.x >= 20.0 && r.x + r.w <= 900.0);
-            for other in &controls[i + 1..] {
-                let overlap = r.intersect(layout.rect(other.rect));
+        for (width, height) in [
+            (920.0, 760.0),
+            (640.0, 640.0),
+            (420.0, 560.0),
+            (920.0, 2000.0),
+        ] {
+            let layout = SettingsLayout::new(width, height);
+            assert_eq!(
+                layout.max_scroll(),
+                (layout.content_height() - layout.content.h).max(0.0)
+            );
+            for section in SettingsSection::ALL {
+                let r = layout.section_rect(section.index());
                 assert!(
-                    overlap.w < 0.1 || overlap.h < 0.1,
-                    "controls overlap after reflow"
+                    r.x >= layout.content.x && r.x + r.w <= layout.content.x + layout.content.w
                 );
             }
+            for control in &controls {
+                let r = layout.rect(control.rect);
+                let section = layout.section_rect(control.section.index());
+                assert!(r.x >= section.x && r.x + r.w <= section.x + section.w + 0.01);
+                assert!(r.y >= section.y && r.y + r.h <= section.y + section.h);
+            }
+        }
+    }
+
+    #[test]
+    fn layout_resize_retains_selection_and_reveals_focused_control() {
+        let popup = HiddenPopup::new(1.0);
+        let button = unsafe {
+            CreateWindowExW(
+                0,
+                wide("BUTTON").as_ptr(),
+                wide("Reset").as_ptr(),
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                0,
+                0,
+                1,
+                1,
+                popup.hwnd,
+                143usize as *mut _,
+                GetModuleHandleW(null()),
+                null(),
+            )
+        };
+        {
+            let mut state = popup.popup.state.borrow_mut();
+            state.active_section = SettingsSection::Application;
+            state.controls[43].hwnd = button;
+        }
+        unsafe {
+            SetFocus(button);
+        }
+        for width in [920, 640, 920] {
+            unsafe {
+                SetWindowPos(
+                    popup.hwnd,
+                    null_mut(),
+                    0,
+                    0,
+                    width,
+                    560,
+                    SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+                reflow(popup.hwnd, &popup.popup.state).unwrap();
+            }
+            let state = popup.popup.state.borrow();
+            let layout = SettingsLayout::new(state.width, state.height);
+            let rect = layout.rect(state.controls[43].rect);
+            assert_eq!(state.active_section, SettingsSection::Application);
+            assert!(state.scroll >= 0.0 && state.scroll <= layout.max_scroll());
+            assert!(rect.y >= state.scroll && rect.y + rect.h <= state.scroll + layout.content.h);
+            unsafe {
+                assert_eq!(GetFocus(), button);
+            }
+        }
+    }
+
+    #[test]
+    fn layout_navigation_click_and_keyboard_select_sections() {
+        let popup = HiddenPopup::new(1.0);
+        unsafe {
+            install_navigation(popup.hwnd);
+            WINDOW.with(|window| window.set(popup.hwnd));
+            position_controls(popup.hwnd, &popup.popup.state);
+            proc(popup.hwnd, COMMAND, NAV_FIRST + 2, 0);
+            assert_eq!(
+                popup.popup.state.borrow().active_section,
+                SettingsSection::ClockPosition
+            );
+            let target = popup.popup.state.borrow().scroll_motion.target();
+            assert_eq!(target, 234.0);
+            let button = GetDlgItem(popup.hwnd, (NAV_FIRST + 2) as i32);
+            SetFocus(button);
+            assert!(translate_message(&MSG {
+                hwnd: button,
+                message: WM_KEYDOWN,
+                wParam: 40,
+                ..Default::default()
+            }));
+            assert_eq!(
+                popup.popup.state.borrow().active_section,
+                SettingsSection::MusicLyrics
+            );
+            assert_eq!(GetFocus(), GetDlgItem(popup.hwnd, (NAV_FIRST + 3) as i32));
+            assert!(translate_message(&MSG {
+                hwnd: GetFocus(),
+                message: WM_KEYDOWN,
+                wParam: 32,
+                ..Default::default()
+            }));
+            assert_eq!(popup.popup.state.borrow().scroll_motion.target(), 428.0);
+            WINDOW.with(|window| window.set(null_mut()));
+        }
+    }
+
+    #[test]
+    fn layout_navigation_refreshes_native_names_without_reflow() {
+        let popup = HiddenPopup::new(1.0);
+        unsafe {
+            install_navigation(popup.hwnd);
+            WINDOW.with(|window| window.set(popup.hwnd));
+            let button = GetDlgItem(popup.hwnd, NAV_FIRST as i32);
+            SetWindowTextW(button, wide("Outdated caption").as_ptr());
+            update(&Settings::default(), true);
+            let mut text = [0u16; 128];
+            let len = GetWindowTextW(button, text.as_mut_ptr(), text.len() as i32);
+            WINDOW.with(|window| window.set(null_mut()));
+            assert_eq!(
+                String::from_utf16_lossy(&text[..len as usize]),
+                SettingsSection::Appearance.label()
+            );
+        }
+    }
+
+    #[test]
+    fn layout_about_body_remains_visible_without_category_navigation() {
+        for width in [420, 920] {
+            let popup = HiddenPopup::new(1.0);
+            unsafe {
+                install_navigation(popup.hwnd);
+                SetWindowPos(
+                    popup.hwnd,
+                    null_mut(),
+                    0,
+                    0,
+                    width,
+                    680,
+                    SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+                reflow(popup.hwnd, &popup.popup.state).unwrap();
+                proc(popup.hwnd, COMMAND, 142, 0);
+                for index in 0..5 {
+                    assert_eq!(
+                        IsWindowVisible(GetDlgItem(popup.hwnd, (NAV_FIRST + index) as i32)),
+                        0
+                    );
+                }
+            }
+            popup.paint();
+            let pixels = popup.pixels();
+            assert!(
+                (120..350).any(|y| (24..200).any(|x| {
+                    let offset = (y * width as usize + x) * 4;
+                    pixels[offset..offset + 4] != [8, 8, 8, 255]
+                })),
+                "About body disappeared at width {width}"
+            );
         }
     }
 
@@ -2162,14 +2557,14 @@ pub(crate) mod tests {
                     popup.paint();
                     let mut pixels = popup.pixels();
                     let size = ((width * scale) as u32, (height * scale) as u32);
-                    let layout = SettingsLayout::new(width);
+                    let layout = SettingsLayout::new(width, height);
                     let mut state = popup.popup.state.borrow_mut();
                     for index in 0..state.controls.len() {
                         let r = layout.rect(state.controls[index].rect);
                         let left = (r.x * scale).round() as usize;
-                        let top = ((CONTENT_TOP + r.y) * scale).round() as usize;
+                        let top = ((layout.content.y + r.y) * scale).round() as usize;
                         let w = ((r.x + r.w) * scale).round() as usize - left;
-                        let h = ((CONTENT_TOP + r.y + r.h) * scale).round() as usize - top;
+                        let h = ((layout.content.y + r.y + r.h) * scale).round() as usize - top;
                         let item = DRAWITEMSTRUCT {
                             CtlID: index as u32 + 100,
                             rcItem: RECT {
@@ -2183,7 +2578,7 @@ pub(crate) mod tests {
                         let raster = button_raster(&mut state, &item, true);
                         for row in 0..h {
                             let y = top + row;
-                            if y >= ((height - CONTENT_BOTTOM) * scale).floor() as usize {
+                            if y >= (layout.footer.y * scale).floor() as usize {
                                 break;
                             }
                             assert!(left + w <= size.0 as usize);
@@ -2347,7 +2742,7 @@ pub(crate) mod tests {
                 .any(|c| c.action == Some(LocalAction::CheckUpdate))
         );
         for control in controls {
-            assert!(control.rect.y >= 0.0 && control.rect.y + control.rect.h <= CONTENT);
+            assert!(control.rect.y >= 0.0 && control.rect.y + control.rect.h <= 1275.0);
         }
     }
 
@@ -2480,6 +2875,7 @@ pub(crate) mod tests {
             control.hwnd = (index + 100) as HWND;
         }
         State {
+            active_section: SettingsSection::Appearance,
             painter: Painter::new(scale).unwrap(),
             surface: WindowSurface::new().unwrap(),
             frame_pump: FramePump::new(SCROLL_FRAME),
@@ -2487,7 +2883,7 @@ pub(crate) mod tests {
             controls,
             scale,
             height: 760.0,
-            width: WIDTH,
+            width: 420.0,
             scroll: 0.0,
             scroll_motion: SmoothScroll::default(),
             about: false,
@@ -2515,7 +2911,7 @@ pub(crate) mod tests {
                     WS_POPUP,
                     0,
                     0,
-                    (WIDTH * scale) as i32,
+                    (420.0 * scale) as i32,
                     (760.0 * scale) as i32,
                     null_mut(),
                     null_mut(),
@@ -2810,14 +3206,14 @@ pub(crate) mod tests {
             }
         }
         for (scale, height, scroll, y, width, rows, first, last) in [
-            (1.0, 760.0, 44.0, 34.0, 59, 29, 10, 29),
-            (1.0, 300.0, 0.0, 151.0, 59, 29, 0, 19),
-            (1.25, 760.0, 44.0, 34.0, 74, 36, 12, 36),
-            (1.25, 300.0, 0.0, 151.0, 74, 36, 0, 23),
-            (1.5, 760.0, 44.0, 34.0, 89, 44, 15, 44),
-            (1.5, 300.0, 0.0, 151.0, 89, 43, 0, 28),
-            (2.0, 760.0, 44.0, 34.0, 118, 58, 20, 58),
-            (2.0, 300.0, 0.0, 151.0, 118, 58, 0, 38),
+            (1.0, 760.0, 44.0, 34.0, 70, 29, 10, 29),
+            (1.0, 338.0, 0.0, 151.0, 70, 29, 0, 19),
+            (1.25, 760.0, 44.0, 34.0, 88, 36, 12, 36),
+            (1.25, 338.0, 0.0, 151.0, 88, 36, 0, 23),
+            (1.5, 760.0, 44.0, 34.0, 106, 44, 15, 44),
+            (1.5, 338.0, 0.0, 151.0, 106, 43, 0, 28),
+            (2.0, 760.0, 44.0, 34.0, 140, 58, 20, 58),
+            (2.0, 338.0, 0.0, 151.0, 140, 58, 0, 38),
         ] {
             let popup = HiddenPopup::new(scale);
             unsafe {
@@ -2997,7 +3393,7 @@ pub(crate) mod tests {
             DeleteObject(region);
             assert_eq!(
                 (bounds.left, bounds.top, bounds.right, bounds.bottom),
-                (0, 10, 59, 29)
+                (0, 10, 70, 29)
             );
         }
     }
@@ -3029,9 +3425,9 @@ pub(crate) mod tests {
             popup.popup.state.borrow_mut().scroll = 137.0;
             popup.paint();
             let after = popup.pixels();
-            let row = (WIDTH * scale) as usize * 4;
-            let top = (CONTENT_TOP * scale).floor() as usize * row;
-            let bottom = ((760.0 - CONTENT_BOTTOM) * scale).ceil() as usize * row;
+            let row = (420.0 * scale) as usize * 4;
+            let top = (104.0 * scale).floor() as usize * row;
+            let bottom = ((760.0 - FOOTER_HEIGHT) * scale).ceil() as usize * row;
             assert!(before[..top] == after[..top], "header at scale {scale}");
             assert!(
                 before[bottom..] == after[bottom..],
@@ -3052,8 +3448,8 @@ pub(crate) mod tests {
                 0,
                 (&mut info as *mut MINMAXINFO) as isize,
             );
-            assert_eq!(info.ptMinTrackSize.x, 360);
-            assert_eq!(info.ptMinTrackSize.y, 300);
+            assert_eq!(info.ptMinTrackSize.x, 420);
+            assert_eq!(info.ptMinTrackSize.y, 560);
         }
     }
 
@@ -3074,7 +3470,7 @@ pub(crate) mod tests {
     #[test]
     fn resize_reflow_preserves_user_outer_geometry_and_clamps_scroll() {
         let popup = HiddenPopup::new(1.0);
-        popup.popup.state.borrow_mut().scroll = CONTENT;
+        popup.popup.state.borrow_mut().scroll = 1275.0;
         unsafe {
             SetWindowPos(
                 popup.hwnd,
@@ -3099,7 +3495,7 @@ pub(crate) mod tests {
         assert_eq!((state.width, state.height), (521.0, 420.0));
         assert_eq!(
             state.scroll,
-            CONTENT.min(SettingsLayout::new(state.width).max_scroll(420.0))
+            SettingsLayout::new(state.width, 420.0).max_scroll()
         );
     }
 
@@ -3254,7 +3650,7 @@ pub(crate) mod tests {
                 let window_dc = GetDC(hwnd);
                 let bitmap = CreateCompatibleBitmap(
                     window_dc,
-                    (WIDTH * scale) as i32,
+                    (420.0 * scale) as i32,
                     (760.0 * scale) as i32,
                 );
                 ReleaseDC(hwnd, window_dc);
@@ -3624,7 +4020,7 @@ pub(crate) mod tests {
                 HWND_TOPMOST,
                 40,
                 40,
-                (WIDTH * scale) as i32,
+                (420.0 * scale) as i32,
                 (600.0 * scale) as i32,
                 SWP_NOACTIVATE,
             );
@@ -3643,7 +4039,7 @@ pub(crate) mod tests {
             };
             assert_eq!(hit(24.0, 24.0), HTCAPTION as isize);
             assert_eq!(hit(2.0, 2.0), HTTOPLEFT as isize);
-            assert_eq!(hit(WIDTH - 28.0, 28.0), HTCLIENT as isize);
+            assert_eq!(hit(420.0 - 28.0, 28.0), HTCLIENT as isize);
             SendMessageW(hwnd, WM_SYSCOMMAND, SC_MAXIMIZE as usize, 0);
             for _ in 0..160 {
                 SendMessageW(hwnd, WM_TIMER, 0x4953, 0);
@@ -3728,7 +4124,7 @@ pub(crate) mod tests {
                     {
                         let mut state = state.borrow_mut();
                         state.scroll =
-                            offset.min(SettingsLayout::new(state.width).max_scroll(state.height));
+                            offset.min(SettingsLayout::new(state.width, state.height).max_scroll());
                     }
                     position_controls(hwnd, state);
                     RedrawWindow(
@@ -4145,17 +4541,17 @@ pub(crate) mod tests {
         let normal = popup_geometry(anchor, work, 96);
         assert_eq!(
             (normal.scale, normal.width_px, normal.height_px),
-            (1.0, 360, 760)
+            (1.0, 760, 680)
         );
-        assert_eq!((normal.origin.x, normal.origin.y), (-360, 280));
+        assert_eq!((normal.origin.x, normal.origin.y), (-760, 360));
 
         let scaled = popup_geometry(anchor, work, 192);
         assert_eq!(
             (scaled.scale, scaled.width_px, scaled.height_px),
-            (2.0, 720, 1016)
+            (2.0, 1520, 1016)
         );
         assert_eq!(scaled.height_px as f32 / scaled.scale, 508.0);
-        assert_eq!((scaled.origin.x, scaled.origin.y), (-720, 24));
+        assert_eq!((scaled.origin.x, scaled.origin.y), (-1520, 24));
 
         // A minimum logical height must not overflow a short, high-DPI work area.
         let short = popup_geometry(
@@ -4199,6 +4595,7 @@ pub(crate) mod tests {
     fn keyboard_reveals_last_control_on_short_work_area() {
         let settings = Settings::default();
         let mut state = State {
+            active_section: SettingsSection::Appearance,
             painter: Painter::new(1.0).unwrap(),
             surface: WindowSurface::new().unwrap(),
             frame_pump: FramePump::new(SCROLL_FRAME),
@@ -4206,7 +4603,7 @@ pub(crate) mod tests {
             controls: controls(&settings),
             scale: 1.0,
             height: 400.0,
-            width: WIDTH,
+            width: 420.0,
             scroll: 0.0,
             scroll_motion: SmoothScroll::default(),
             about: false,
@@ -4221,7 +4618,8 @@ pub(crate) mod tests {
         reveal_control(&mut state, index);
         let rect = state.controls[index].rect;
         assert!(rect.y >= state.scroll);
-        assert!(CONTENT_TOP + rect.y - state.scroll + rect.h <= state.height - CONTENT_BOTTOM);
+        let layout = SettingsLayout::new(state.width, state.height);
+        assert!(layout.content.y + rect.y - state.scroll + rect.h <= layout.footer.y);
         reveal_control(&mut state, 0);
         assert!(state.controls[0].rect.y >= state.scroll);
     }
