@@ -2,6 +2,303 @@ use crate::canvas::{Canvas, DIM, MUTED, Rect, WHITE};
 
 pub(crate) use crate::theme::{BG as BACKGROUND, SURFACE};
 
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
+use windows_sys::Win32::Foundation::{HWND, RECT, WPARAM};
+use windows_sys::Win32::Graphics::Gdi::{HBITMAP, HDC, HGDIOBJ};
+
+/// A persistent, top-down BGRA DIB selected into its own memory DC.
+pub(crate) struct WindowSurface {
+    dc: HDC,
+    bitmap: HBITMAP,
+    original: HGDIOBJ,
+    pixels: *mut u8,
+    size: (u32, u32),
+    len: usize,
+    #[cfg(test)]
+    pub(crate) presents: usize,
+}
+
+impl WindowSurface {
+    pub(crate) fn new() -> Option<Self> {
+        let dc =
+            unsafe { windows_sys::Win32::Graphics::Gdi::CreateCompatibleDC(std::ptr::null_mut()) };
+        if dc.is_null() {
+            return None;
+        }
+        Some(Self {
+            dc,
+            bitmap: std::ptr::null_mut(),
+            original: std::ptr::null_mut(),
+            pixels: std::ptr::null_mut(),
+            size: (0, 0),
+            len: 0,
+            #[cfg(test)]
+            presents: 0,
+        })
+    }
+
+    pub(crate) fn resize(&mut self, width: u32, height: u32) -> bool {
+        use windows_sys::Win32::Graphics::Gdi::*;
+        if width == 0 || height == 0 || width > i32::MAX as u32 || height > i32::MAX as u32 {
+            return false;
+        }
+        if self.size == (width, height) {
+            return true;
+        }
+        let Some(len) = (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|n| n.checked_mul(4))
+            .filter(|len| *len <= isize::MAX as usize)
+        else {
+            return false;
+        };
+        let info = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: width as i32,
+                biHeight: -(height as i32),
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        unsafe {
+            let mut bits = std::ptr::null_mut();
+            let bitmap = CreateDIBSection(
+                self.dc,
+                &info,
+                DIB_RGB_COLORS,
+                &mut bits,
+                std::ptr::null_mut(),
+                0,
+            );
+            if bitmap.is_null() {
+                return false;
+            }
+            let previous = SelectObject(self.dc, bitmap);
+            if previous.is_null() || previous as isize == -1 {
+                DeleteObject(bitmap);
+                return false;
+            }
+            if self.original.is_null() {
+                self.original = previous;
+            }
+            if !self.bitmap.is_null() {
+                DeleteObject(self.bitmap);
+            }
+            self.bitmap = bitmap;
+            self.pixels = bits.cast();
+            self.size = (width, height);
+            self.len = len;
+            self.pixels_mut().fill(0);
+        }
+        true
+    }
+
+    pub(crate) fn pixels_mut(&mut self) -> &mut [u8] {
+        if self.len == 0 {
+            return &mut [];
+        }
+        // Finish any batched GDI reads before the software renderer writes again.
+        unsafe {
+            windows_sys::Win32::Graphics::Gdi::GdiFlush();
+            std::slice::from_raw_parts_mut(self.pixels, self.len)
+        }
+    }
+
+    pub(crate) unsafe fn present(&mut self, dc: HDC, dirty: RECT) {
+        #[cfg(test)]
+        {
+            self.presents += 1;
+        }
+        use windows_sys::Win32::Graphics::Gdi::{BitBlt, SRCCOPY};
+        let left = dirty.left.clamp(0, self.size.0 as i32);
+        let top = dirty.top.clamp(0, self.size.1 as i32);
+        let right = dirty.right.clamp(left, self.size.0 as i32);
+        let bottom = dirty.bottom.clamp(top, self.size.1 as i32);
+        if right > left && bottom > top {
+            unsafe {
+                BitBlt(
+                    dc,
+                    left,
+                    top,
+                    right - left,
+                    bottom - top,
+                    self.dc,
+                    left,
+                    top,
+                    SRCCOPY,
+                );
+            }
+        }
+    }
+}
+
+impl Drop for WindowSurface {
+    fn drop(&mut self) {
+        use windows_sys::Win32::Graphics::Gdi::*;
+        unsafe {
+            if !self.original.is_null() {
+                SelectObject(self.dc, self.original);
+            }
+            if !self.bitmap.is_null() {
+                DeleteObject(self.bitmap);
+            }
+            DeleteDC(self.dc);
+        }
+    }
+}
+
+struct FrameWakeup {
+    hwnd: HWND,
+    message: u32,
+    generation: usize,
+    pending: AtomicBool,
+}
+
+enum FrameSource {
+    Multimedia(u32),
+    Window(usize),
+}
+
+pub(crate) struct FramePump {
+    wakeup: Box<FrameWakeup>,
+    source: Option<FrameSource>,
+    last_draw: Option<Instant>,
+}
+
+unsafe extern "system" fn frame_callback(_: u32, _: u32, user: usize, _: usize, _: usize) {
+    // TIME_KILL_SYNCHRONOUS keeps this allocation alive until callbacks finish.
+    let wakeup = unsafe { &*(user as *const FrameWakeup) };
+    if !wakeup.pending.swap(true, Ordering::AcqRel)
+        && unsafe {
+            windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW(
+                wakeup.hwnd,
+                wakeup.message,
+                wakeup.generation,
+                0,
+            )
+        } == 0
+    {
+        wakeup.pending.store(false, Ordering::Release);
+    }
+}
+
+impl FramePump {
+    pub(crate) fn new(message: u32) -> Self {
+        Self {
+            wakeup: Box::new(FrameWakeup {
+                hwnd: std::ptr::null_mut(),
+                message,
+                generation: 0,
+                pending: AtomicBool::new(false),
+            }),
+            source: None,
+            last_draw: None,
+        }
+    }
+
+    pub(crate) fn is_active(&self) -> bool {
+        self.source.is_some()
+    }
+
+    pub(crate) unsafe fn start(&mut self, hwnd: HWND) {
+        use windows_sys::Win32::Media::*;
+        use windows_sys::Win32::UI::WindowsAndMessaging::SetTimer;
+        static NEXT: AtomicUsize = AtomicUsize::new(0x10000);
+        if self.is_active() {
+            return;
+        }
+        self.wakeup.hwnd = hwnd;
+        self.wakeup.generation = NEXT.fetch_add(1, Ordering::Relaxed).max(1);
+        unsafe {
+            if timeBeginPeriod(1) == 0 {
+                let timer = timeSetEvent(
+                    16,
+                    1,
+                    Some(frame_callback),
+                    (&*self.wakeup as *const FrameWakeup) as usize,
+                    TIME_PERIODIC | TIME_CALLBACK_FUNCTION | TIME_KILL_SYNCHRONOUS,
+                );
+                if timer != 0 {
+                    self.source = Some(FrameSource::Multimedia(timer));
+                    return;
+                }
+                timeEndPeriod(1);
+            }
+            let timer = SetTimer(hwnd, self.wakeup.generation, 16, None);
+            if timer != 0 {
+                self.source = Some(FrameSource::Window(timer));
+            } else {
+                self.wakeup.generation = 0;
+            }
+        }
+    }
+
+    pub(crate) unsafe fn stop(&mut self) {
+        use windows_sys::Win32::Media::{timeEndPeriod, timeKillEvent};
+        unsafe {
+            match self.source.take() {
+                Some(FrameSource::Multimedia(timer)) => {
+                    timeKillEvent(timer);
+                    timeEndPeriod(1);
+                }
+                Some(FrameSource::Window(timer)) => {
+                    windows_sys::Win32::UI::WindowsAndMessaging::KillTimer(self.wakeup.hwnd, timer);
+                }
+                None => {}
+            }
+        }
+        self.wakeup.pending.store(false, Ordering::Release);
+        self.wakeup.generation = 0;
+    }
+
+    pub(crate) fn is_frame(&self, message: u32, wparam: WPARAM) -> bool {
+        (message == self.wakeup.message && wparam == self.wakeup.generation)
+            || matches!(self.source, Some(FrameSource::Window(timer))
+                if message == windows_sys::Win32::UI::WindowsAndMessaging::WM_TIMER && wparam == timer)
+    }
+
+    pub(crate) unsafe fn should_draw(&mut self, now: Instant) -> bool {
+        self.wakeup.pending.store(false, Ordering::Release);
+        if self
+            .last_draw
+            .is_some_and(|last| now.saturating_duration_since(last) < Duration::from_millis(8))
+        {
+            return false;
+        }
+        self.last_draw = Some(now);
+        true
+    }
+}
+
+impl Drop for FramePump {
+    fn drop(&mut self) {
+        unsafe {
+            self.stop();
+        }
+    }
+}
+
+pub(crate) fn trace_start() -> Option<Instant> {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    ENABLED
+        .get_or_init(|| std::env::var_os("HIYODYNA_TRACE_UI").is_some())
+        .then(Instant::now)
+}
+
+pub(crate) fn trace_ui(window: &str, phase: &str, started: Option<Instant>) {
+    if let Some(started) = started {
+        eprintln!(
+            "HIYODYNA_TRACE_UI {window} {phase}={:.3}ms",
+            started.elapsed().as_secs_f64() * 1000.0
+        );
+    }
+}
+
 /// Bounded, elapsed-time scrolling. Input changes the target; the frame timer
 /// advances the viewport, so bursts of wheel messages share the same repaint.
 #[derive(Clone, Copy, Debug, Default)]
@@ -99,9 +396,9 @@ pub(crate) unsafe fn style_window(hwnd: windows_sys::Win32::Foundation::HWND) {
     unsafe {
         use windows_sys::Win32::UI::WindowsAndMessaging::*;
         let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style | WS_EX_COMPOSITED as isize);
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style & !(WS_EX_COMPOSITED as isize));
         let dark = 1_i32;
-        DwmSetWindowAttribute(
+        let dark_result = DwmSetWindowAttribute(
             hwnd,
             DWMWA_USE_IMMERSIVE_DARK_MODE as u32,
             (&dark as *const i32).cast(),
@@ -109,7 +406,10 @@ pub(crate) unsafe fn style_window(hwnd: windows_sys::Win32::Foundation::HWND) {
         );
         let corner = 2_u32;
         // DWMWA_WINDOW_CORNER_PREFERENCE / DWMWCP_ROUND on supported Windows.
-        DwmSetWindowAttribute(hwnd, 33, (&corner as *const u32).cast(), 4);
+        let corner_result = DwmSetWindowAttribute(hwnd, 33, (&corner as *const u32).cast(), 4);
+        if trace_start().is_some() && (dark_result < 0 || corner_result < 0) {
+            eprintln!("HIYODYNA_TRACE_UI DWM dark={dark_result:#x} corner={corner_result:#x}");
+        }
     }
 }
 
@@ -865,6 +1165,129 @@ pub(crate) use notices::{
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn surface_reuses_storage_and_zeroes_resized_pixels() {
+        let mut surface = WindowSurface::new().unwrap();
+        assert!(surface.resize(64, 32));
+        assert_eq!(surface.pixels_mut().len(), 8192);
+        surface.pixels_mut()[0] = 123;
+        let address = surface.pixels_mut().as_ptr();
+        assert!(surface.resize(64, 32));
+        assert_eq!(surface.pixels_mut().as_ptr(), address);
+        assert_eq!(surface.pixels_mut()[0], 123);
+        assert!(surface.resize(32, 16));
+        assert!(surface.pixels_mut().iter().all(|byte| *byte == 0));
+        assert!(!surface.resize(u32::MAX, 32));
+        assert_eq!(surface.pixels_mut().len(), 2048);
+    }
+
+    #[test]
+    fn surface_presents_only_the_dirty_rectangle_from_top_down_pixels() {
+        let mut source = WindowSurface::new().unwrap();
+        let mut destination = WindowSurface::new().unwrap();
+        assert!(source.resize(4, 4));
+        assert!(destination.resize(4, 4));
+        source.pixels_mut().fill(255);
+        source.pixels_mut()[20..24].copy_from_slice(&[10, 20, 30, 0]);
+        unsafe {
+            source.present(
+                destination.dc,
+                RECT {
+                    left: 1,
+                    top: 1,
+                    right: 3,
+                    bottom: 2,
+                },
+            );
+        }
+        let pixels = destination.pixels_mut();
+        assert_eq!(&pixels[20..24], &[10, 20, 30, 0]);
+        assert_eq!(&pixels[24..28], &[255; 4]);
+        assert!(pixels[..20].iter().all(|byte| *byte == 0));
+        assert!(pixels[28..].iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn frame_pump_accepts_only_its_message_and_limits_draw_frequency() {
+        use std::time::{Duration, Instant};
+        use windows_sys::Win32::UI::WindowsAndMessaging::{WM_APP, WM_TIMER};
+        let mut pump = FramePump::new(WM_APP + 9);
+        assert!(pump.is_frame(WM_APP + 9, 0));
+        assert!(!pump.is_frame(WM_APP + 10, 0));
+        assert!(!pump.is_frame(WM_TIMER, 0));
+        let now = Instant::now();
+        unsafe {
+            assert!(pump.should_draw(now));
+            assert!(!pump.should_draw(now + Duration::from_millis(7)));
+            assert!(pump.should_draw(now + Duration::from_millis(9)));
+        }
+    }
+
+    #[test]
+    fn frame_pump_coalesces_posts_and_rejects_stale_wakeups_after_stop() {
+        use std::ptr::{null, null_mut};
+        use windows_sys::Win32::UI::WindowsAndMessaging::*;
+        unsafe {
+            let class: Vec<u16> = "STATIC".encode_utf16().chain(Some(0)).collect();
+            let hwnd = CreateWindowExW(
+                0,
+                class.as_ptr(),
+                null(),
+                WS_POPUP,
+                0,
+                0,
+                1,
+                1,
+                null_mut(),
+                null_mut(),
+                null_mut(),
+                null(),
+            );
+            assert!(!hwnd.is_null());
+            let mut pump = FramePump::new(WM_APP + 9);
+            pump.start(hwnd);
+            assert!(pump.is_active());
+            let token = pump.wakeup.generation;
+            pump.stop();
+            assert!(!pump.is_active());
+            assert!(!pump.is_frame(WM_APP + 9, token));
+            // Drain any real timer post, then exercise the same callback twice.
+            let mut message = MSG::default();
+            while PeekMessageW(&mut message, hwnd, WM_APP + 9, WM_APP + 9, PM_REMOVE) != 0 {}
+            let user = (&*pump.wakeup as *const FrameWakeup) as usize;
+            frame_callback(0, 0, user, 0, 0);
+            frame_callback(0, 0, user, 0, 0);
+            assert_ne!(
+                PeekMessageW(&mut message, hwnd, WM_APP + 9, WM_APP + 9, PM_REMOVE),
+                0
+            );
+            assert_eq!(
+                PeekMessageW(&mut message, hwnd, WM_APP + 9, WM_APP + 9, PM_REMOVE),
+                0
+            );
+            assert!(pump.should_draw(Instant::now()));
+            frame_callback(0, 0, user, 0, 0);
+            assert_ne!(
+                PeekMessageW(&mut message, hwnd, WM_APP + 9, WM_APP + 9, PM_REMOVE),
+                0
+            );
+            pump.stop();
+            // Exercise the real window-timer teardown path without requiring
+            // multimedia-timer allocation to fail on this machine.
+            let fallback = SetTimer(hwnd, 0x20000, 16, None);
+            assert_ne!(fallback, 0);
+            pump.source = Some(FrameSource::Window(fallback));
+            assert!(pump.is_frame(WM_TIMER, fallback));
+            assert!(!pump.is_frame(WM_TIMER, fallback + 1));
+            pump.stop();
+            assert_eq!(KillTimer(hwnd, fallback), 0);
+            pump.start(hwnd);
+            assert_ne!(pump.wakeup.generation, token);
+            drop(pump);
+            DestroyWindow(hwnd);
+        }
+    }
 
     #[test]
     fn smooth_scroll_has_intermediate_frames_and_finishes_exactly() {

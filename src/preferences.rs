@@ -2,7 +2,7 @@ use crate::canvas::{Canvas, MUTED, Painter, Rect, WHITE};
 use crate::clock::ClockFormat;
 use crate::hotkey::Shortcut;
 use crate::i18n::{Language, tr};
-use crate::native_ui::{SmoothScroll, blit};
+use crate::native_ui::{FramePump, SmoothScroll, WindowSurface, blit, trace_start, trace_ui};
 use crate::settings::{
     AccentPreset, BouncePreset, DockAnchor, LyricsMode, MotionPreset, Settings, UpdateChannel,
 };
@@ -31,7 +31,7 @@ const CONTENT_TOP: f32 = 68.0;
 const CONTENT_BOTTOM: f32 = 62.0;
 const WINDOW_STYLE: u32 = WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN;
 const UPDATE_POLL: usize = 0x5544;
-const SCROLL_TIMER: usize = 0x5343;
+const SCROLL_FRAME: u32 = WM_APP + 44;
 
 #[derive(Clone, Copy)]
 struct SettingsLayout {
@@ -270,10 +270,15 @@ fn reveal_control(state: &mut State, index: usize) {
     }
     state.scroll = state.scroll.clamp(0.0, layout.max_scroll(state.height));
     state.scroll_motion.jump(state.scroll);
+    unsafe {
+        state.frame_pump.stop();
+    }
 }
 
 struct State {
     painter: Painter,
+    surface: WindowSurface,
+    frame_pump: FramePump,
     settings: Settings,
     controls: Vec<Control>,
     scale: f32,
@@ -1042,9 +1047,15 @@ pub(crate) fn show(
                 return Err(error);
             }
         };
+        let Some(surface) = WindowSurface::new() else {
+            DestroyWindow(hwnd);
+            return Err("Could not create Settings surface".into());
+        };
         let popup = Box::new(Popup {
             state: RefCell::new(State {
                 painter,
+                surface,
+                frame_pump: FramePump::new(SCROLL_FRAME),
                 settings: *settings,
                 controls: controls_with_shortcut(
                     settings,
@@ -1457,7 +1468,7 @@ pub(crate) fn translate_message(message: &MSG) -> bool {
 }
 
 unsafe fn queue_scroll(hwnd: HWND, state: &RefCell<State>, target: f32) {
-    let (moving, was_moving) = {
+    {
         let mut state = state.borrow_mut();
         let was_moving = state.scroll_motion.moving();
         if !was_moving && state.scroll_motion.offset() != state.scroll {
@@ -1466,11 +1477,21 @@ unsafe fn queue_scroll(hwnd: HWND, state: &RefCell<State>, target: f32) {
         }
         let max = SettingsLayout::new(state.width).max_scroll(state.height);
         state.scroll_motion.scroll_to(target, max, Instant::now());
-        (state.scroll_motion.moving(), was_moving)
-    };
-    unsafe {
-        if moving && !was_moving {
-            SetTimer(hwnd, SCROLL_TIMER, 15, None);
+        unsafe {
+            if state.scroll_motion.moving() {
+                state.frame_pump.start(hwnd);
+                if !state.frame_pump.is_active() {
+                    let target = state.scroll_motion.target();
+                    state.scroll_motion.jump(target);
+                }
+            } else {
+                state.frame_pump.stop();
+            }
+        }
+    }
+    if !state.borrow().scroll_motion.moving() {
+        unsafe {
+            advance_scroll(hwnd, state, Instant::now());
         }
     }
 }
@@ -1488,7 +1509,7 @@ unsafe fn advance_scroll(hwnd: HWND, state: &RefCell<State>, now: Instant) {
             position_controls(hwnd, state);
         }
         if !moving {
-            KillTimer(hwnd, SCROLL_TIMER);
+            state.borrow_mut().frame_pump.stop();
         }
     }
 }
@@ -1552,6 +1573,10 @@ unsafe fn reflow(hwnd: HWND, state: &RefCell<State>) -> Result<(), String> {
         let focus = GetFocus();
         {
             let mut state = state.borrow_mut();
+            state.frame_pump.stop();
+            state
+                .surface
+                .resize(rect.right.max(0) as u32, rect.bottom.max(0) as u32);
             if let Some(painter) = painter {
                 state.painter = painter;
             }
@@ -1575,6 +1600,7 @@ unsafe fn reflow(hwnd: HWND, state: &RefCell<State>) -> Result<(), String> {
 }
 
 unsafe fn position_controls(hwnd: HWND, state: &RefCell<State>) {
+    let started = trace_start();
     let (positions, scale, height) = {
         let state = state.borrow();
         let positions: Vec<_> = state
@@ -1670,6 +1696,7 @@ unsafe fn position_controls(hwnd: HWND, state: &RefCell<State>) {
             );
         }
     }
+    trace_ui("settings", "reposition", started);
 }
 
 unsafe extern "system" fn proc(
@@ -1681,7 +1708,6 @@ unsafe extern "system" fn proc(
     unsafe {
         if message == WM_NCDESTROY {
             KillTimer(hwnd, UPDATE_POLL);
-            KillTimer(hwnd, SCROLL_TIMER);
             let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut Popup;
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
             WINDOW.with(|window| {
@@ -1781,8 +1807,13 @@ unsafe extern "system" fn proc(
                 }
                 0
             }
-            WM_TIMER if wparam == SCROLL_TIMER => {
-                advance_scroll(hwnd, &(*ptr).state, Instant::now());
+            _ if (message == SCROLL_FRAME || message == WM_TIMER)
+                && (*ptr).state.borrow().frame_pump.is_frame(message, wparam) =>
+            {
+                let now = Instant::now();
+                if (*ptr).state.borrow_mut().frame_pump.should_draw(now) {
+                    advance_scroll(hwnd, &(*ptr).state, now);
+                }
                 0
             }
             COMMAND => {
@@ -1866,7 +1897,7 @@ unsafe extern "system" fn proc(
                             let scroll = state.scroll;
                             state.scroll_motion.jump(scroll);
                         }
-                        KillTimer(hwnd, SCROLL_TIMER);
+                        state.borrow_mut().frame_pump.stop();
                         SetWindowTextW(
                             GetDlgItem(hwnd, 1),
                             wide(tr(if about { "Back to settings" } else { "Close" })).as_ptr(),
@@ -1905,6 +1936,7 @@ unsafe extern "system" fn proc(
             }
             WM_ERASEBKGND => 1,
             WM_PAINT => {
+                let started = trace_start();
                 let mut ps = PAINTSTRUCT::default();
                 let dc = BeginPaint(hwnd, &mut ps);
                 let mut borrowed = (*ptr).state.borrow_mut();
@@ -2021,10 +2053,16 @@ unsafe extern "system" fn proc(
                         pixels
                     }
                 };
+                trace_ui("settings", "draw", started);
+                let present_started = trace_start();
+                if state.surface.resize(size.0, size.1) {
+                    state.surface.pixels_mut().copy_from_slice(&pixels);
+                    state.surface.present(dc, ps.rcPaint);
+                }
+                state.background = Some(Background { key, pixels });
                 drop(borrowed);
-                blit(dc, &pixels, size);
-                (*ptr).state.borrow_mut().background = Some(Background { key, pixels });
                 EndPaint(hwnd, &ps);
+                trace_ui("settings", "present", present_started);
                 0
             }
             WM_DRAWITEM => {
@@ -2443,6 +2481,8 @@ pub(crate) mod tests {
         }
         State {
             painter: Painter::new(scale).unwrap(),
+            surface: WindowSurface::new().unwrap(),
+            frame_pump: FramePump::new(SCROLL_FRAME),
             settings,
             controls,
             scale,
@@ -2513,6 +2553,54 @@ pub(crate) mod tests {
         }
     }
 
+    #[test]
+    fn native_window_style_does_not_enable_composited_painting() {
+        unsafe {
+            let class = wide("HiyoDynaSettingsStyleTest");
+            let instance = GetModuleHandleW(null());
+            RegisterClassW(&WNDCLASSW {
+                lpfnWndProc: Some(DefWindowProcW),
+                hInstance: instance,
+                lpszClassName: class.as_ptr(),
+                ..Default::default()
+            });
+            let hwnd = CreateWindowExW(
+                0,
+                class.as_ptr(),
+                null(),
+                WS_POPUP,
+                0,
+                0,
+                64,
+                32,
+                null_mut(),
+                null_mut(),
+                instance,
+                null(),
+            );
+            assert!(!hwnd.is_null());
+            crate::native_ui::style_window(hwnd);
+            let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+            DestroyWindow(hwnd);
+            assert_eq!(style & WS_EX_COMPOSITED as isize, 0);
+        }
+    }
+
+    #[test]
+    fn paint_presents_the_persistent_surface_once() {
+        let popup = HiddenPopup::new(1.0);
+        popup.paint();
+        let address = {
+            let mut state = popup.popup.state.borrow_mut();
+            assert_eq!(state.surface.presents, 1);
+            state.surface.pixels_mut().as_ptr()
+        };
+        popup.paint();
+        let mut state = popup.popup.state.borrow_mut();
+        assert_eq!(state.surface.presents, 2);
+        assert_eq!(state.surface.pixels_mut().as_ptr(), address);
+    }
+
     impl Drop for HiddenPopup {
         fn drop(&mut self) {
             unsafe {
@@ -2558,6 +2646,87 @@ pub(crate) mod tests {
         let state = popup.popup.state.borrow();
         assert_eq!(state.scroll, 60.0);
         assert!(!state.scroll_motion.moving());
+        assert!(!state.frame_pump.is_active());
+    }
+
+    #[test]
+    #[ignore = "Measures a warmed 760x680 Settings scroll frame without foreground interaction"]
+    fn persistent_surface_scroll_frame_timing() {
+        let popup = HiddenPopup::new(1.0);
+        unsafe {
+            SetWindowPos(
+                popup.hwnd,
+                null_mut(),
+                0,
+                0,
+                760,
+                680,
+                SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+            // Renderer fixtures use placeholder handles. Give this timing probe
+            // real native children so repositioning never targets those values.
+            let instance = GetModuleHandleW(null());
+            for (index, control) in popup
+                .popup
+                .state
+                .borrow_mut()
+                .controls
+                .iter_mut()
+                .enumerate()
+            {
+                control.hwnd = CreateWindowExW(
+                    0,
+                    wide("BUTTON").as_ptr(),
+                    wide(&control.label).as_ptr(),
+                    WS_CHILD | WS_VISIBLE | BS_OWNERDRAW as u32,
+                    0,
+                    0,
+                    1,
+                    1,
+                    popup.hwnd,
+                    (index + 100) as *mut _,
+                    instance,
+                    null(),
+                );
+                assert!(!control.hwnd.is_null());
+            }
+            for id in 1..=3 {
+                assert!(
+                    !CreateWindowExW(
+                        0,
+                        wide("BUTTON").as_ptr(),
+                        null(),
+                        WS_CHILD | WS_VISIBLE | BS_OWNERDRAW as u32,
+                        0,
+                        0,
+                        1,
+                        1,
+                        popup.hwnd,
+                        id as *mut _,
+                        instance,
+                        null()
+                    )
+                    .is_null()
+                );
+            }
+            position_controls(popup.hwnd, &popup.popup.state);
+        }
+        popup.paint();
+        popup.popup.state.borrow_mut().scroll = 40.0;
+        let started = Instant::now();
+        unsafe {
+            position_controls(popup.hwnd, &popup.popup.state);
+        }
+        popup.paint();
+        let elapsed = started.elapsed();
+        eprintln!(
+            "settings 760x680 scroll frame={:.3}ms",
+            elapsed.as_secs_f64() * 1000.0
+        );
+        assert!(
+            elapsed < std::time::Duration::from_millis(12),
+            "{elapsed:?}"
+        );
     }
 
     #[test]
@@ -4031,6 +4200,8 @@ pub(crate) mod tests {
         let settings = Settings::default();
         let mut state = State {
             painter: Painter::new(1.0).unwrap(),
+            surface: WindowSurface::new().unwrap(),
+            frame_pump: FramePump::new(SCROLL_FRAME),
             settings,
             controls: controls(&settings),
             scale: 1.0,

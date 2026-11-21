@@ -161,7 +161,7 @@ mod native {
     const STATUS: i32 = 203;
     const RESULTS_VIEWPORT: i32 = 204;
     const POLL: usize = 1;
-    const SCROLL_FRAME: usize = 2;
+    const SCROLL_FRAME: u32 = WM_APP + 45;
     const STYLE: u32 = WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN;
     // SS_OWNERDRAW preserves a real static control and its accessible status text.
     const STATUS_STYLE: u32 = 0x0d;
@@ -178,6 +178,8 @@ mod native {
         fetching: bool,
         font: HFONT,
         painter: Painter,
+        surface: native_ui::WindowSurface,
+        frame_pump: native_ui::FramePump,
         background: Option<((u32, u32), Vec<u8>)>,
         status: String,
         status_source: String,
@@ -338,6 +340,7 @@ mod native {
     }
 
     unsafe fn position_results(hwnd: HWND) {
+        let started = native_ui::trace_start();
         unsafe {
             let (viewport, row, height, max) = results_metrics(hwnd);
             if viewport.is_null() {
@@ -345,6 +348,10 @@ mod native {
             }
             let Some(offset) = access(hwnd, |state| {
                 state.results_scroll.clamp(max);
+                if !state.results_scroll.moving() {
+                    state.frame_pump.stop();
+                    state.results_timer = false;
+                }
                 state.results_syncing = true;
                 state.results_scroll.offset().round() as i32
             }) else {
@@ -385,12 +392,15 @@ mod native {
             access(hwnd, |state| state.results_syncing = false);
             InvalidateRect(list, null(), 0);
         }
+        native_ui::trace_ui("lyric_search", "reposition", started);
     }
 
     unsafe fn stop_results_timer(hwnd: HWND) {
         unsafe {
-            KillTimer(hwnd, SCROLL_FRAME);
-            access(hwnd, |state| state.results_timer = false);
+            access(hwnd, |state| {
+                state.frame_pump.stop();
+                state.results_timer = false;
+            });
         }
     }
 
@@ -401,14 +411,21 @@ mod native {
             })
             .unwrap_or(false);
             if start {
-                if SetTimer(hwnd, SCROLL_FRAME, 15, None) == 0 {
+                let active = access(hwnd, |state| {
+                    state.frame_pump.start(hwnd);
+                    state.results_timer = state.frame_pump.is_active();
+                    state.results_timer
+                })
+                .unwrap_or(false);
+                if !active {
                     access(hwnd, |state| {
                         state.results_scroll.jump(state.results_scroll.target())
                     });
                     position_results(hwnd);
-                } else {
-                    access(hwnd, |state| state.results_timer = true);
                 }
+            }
+            if access(hwnd, |state| !state.results_scroll.moving()).unwrap_or(true) {
+                stop_results_timer(hwnd);
             }
         }
     }
@@ -1071,8 +1088,21 @@ mod native {
         .replace(['\r', '\n', '\t'], " ")
     }
 
+    unsafe fn resize_surface(hwnd: HWND) {
+        unsafe {
+            let mut rect = RECT::default();
+            GetClientRect(hwnd, &mut rect);
+            access(hwnd, |state| {
+                state
+                    .surface
+                    .resize(rect.right.max(0) as u32, rect.bottom.max(0) as u32);
+            });
+        }
+    }
+
     unsafe fn layout(hwnd: HWND) {
         unsafe {
+            resize_surface(hwnd);
             let mut rect = RECT::default();
             GetClientRect(hwnd, &mut rect);
             let s = scale(hwnd);
@@ -1213,6 +1243,7 @@ mod native {
                     .unwrap_or(null_mut()) as isize
                 }
                 WM_PAINT => {
+                    let started = native_ui::trace_start();
                     let mut ps = PAINTSTRUCT::default();
                     let dc = BeginPaint(hwnd, &mut ps);
                     let mut rect = RECT::default();
@@ -1231,8 +1262,16 @@ mod native {
                         }
                     });
                     if let Some(pixels) = pixels {
-                        native_ui::blit(dc, &pixels, size);
-                        access(hwnd, |state| state.background = Some((size, pixels)));
+                        native_ui::trace_ui("lyric_search", "draw", started);
+                        let present_started = native_ui::trace_start();
+                        access(hwnd, |state| {
+                            if state.surface.resize(size.0, size.1) {
+                                state.surface.pixels_mut().copy_from_slice(&pixels);
+                                state.surface.present(dc, ps.rcPaint);
+                            }
+                            state.background = Some((size, pixels));
+                        });
+                        native_ui::trace_ui("lyric_search", "present", present_started);
                     }
                     EndPaint(hwnd, &ps);
                     0
@@ -1378,8 +1417,14 @@ mod native {
                     poll(hwnd);
                     0
                 }
-                WM_TIMER if wparam == SCROLL_FRAME => {
-                    tick_results(hwnd, Instant::now());
+                _ if (message == SCROLL_FRAME || message == WM_TIMER)
+                    && access(hwnd, |state| state.frame_pump.is_frame(message, wparam))
+                        .unwrap_or(false) =>
+                {
+                    let now = Instant::now();
+                    if access(hwnd, |state| state.frame_pump.should_draw(now)).unwrap_or(false) {
+                        tick_results(hwnd, now);
+                    }
                     0
                 }
                 WM_SIZE => {
@@ -1424,7 +1469,6 @@ mod native {
                 }
                 WM_NCDESTROY => {
                     KillTimer(hwnd, POLL);
-                    KillTimer(hwnd, SCROLL_FRAME);
                     let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut RefCell<State>;
                     SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
                     WINDOW.with(|window| {
@@ -1518,6 +1562,14 @@ mod native {
                 fetching: false,
                 font: null_mut(),
                 painter,
+                surface: match native_ui::WindowSurface::new() {
+                    Some(surface) => surface,
+                    None => {
+                        DestroyWindow(hwnd);
+                        return;
+                    }
+                },
+                frame_pump: native_ui::FramePump::new(SCROLL_FRAME),
                 background: None,
                 status: String::new(),
                 status_source: String::new(),
@@ -1979,6 +2031,8 @@ mod native {
                     fetching: false,
                     font: null_mut(),
                     painter: Painter::new(scale(hwnd) as f32).unwrap(),
+                    surface: native_ui::WindowSurface::new().unwrap(),
+                    frame_pump: native_ui::FramePump::new(SCROLL_FRAME),
                     background: None,
                     status: String::new(),
                     status_source: String::new(),
@@ -2052,6 +2106,39 @@ mod native {
         }
 
         #[test]
+        fn native_window_style_does_not_enable_composited_painting() {
+            let windows = hidden_results();
+            unsafe {
+                native_ui::style_window(windows.owner);
+                assert_eq!(
+                    GetWindowLongPtrW(windows.owner, GWL_EXSTYLE) & WS_EX_COMPOSITED as isize,
+                    0
+                );
+            }
+        }
+
+        #[test]
+        fn paint_presents_the_persistent_surface_once() {
+            let windows = hidden_results();
+            unsafe {
+                let hwnd = windows.owner;
+                InvalidateRect(hwnd, null(), 0);
+                SendMessageW(hwnd, WM_PAINT, 0, 0);
+                let address = access(hwnd, |state| {
+                    assert_eq!(state.surface.presents, 1);
+                    state.surface.pixels_mut().as_ptr()
+                })
+                .unwrap();
+                InvalidateRect(hwnd, null(), 0);
+                SendMessageW(hwnd, WM_PAINT, 0, 0);
+                access(hwnd, |state| {
+                    assert_eq!(state.surface.presents, 2);
+                    assert_eq!(state.surface.pixels_mut().as_ptr(), address);
+                });
+            }
+        }
+
+        #[test]
         fn search_wheel_moves_through_pixels_before_reaching_a_row_boundary() {
             unsafe {
                 let windows = hidden_results();
@@ -2077,6 +2164,12 @@ mod native {
                     moved > 0 && moved < 58,
                     "first frame must move intermediate pixels, got {moved}"
                 );
+                tick_results(hwnd, now + Duration::from_secs(1));
+                access(hwnd, |state| {
+                    assert!(!state.results_scroll.moving());
+                    assert!(!state.frame_pump.is_active());
+                    assert!(!state.results_timer);
+                });
             }
         }
 
