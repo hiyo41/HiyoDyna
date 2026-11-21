@@ -18,9 +18,10 @@ pub(crate) const SUCCESS: [u8; 3] = MINT;
 pub(crate) const WARNING: [u8; 3] = AMBER;
 pub(crate) const DANGER: [u8; 3] = [160, 169, 242];
 
-/// Packs BGR channels as specified by the theme contract: [0x11, 0x22, 0x33] -> 0x00332211.
+/// Packs BGR bytes into Win32 COLORREF (0x00BBGGRR), with red in the low byte.
+/// For example, [0x11, 0x22, 0x33] becomes 0x00112233.
 pub(crate) fn colorref(color: [u8; 3]) -> u32 {
-    u32::from(color[0]) | (u32::from(color[1]) << 8) | (u32::from(color[2]) << 16)
+    u32::from(color[2]) | (u32::from(color[1]) << 8) | (u32::from(color[0]) << 16)
 }
 
 pub(crate) fn mix(a: [u8; 3], b: [u8; 3], amount: f32) -> [u8; 3] {
@@ -73,8 +74,8 @@ mod tests {
     }
 
     #[test]
-    fn colorref_packs_bgr_channels() {
-        assert_eq!(colorref([0x11, 0x22, 0x33]), 0x00332211);
+    fn colorref_packs_bgr_channels_in_win32_order() {
+        assert_eq!(colorref([0x11, 0x22, 0x33]), 0x00112233);
     }
 
     #[test]
