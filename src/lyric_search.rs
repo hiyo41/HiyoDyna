@@ -160,6 +160,7 @@ mod native {
     const ARTIST_LABEL: i32 = 202;
     const STATUS: i32 = 203;
     const RESULTS_VIEWPORT: i32 = 204;
+    const ROW_HEIGHT: f32 = 64.0;
     const POLL: usize = 1;
     const SCROLL_FRAME: u32 = WM_APP + 45;
     const STYLE: u32 = WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN;
@@ -181,6 +182,7 @@ mod native {
         surface: native_ui::WindowSurface,
         frame_pump: native_ui::FramePump,
         background: Option<((u32, u32), Vec<u8>)>,
+        track: (String, String, String),
         status: String,
         status_source: String,
         status_count: Option<usize>,
@@ -194,11 +196,21 @@ mod native {
         row_cache: VecDeque<RowRaster>,
     }
 
-    struct RowRaster {
+    #[derive(PartialEq, Eq)]
+    struct RowKey {
         index: usize,
         size: (u32, u32),
+        dpi: u32,
+        provider: String,
+        duration: u64,
+        timing: String,
         selected: bool,
         focused: bool,
+        accent: [u8; 3],
+    }
+
+    struct RowRaster {
+        key: RowKey,
         pixels: Arc<[u8]>,
     }
 
@@ -208,14 +220,19 @@ mod native {
         size: (u32, u32),
         style: ButtonStyle,
     ) -> Arc<[u8]> {
-        let selected = style.selected;
-        let focused = style.focused;
-        if let Some(position) = state.row_cache.iter().position(|row| {
-            row.index == index
-                && row.size == size
-                && row.selected == style.selected
-                && row.focused == style.focused
-        }) {
+        let result = state.session.results.get(index);
+        let key = RowKey {
+            index,
+            size,
+            dpi: state.painter.scale.to_bits(),
+            provider: result.map_or_else(String::new, |r| r.source.clone()),
+            duration: result.map_or(0, |r| r.duration.to_bits()),
+            timing: result.map_or_else(String::new, |r| r.timing.clone()),
+            selected: style.selected,
+            focused: style.focused,
+            accent: style.accent,
+        };
+        if let Some(position) = state.row_cache.iter().position(|row| row.key == key) {
             let row = state.row_cache.remove(position).unwrap();
             let pixels = row.pixels.clone();
             state.row_cache.push_back(row);
@@ -224,12 +241,7 @@ mod native {
         let mut pixels = vec![0; (size.0 * size.1 * 4) as usize];
         let mut c = Canvas::new(&mut pixels, size, &mut state.painter);
         if let Some(result) = state.session.results.get(index) {
-            native_ui::result_row(
-                &mut c,
-                &result.title.replace(['\r', '\n', '\t'], " "),
-                &result_detail(result),
-                style,
-            );
+            result_row(&mut c, result, style);
         } else {
             c.rect(c.clip, 0.0, BACKGROUND, 1.0);
         }
@@ -251,10 +263,7 @@ mod native {
         }
         if bytes <= 12 * 1024 * 1024 {
             state.row_cache.push_back(RowRaster {
-                index,
-                size,
-                selected,
-                focused,
+                key,
                 pixels: pixels.clone(),
             });
         }
@@ -737,6 +746,12 @@ mod native {
                 state.session.replace(target(snapshot));
                 state.fetching = false;
                 state.suppress_edits = true;
+                state.track = (
+                    snapshot.title.clone(),
+                    snapshot.artist.clone(),
+                    snapshot.source.clone(),
+                );
+                state.background = None;
             });
             text(hwnd, TITLE, &snapshot.title);
             text(hwnd, ARTIST, &snapshot.artist);
@@ -751,6 +766,7 @@ mod native {
                     "Enter a title and artist, then choose Search."
                 },
             );
+            InvalidateRect(hwnd, null(), 0);
         }
     }
 
@@ -990,102 +1006,181 @@ mod native {
         }
     }
 
-    fn search_layout(width: f32, height: f32) -> [(i32, Rect); 9] {
-        let field = (width - 168.0) * 0.5;
-        let short = height < 340.0;
-        let shift = if short { 30.0 } else { 0.0 };
-        let results_top = 162.0 - shift;
-        let status_top = height - if short { 100.0 } else { 108.0 };
-        [
-            (TITLE_LABEL, Rect::new(24.0, 72.0 - shift, field, 20.0)),
-            (TITLE, Rect::new(24.0, 96.0 - shift, field, 28.0)),
-            (
-                ARTIST_LABEL,
-                Rect::new(36.0 + field, 72.0 - shift, field, 20.0),
-            ),
-            (ARTIST, Rect::new(36.0 + field, 96.0 - shift, field, 28.0)),
-            (SEARCH, Rect::new(width - 108.0, 92.0 - shift, 84.0, 36.0)),
-            (
-                RESULTS,
-                Rect::new(
-                    24.0,
-                    results_top,
-                    width - 48.0,
-                    (status_top - 8.0 - results_top).max(0.0),
-                ),
-            ),
-            (
-                STATUS,
-                Rect::new(
-                    24.0,
-                    status_top,
-                    width - 48.0,
-                    if short { 40.0 } else { 48.0 },
-                ),
-            ),
-            (APPLY, Rect::new(width - 300.0, height - 52.0, 184.0, 36.0)),
-            (CANCEL, Rect::new(width - 108.0, height - 52.0, 84.0, 36.0)),
-        ]
+    struct SearchLayout {
+        header: Rect,
+        track: Rect,
+        search_card: Rect,
+        results: Rect,
+        footer: Rect,
     }
 
-    fn draw_background(c: &mut Canvas<'_>) {
+    impl SearchLayout {
+        fn new(width: f32, height: f32) -> Self {
+            let content_width = (width - 48.0).max(0.0);
+            let search_height = if height < 500.0 { 88.0 } else { 104.0 };
+            let footer_top = (height - 64.0).max(0.0);
+            let results_top = 64.0 + search_height + 12.0;
+            Self {
+                header: Rect::new(24.0, 0.0, content_width, 64.0),
+                // The metadata line overlaps the title buttons' vertical band.
+                track: Rect::new(24.0, 36.0, (content_width - 72.0).max(0.0), 22.0),
+                search_card: Rect::new(24.0, 64.0, content_width, search_height),
+                results: Rect::new(
+                    24.0,
+                    results_top,
+                    content_width,
+                    (footer_top - results_top).max(0.0),
+                ),
+                footer: Rect::new(24.0, footer_top, content_width, 64.0),
+            }
+        }
+
+        fn tagline_visible(&self) -> bool {
+            self.search_card.h > 88.0
+        }
+
+        fn controls(&self) -> [(i32, Rect); 9] {
+            let card = self.search_card;
+            let field = ((card.w - 132.0) * 0.5).max(0.0);
+            let artist_x = card.x + 24.0 + field;
+            let footer = self.footer;
+            [
+                (
+                    TITLE_LABEL,
+                    Rect::new(card.x + 12.0, card.y + 8.0, field, 20.0),
+                ),
+                (TITLE, Rect::new(card.x + 12.0, card.y + 32.0, field, 28.0)),
+                (ARTIST_LABEL, Rect::new(artist_x, card.y + 8.0, field, 20.0)),
+                (ARTIST, Rect::new(artist_x, card.y + 32.0, field, 28.0)),
+                (
+                    SEARCH,
+                    Rect::new(card.x + card.w - 96.0, card.y + 28.0, 84.0, 36.0),
+                ),
+                (RESULTS, self.results),
+                (STATUS, Rect::new(footer.x, footer.y, footer.w, 24.0)),
+                (
+                    APPLY,
+                    Rect::new(footer.x + footer.w - 276.0, footer.y + 24.0, 184.0, 36.0),
+                ),
+                (
+                    CANCEL,
+                    Rect::new(footer.x + footer.w - 84.0, footer.y + 24.0, 84.0, 36.0),
+                ),
+            ]
+        }
+    }
+
+    fn draw_background(c: &mut Canvas<'_>, track: &(String, String, String)) {
         let rect = c.clip;
+        let layout = SearchLayout::new(rect.w, rect.h);
         c.rect(rect, 0.0, BACKGROUND, 1.0);
-        c.text(
+        c.ellipsis(
             tr("Find lyrics"),
-            Rect::new(24.0, 14.0, rect.w - 150.0, 30.0),
+            Rect::new(
+                layout.header.x,
+                6.0,
+                (layout.header.w - 102.0).max(0.0),
+                28.0,
+            ),
             22.0,
             true,
             WHITE,
         );
-        if rect.h >= 340.0 {
-            c.text(
+        let source_width = if track.2.is_empty() {
+            0.0
+        } else {
+            (c.painter.width(&track.2, 11.0, false) + 16.0).min(layout.track.w * 0.35)
+        };
+        c.ellipsis(
+            &format!("{} · {}", track.0, track.1).replace(['\r', '\n', '\t'], " "),
+            Rect::new(
+                layout.track.x,
+                layout.track.y,
+                (layout.track.w - source_width - 12.0).max(0.0),
+                layout.track.h,
+            ),
+            11.0,
+            false,
+            MUTED,
+        );
+        if source_width > 0.0 {
+            native_ui::chip(
+                c,
+                Rect::new(
+                    layout.track.x + layout.track.w - source_width,
+                    layout.track.y,
+                    source_width,
+                    layout.track.h,
+                ),
+                &track.2,
+                crate::theme::ICE,
+                1.0,
+            );
+        }
+        native_ui::card(c, layout.search_card, 12.0, SURFACE, crate::theme::BORDER);
+        if layout.tagline_visible() {
+            c.ellipsis(
                 tr("Find the right recording, then make it yours."),
-                Rect::new(24.0, 44.0, rect.w - 48.0, 20.0),
+                Rect::new(
+                    layout.search_card.x + 12.0,
+                    layout.search_card.y + 76.0,
+                    layout.search_card.w - 24.0,
+                    20.0,
+                ),
                 11.0,
                 false,
                 MUTED,
             );
         }
-        c.text(
-            tr("MATCHING RECORDINGS"),
-            Rect::new(
-                24.0,
-                if rect.h < 340.0 { 106.0 } else { 136.0 },
-                rect.w - 48.0,
-                20.0,
-            ),
-            9.0,
-            true,
-            MUTED,
-        );
         c.rect(
-            Rect::new(24.0, rect.h - 58.0, rect.w - 48.0, 1.0),
+            Rect::new(layout.footer.x, layout.footer.y, layout.footer.w, 1.0),
             0.0,
             WHITE,
             0.08,
         );
     }
 
-    fn result_detail(result: &SearchResult) -> String {
+    fn provider_tint(source: &str) -> [u8; 3] {
+        match source {
+            "AMLL TTML DB" | "AMLL" => crate::theme::LAVENDER,
+            "LRCLIB" => crate::theme::MINT,
+            "NetEase" => crate::theme::AMBER,
+            _ => crate::theme::DIM,
+        }
+    }
+
+    fn timing_tint(timing: &str) -> [u8; 3] {
+        match timing {
+            "Words" => crate::theme::SUCCESS,
+            "Lines" => crate::theme::ICE,
+            _ => crate::theme::DIM,
+        }
+    }
+
+    fn result_row(c: &mut Canvas<'_>, result: &SearchResult, style: ButtonStyle) {
         let duration = if result.duration.is_finite() && result.duration > 0.0 {
             let seconds = result.duration.round() as u64;
-            format!(" · {}:{:02}", seconds / 60, seconds % 60)
+            format!("{}:{:02}", seconds / 60, seconds % 60)
         } else {
-            String::new()
+            "—".into()
         };
-        format!(
-            "{} · {} · {}{duration}{}",
-            result.artist,
-            result.source,
-            tr(&result.timing),
-            if result.album.is_empty() {
-                String::new()
-            } else {
-                format!(" · {}", result.album)
-            }
-        )
-        .replace(['\r', '\n', '\t'], " ")
+        let detail = if result.album.is_empty() {
+            result.artist.clone()
+        } else {
+            format!("{} · {}", result.artist, result.album)
+        }
+        .replace(['\r', '\n', '\t'], " ");
+        native_ui::result_row(
+            c,
+            &result.title.replace(['\r', '\n', '\t'], " "),
+            &detail,
+            &[
+                (&result.source, provider_tint(&result.source)),
+                (&duration, crate::theme::MUTED),
+                (tr(&result.timing), timing_tint(&result.timing)),
+            ],
+            style,
+        );
     }
 
     unsafe fn resize_surface(hwnd: HWND) {
@@ -1108,7 +1203,7 @@ mod native {
             let s = scale(hwnd);
             let width = (f64::from(rect.right) / s) as f32;
             let height = (f64::from(rect.bottom) / s) as f32;
-            for (id, bounds) in search_layout(width, height) {
+            for (id, bounds) in SearchLayout::new(width, height).controls() {
                 MoveWindow(
                     GetDlgItem(hwnd, if id == RESULTS { RESULTS_VIEWPORT } else { id }),
                     (f64::from(bounds.x) * s).round() as i32,
@@ -1173,7 +1268,7 @@ mod native {
                 results(hwnd),
                 LB_SETITEMHEIGHT,
                 0,
-                (58.0 * scale(hwnd)).round() as isize,
+                (f64::from(ROW_HEIGHT) * scale(hwnd)).round() as isize,
             );
             let s = scale(hwnd) as f32;
             access(hwnd, |state| {
@@ -1225,7 +1320,9 @@ mod native {
                 WM_CTLCOLORSTATIC | WM_CTLCOLOREDIT | WM_CTLCOLORLISTBOX => {
                     let dc = wparam as HDC;
                     let field = message == WM_CTLCOLOREDIT;
-                    let color = if field { SURFACE } else { BACKGROUND };
+                    let on_card =
+                        field || matches!(GetDlgCtrlID(lparam as HWND), TITLE_LABEL | ARTIST_LABEL);
+                    let color = if on_card { SURFACE } else { BACKGROUND };
                     SetBkColor(
                         dc,
                         u32::from(color[2])
@@ -1234,7 +1331,7 @@ mod native {
                     );
                     SetTextColor(dc, if field { 0x00f5f6f8 } else { 0x009297a0 });
                     access(hwnd, |state| {
-                        if field {
+                        if on_card {
                             state.field_brush
                         } else {
                             state.brush
@@ -1253,11 +1350,10 @@ mod native {
                         Some((cached, pixels)) if cached == size => pixels,
                         _ => {
                             let mut pixels = vec![0; (size.0 * size.1 * 4) as usize];
-                            draw_background(&mut Canvas::new(
-                                &mut pixels,
-                                size,
-                                &mut state.painter,
-                            ));
+                            draw_background(
+                                &mut Canvas::new(&mut pixels, size, &mut state.painter),
+                                &state.track,
+                            );
                             pixels
                         }
                     });
@@ -1315,29 +1411,9 @@ mod native {
                             };
                             c.rect(Rect::new(0.0, 11.0, 5.0, 5.0), 2.5, tone, 1.0);
                             let width = c.clip.w - 18.0;
-                            let mut end = 0;
-                            for (index, _) in state.status.char_indices() {
-                                if c.painter.width(&state.status[..index], 11.0, false) > width {
-                                    break;
-                                }
-                                end = index;
-                            }
-                            if c.painter.width(&state.status, 11.0, false) <= width {
-                                end = state.status.len();
-                            }
-                            if end < state.status.len() {
-                                end = state.status[..end].rfind(' ').unwrap_or(end);
-                            }
-                            c.text(
-                                &state.status[..end],
-                                Rect::new(16.0, 4.0, width, 20.0),
-                                11.0,
-                                false,
-                                tone,
-                            );
                             c.ellipsis(
-                                state.status[end..].trim(),
-                                Rect::new(16.0, 24.0, width, 20.0),
+                                &state.status,
+                                Rect::new(16.0, 2.0, width, 20.0),
                                 11.0,
                                 false,
                                 tone,
@@ -1437,8 +1513,8 @@ mod native {
                     let rect = RECT {
                         left: 0,
                         top: 0,
-                        right: (504.0 * s).round() as i32,
-                        bottom: (340.0 * s).round() as i32,
+                        right: (520.0 * s).round() as i32,
+                        bottom: (420.0 * s).round() as i32,
                     };
                     let mut current = RECT::default();
                     GetWindowRect(hwnd, &mut current);
@@ -1571,6 +1647,11 @@ mod native {
                 },
                 frame_pump: native_ui::FramePump::new(SCROLL_FRAME),
                 background: None,
+                track: (
+                    snapshot.title.clone(),
+                    snapshot.artist.clone(),
+                    snapshot.source.clone(),
+                ),
                 status: String::new(),
                 status_source: String::new(),
                 status_count: None,
@@ -1681,7 +1762,7 @@ mod native {
             SendMessageW(GetDlgItem(hwnd, ARTIST), EM_SETLIMITTEXT, 512, 0);
             set_font(hwnd);
             reset(hwnd, snapshot);
-            crate::island_surface::place(hwnd, owner, (520.0, 460.0));
+            crate::island_surface::place(hwnd, owner, (640.0, 560.0));
             layout(hwnd);
             if SetTimer(hwnd, POLL, 100, None) == 0 {
                 DestroyWindow(hwnd);
@@ -1873,6 +1954,121 @@ mod native {
         }
 
         #[test]
+        fn redesigned_search_reserves_flexible_results_and_compact_search_card() {
+            for (width, height, results_top) in [(640.0, 560.0, 180.0), (520.0, 420.0, 164.0)] {
+                let layout = SearchLayout::new(width, height);
+                assert_eq!(layout.header.h, 64.0);
+                assert!(
+                    layout.track.x + layout.track.w <= width - 84.0,
+                    "track metadata must clear the native title buttons"
+                );
+                assert_eq!(layout.footer.h, 64.0);
+                assert_eq!(
+                    layout.search_card.h,
+                    if height == 560.0 { 104.0 } else { 88.0 }
+                );
+                assert_eq!(layout.tagline_visible(), height == 560.0);
+                let controls = layout.controls();
+                let results = controls.iter().find(|(id, _)| *id == RESULTS).unwrap().1;
+                assert_eq!(results.y, results_top);
+                assert_eq!(results.y + results.h, height - 64.0);
+                assert!(results.h >= 160.0);
+                for (id, bounds) in controls {
+                    let region = match id {
+                        RESULTS => layout.results,
+                        STATUS | APPLY | CANCEL => layout.footer,
+                        _ => layout.search_card,
+                    };
+                    assert!(bounds.x >= region.x && bounds.y >= region.y);
+                    assert!(bounds.x + bounds.w <= region.x + region.w);
+                    assert!(bounds.y + bounds.h <= region.y + region.h);
+                    for dpi in [1.0, 2.0] {
+                        assert!(bounds.x * dpi >= 0.0 && bounds.y * dpi >= 0.0);
+                        assert!((bounds.x + bounds.w) * dpi <= width * dpi);
+                        assert!((bounds.y + bounds.h) * dpi <= height * dpi);
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn redesigned_rows_use_raised_selection_and_three_pixel_accent() {
+            let mut painter = Painter::new(1.0).unwrap();
+            let mut pixels = vec![0; 440 * 64 * 4];
+            result_row(
+                &mut Canvas::new(&mut pixels, (440, 64), &mut painter),
+                &SearchResult::fixture("Title", "Artist"),
+                ButtonStyle {
+                    selected: true,
+                    accent: crate::theme::AMBER,
+                    ..Default::default()
+                },
+            );
+            let pixel = |x: usize, y: usize| &pixels[(y * 440 + x) * 4..(y * 440 + x) * 4 + 3];
+            assert_eq!(pixel(430, 32), crate::theme::SURFACE_RAISED);
+            for x in 3..6 {
+                assert_eq!(pixel(x, 32), crate::theme::AMBER);
+            }
+        }
+
+        #[test]
+        fn redesigned_rows_render_provider_and_timing_palette() {
+            use crate::theme;
+            for (source, timing, provider_color, timing_color) in [
+                ("AMLL TTML DB", "Words", theme::LAVENDER, theme::SUCCESS),
+                ("LRCLIB", "Lines", theme::MINT, theme::ICE),
+                ("NetEase", "Unknown", theme::AMBER, theme::DIM),
+            ] {
+                for scale in [1.0, 2.0] {
+                    let mut painter = Painter::new(scale).unwrap();
+                    let size = ((440.0 * scale) as u32, (64.0 * scale) as u32);
+                    let mut pixels = vec![0; (size.0 * size.1 * 4) as usize];
+                    let mut result =
+                        SearchResult::fixture("A long bilingual recording title", "Artist");
+                    result.source = source.into();
+                    result.timing = timing.into();
+                    result_row(
+                        &mut Canvas::new(&mut pixels, size, &mut painter),
+                        &result,
+                        ButtonStyle::default(),
+                    );
+                    assert!(
+                        pixels
+                            .as_chunks::<4>()
+                            .0
+                            .iter()
+                            .any(|p| p[..3] == provider_color)
+                    );
+                    assert!(
+                        pixels
+                            .as_chunks::<4>()
+                            .0
+                            .iter()
+                            .any(|p| p[..3] == timing_color)
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn narrow_rows_drop_detail_before_metadata_chips_collide() {
+            let mut painter = Painter::new(1.0).unwrap();
+            let mut render = |artist: &str| {
+                let mut pixels = vec![0; 320 * 64 * 4];
+                let mut result = SearchResult::fixture("A long recording title", artist);
+                result.source = "AMLL TTML DB".into();
+                result.timing = "Unknown".into();
+                result_row(
+                    &mut Canvas::new(&mut pixels, (320, 64), &mut painter),
+                    &result,
+                    ButtonStyle::default(),
+                );
+                pixels
+            };
+            assert!(render("First artist") == render("Another artist"));
+        }
+
+        #[test]
         fn narrow_search_actions_and_inputs_stay_inside_surface() {
             for (width, height) in [
                 (320.0, 260.0),
@@ -1880,7 +2076,7 @@ mod native {
                 (520.0, 460.0),
                 (920.0, 760.0),
             ] {
-                for (_, r) in search_layout(width, height) {
+                for (_, r) in SearchLayout::new(width, height).controls() {
                     assert!(r.x >= 0.0 && r.y >= 0.0 && r.w >= 0.0 && r.h >= 0.0);
                     assert!(r.x + r.w <= width && r.y + r.h <= height);
                 }
@@ -1890,7 +2086,7 @@ mod native {
         #[test]
         fn search_layout_keeps_fields_results_status_and_actions_separate() {
             for (width, height) in [(504.0, 300.0), (504.0, 340.0), (744.0, 481.0)] {
-                let layout = search_layout(width, height);
+                let layout = SearchLayout::new(width, height).controls();
                 let rect = |id| layout.iter().find(|(key, _)| *key == id).unwrap().1;
                 let title = rect(TITLE);
                 let artist = rect(ARTIST);
@@ -1902,7 +2098,7 @@ mod native {
                 assert!(results.y >= title.y + title.h + 28.0);
                 assert!(results.y + results.h <= status.y);
                 assert!(status.y + status.h <= apply.y);
-                assert!(apply.y + apply.h <= height - 16.0);
+                assert!(apply.y + apply.h <= height);
             }
         }
 
@@ -1940,16 +2136,15 @@ mod native {
         #[test]
         fn result_rows_have_visible_selection_and_focus_at_every_dpi() {
             use crate::canvas::{Canvas, Painter};
-            use crate::native_ui::{ButtonStyle, result_row};
+            use crate::native_ui::ButtonStyle;
             for scale in [1.0, 1.25, 1.5, 2.0] {
-                let size = ((440.0 * scale) as u32, (58.0 * scale) as u32);
+                let size = ((440.0 * scale) as u32, (ROW_HEIGHT * scale) as u32);
                 let mut painter = Painter::new(scale).unwrap();
                 let render = |painter: &mut Painter, selected, focused| {
                     let mut pixels = vec![0; (size.0 * size.1 * 4) as usize];
                     result_row(
                         &mut Canvas::new(&mut pixels, size, painter),
-                        "A song title",
-                        "Artist · LRCLIB · Lines · 3:20",
+                        &SearchResult::fixture("A song title", "Artist"),
                         ButtonStyle {
                             accent: [220, 190, 130],
                             selected,
@@ -1964,6 +2159,14 @@ mod native {
                 let focused = render(&mut painter, true, true);
                 assert_ne!(plain, selected);
                 assert_ne!(selected, focused);
+                for (x, y) in [(220.0, 2.0), (220.0, 61.0), (1.0, 32.0), (438.0, 32.0)] {
+                    let index = (((y * scale) as u32 * size.0 + (x * scale) as u32) * 4) as usize;
+                    assert_ne!(
+                        &selected[index..index + 4],
+                        &focused[index..index + 4],
+                        "focus ring must cover all four edges at {scale} DPI scale"
+                    );
+                }
             }
         }
 
@@ -1982,6 +2185,11 @@ mod native {
                     &mut Canvas::new(&mut pixels, size, &mut painter),
                     &title,
                     &detail,
+                    &[
+                        ("LRCLIB", crate::theme::MINT),
+                        ("4:20", MUTED),
+                        ("Lines", crate::theme::ICE),
+                    ],
                     ButtonStyle::default(),
                 );
                 std::hint::black_box(pixels);
@@ -2034,6 +2242,7 @@ mod native {
                     surface: native_ui::WindowSurface::new().unwrap(),
                     frame_pump: native_ui::FramePump::new(SCROLL_FRAME),
                     background: None,
+                    track: (String::new(), String::new(), String::new()),
                     status: String::new(),
                     status_source: String::new(),
                     status_count: None,
@@ -2073,7 +2282,7 @@ mod native {
                     null(),
                 );
                 assert!(!list.is_null());
-                SendMessageW(list, LB_SETITEMHEIGHT, 0, 58);
+                SendMessageW(list, LB_SETITEMHEIGHT, 0, ROW_HEIGHT as isize);
                 assert!(install_results_viewport(hwnd));
                 MoveWindow(GetDlgItem(hwnd, RESULTS_VIEWPORT), 0, 0, 560, 180, 0);
                 let job = access(hwnd, |state| state.session.begin()).unwrap();
@@ -2161,7 +2370,7 @@ mod native {
                 tick_results(hwnd, now + Duration::from_millis(8));
                 let moved = before - displayed_row_top(hwnd, 0);
                 assert!(
-                    moved > 0 && moved < 58,
+                    moved > 0 && moved < ROW_HEIGHT as i32,
                     "first frame must move intermediate pixels, got {moved}"
                 );
                 tick_results(hwnd, now + Duration::from_secs(1));
@@ -2206,12 +2415,12 @@ mod native {
                     state.results_scroll.jump(83.0);
                     state
                         .results_scroll
-                        .scroll_to(257.0, 1212.0, Instant::now());
+                        .scroll_to(257.0, 1356.0, Instant::now());
                 });
                 position_results(hwnd);
                 assert!(access(hwnd, |state| state.results_scroll.moving()).unwrap());
-                assert_eq!(displayed_row_top(hwnd, 2), 33);
-                let mut point = windows_sys::Win32::Foundation::POINT { x: 20, y: 40 };
+                assert_eq!(displayed_row_top(hwnd, 2), 45);
+                let mut point = windows_sys::Win32::Foundation::POINT { x: 20, y: 52 };
                 MapWindowPoints(GetDlgItem(hwnd, RESULTS_VIEWPORT), list, &mut point, 1);
                 let point = (point.y as u16 as u32) << 16 | point.x as u16 as u32;
                 assert_eq!(
@@ -2225,7 +2434,7 @@ mod native {
                 assert_eq!(SendMessageW(list, LB_GETCURSEL, 0, 0), 23);
                 let top = displayed_row_top(hwnd, 23);
                 assert!(
-                    top >= 0 && top + 58 <= 180,
+                    top >= 0 && top + ROW_HEIGHT as i32 <= 180,
                     "keyboard selection must remain visible"
                 );
             }
@@ -2241,7 +2450,7 @@ mod native {
                     state.results_scroll.jump(25.0);
                     state
                         .results_scroll
-                        .scroll_by(174.0, 1212.0, Instant::now());
+                        .scroll_by(192.0, 1356.0, Instant::now());
                 });
                 position_results(hwnd);
                 let pending = access(hwnd, |state| state.session.begin()).unwrap();
@@ -2338,12 +2547,12 @@ mod native {
                 let hwnd = windows.owner;
                 let now = Instant::now();
                 access(hwnd, |state| {
-                    state.results_scroll.scroll_to(1212.0, 1212.0, now)
+                    state.results_scroll.scroll_to(1356.0, 1356.0, now)
                 });
                 tick_results(hwnd, now + Duration::from_millis(40));
                 let offset = access(hwnd, |state| state.results_scroll.offset()).unwrap();
                 let before = displayed_row_top(hwnd, 0);
-                assert!((offset - 700.6875).abs() < 0.01);
+                assert!((offset - 783.9375).abs() < 0.01);
                 MoveWindow(GetDlgItem(hwnd, RESULTS_VIEWPORT), 0, 0, 560, 300, 0);
                 assert_eq!(
                     access(hwnd, |state| state.results_scroll.offset()),
@@ -2379,16 +2588,16 @@ mod native {
                 wheel_results(hwnd, outward, now);
                 tick_results(hwnd, now + Duration::from_millis(20));
                 let partial = displayed_row_top(hwnd, 0);
-                assert!(partial < 0 && partial > -1212);
+                assert!(partial < 0 && partial > -1356);
                 wheel_results(hwnd, outward, now + Duration::from_secs(1));
                 tick_results(hwnd, now + Duration::from_secs(1));
                 assert_eq!(
                     access(hwnd, |state| state.results_scroll.offset()),
-                    Some(1212.0)
+                    Some(1356.0)
                 );
                 assert_eq!(
                     displayed_row_top(hwnd, 0),
-                    -1212,
+                    -1356,
                     "an already settled offset must still reach the native viewport"
                 );
                 let mut scrollbar = SCROLLINFO {
@@ -2397,7 +2606,7 @@ mod native {
                     ..Default::default()
                 };
                 GetScrollInfo(GetDlgItem(hwnd, RESULTS_VIEWPORT), SB_VERT, &mut scrollbar);
-                assert_eq!(scrollbar.nPos, 1212);
+                assert_eq!(scrollbar.nPos, 1356);
                 assert!(!access(hwnd, |state| state.results_scroll.moving()).unwrap());
             }
         }
@@ -2420,10 +2629,10 @@ mod native {
                     assert_eq!(SendMessageW(list, LB_GETCURSEL, 0, 0), 0);
                     assert_eq!(
                         access(hwnd, |state| state.results_scroll.offset()),
-                        Some(580.0),
+                        Some(640.0),
                         "an unmatched key must not reveal an unchanged selection"
                     );
-                    assert_eq!(displayed_row_top(hwnd, 0), -580);
+                    assert_eq!(displayed_row_top(hwnd, 0), -640);
                 }
                 // Home must still reveal the selected first row even when its
                 // index was already zero before the native navigation message.
@@ -2441,17 +2650,17 @@ mod native {
                 SendMessageW(list, WM_VSCROLL, (10 << 16) | SB_THUMBPOSITION as usize, 0);
                 assert_eq!(
                     access(hwnd, |state| state.results_scroll.offset()),
-                    Some(580.0)
+                    Some(640.0)
                 );
                 assert_eq!(SendMessageW(list, LB_GETTOPINDEX, 0, 0), 10);
-                assert_eq!(displayed_row_top(hwnd, 0), -580);
+                assert_eq!(displayed_row_top(hwnd, 0), -640);
                 let mut scrollbar = SCROLLINFO {
                     cbSize: std::mem::size_of::<SCROLLINFO>() as u32,
                     fMask: SIF_POS,
                     ..Default::default()
                 };
                 GetScrollInfo(GetDlgItem(hwnd, RESULTS_VIEWPORT), SB_VERT, &mut scrollbar);
-                assert_eq!(scrollbar.nPos, 580);
+                assert_eq!(scrollbar.nPos, 640);
                 assert_eq!(SendMessageW(list, LB_GETCURSEL, 0, 0), 0);
             }
         }
@@ -2696,17 +2905,41 @@ mod native {
         }
 
         #[test]
+        fn search_row_cache_tracks_provider_duration_timing_width_and_dpi() {
+            unsafe {
+                let windows = hidden_results();
+                access(windows.owner, |state| {
+                    let first = result_raster(state, 0, (440, 64), ButtonStyle::default());
+                    state.session.results[0].source = "NetEase".into();
+                    let provider = result_raster(state, 0, (440, 64), ButtonStyle::default());
+                    assert!(!Arc::ptr_eq(&first, &provider));
+                    state.session.results[0].duration = 260.0;
+                    let duration = result_raster(state, 0, (440, 64), ButtonStyle::default());
+                    assert!(!Arc::ptr_eq(&provider, &duration));
+                    state.session.results[0].timing = "Words".into();
+                    let timing = result_raster(state, 0, (440, 64), ButtonStyle::default());
+                    assert!(!Arc::ptr_eq(&duration, &timing));
+                    let width = result_raster(state, 0, (400, 64), ButtonStyle::default());
+                    assert!(!Arc::ptr_eq(&timing, &width));
+                    state.painter = Painter::new(2.0).unwrap();
+                    let dpi = result_raster(state, 0, (440, 64), ButtonStyle::default());
+                    assert!(!Arc::ptr_eq(&timing, &dpi));
+                });
+            }
+        }
+
+        #[test]
         fn search_row_cache_reuses_pixels_and_invalidates_for_changed_results() {
             unsafe {
                 let windows = hidden_results();
                 let hwnd = windows.owner;
                 let (first, second, selected) = access(hwnd, |state| {
-                    let first = result_raster(state, 0, (440, 58), ButtonStyle::default());
-                    let second = result_raster(state, 0, (440, 58), ButtonStyle::default());
+                    let first = result_raster(state, 0, (440, 64), ButtonStyle::default());
+                    let second = result_raster(state, 0, (440, 64), ButtonStyle::default());
                     let selected = result_raster(
                         state,
                         0,
-                        (440, 58),
+                        (440, 64),
                         ButtonStyle {
                             selected: true,
                             ..Default::default()
@@ -2731,7 +2964,7 @@ mod native {
                     )])));
                 poll(hwnd);
                 let changed = access(hwnd, |state| {
-                    result_raster(state, 0, (440, 58), ButtonStyle::default())
+                    result_raster(state, 0, (440, 64), ButtonStyle::default())
                 })
                 .unwrap();
                 assert_ne!(
@@ -2799,8 +3032,8 @@ mod native {
                     ..Default::default()
                 };
                 GetScrollInfo(viewport, SB_VERT, &mut info);
-                assert_eq!(info.nPos, 1212);
-                assert_eq!(displayed_row_top(hwnd, 23), 122);
+                assert_eq!(info.nPos, 1356);
+                assert_eq!(displayed_row_top(hwnd, 23), 116);
                 SendMessageW(list, WM_MOUSEWHEEL, (-120_i16 as u16 as usize) << 16, 0);
                 assert!(
                     !access(hwnd, |state| state.results_scroll.moving()).unwrap(),
@@ -2808,8 +3041,8 @@ mod native {
                 );
                 MoveWindow(viewport, 0, 0, 560, 300, 0);
                 GetScrollInfo(viewport, SB_VERT, &mut info);
-                assert_eq!(info.nPos, 1092);
-                assert_eq!(displayed_row_top(hwnd, 23), 242);
+                assert_eq!(info.nPos, 1236);
+                assert_eq!(displayed_row_top(hwnd, 23), 236);
                 SendMessageW(list, WM_KEYDOWN, 0x24, 0);
                 assert_eq!(SendMessageW(list, LB_GETCURSEL, 0, 0), 0);
                 assert_eq!(displayed_row_top(hwnd, 0), 0);
@@ -3252,7 +3485,10 @@ mod native {
                     capture("selected");
                     let mut row = RECT::default();
                     SendMessageW(list, LB_GETITEMRECT, 0, (&mut row as *mut RECT) as isize);
-                    assert_eq!(row.bottom - row.top, (58.0 * scale(hwnd)).round() as i32);
+                    assert_eq!(
+                        row.bottom - row.top,
+                        (f64::from(ROW_HEIGHT) * scale(hwnd)).round() as i32
+                    );
                     text(
                         hwnd,
                         STATUS,

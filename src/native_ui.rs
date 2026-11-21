@@ -770,26 +770,27 @@ pub(crate) unsafe extern "system" fn hover_proc(
 }
 
 /// Two-line native list row. The LISTBOX retains navigation and accessibility.
-pub(crate) fn result_row(c: &mut Canvas<'_>, title: &str, detail: &str, style: ButtonStyle) {
+pub(crate) fn result_row(
+    c: &mut Canvas<'_>,
+    title: &str,
+    detail: &str,
+    chips: &[(&str, [u8; 3])],
+    style: ButtonStyle,
+) {
     let rect = c.clip;
     c.rect(rect, 0.0, BACKGROUND, 1.0);
-    let row = Rect::new(0.0, 2.0, rect.w, (rect.h - 4.0).max(0.0));
-    if style.focused {
-        c.rect(row, 14.0, WHITE, 0.55);
-    }
-    let row = Rect::new(1.0, 3.0, rect.w - 2.0, (rect.h - 6.0).max(0.0));
+    let row = Rect::new(1.0, 2.0, rect.w - 2.0, (rect.h - 4.0).max(0.0));
     c.rect(
         row,
         13.0,
         if style.selected {
-            [29, 29, 29]
+            crate::theme::SURFACE_RAISED
         } else {
             BACKGROUND
         },
         1.0,
     );
     if style.selected {
-        c.rect(row, 13.0, style.accent, 0.04);
         c.rect(
             Rect::new(3.0, 18.0, 3.0, (rect.h - 36.0).max(0.0)),
             1.5,
@@ -797,20 +798,39 @@ pub(crate) fn result_row(c: &mut Canvas<'_>, title: &str, detail: &str, style: B
             1.0,
         );
     }
+    if style.focused {
+        focus_ring(c, row, 13.0, style.accent);
+    }
     c.ellipsis(
         title,
-        Rect::new(14.0, 7.0, rect.w - 28.0, 22.0),
+        Rect::new(14.0, 8.0, rect.w - 28.0, 22.0),
         13.0,
         true,
         WHITE,
     );
-    c.ellipsis(
-        detail,
-        Rect::new(14.0, 30.0, rect.w - 28.0, 18.0),
-        10.0,
-        false,
-        MUTED,
-    );
+    let mut right = rect.w - 14.0;
+    for &(label, tint) in chips.iter().rev() {
+        let width = (c.painter.width(label, 11.0, false) + 16.0).min((right - 14.0).max(0.0));
+        chip(
+            c,
+            Rect::new(right - width, 36.0, width, 22.0),
+            label,
+            tint,
+            1.0,
+        );
+        right -= width + 6.0;
+    }
+    // Metadata stays legible; discard secondary prose before squeezing chips.
+    let available = right - 14.0 - if chips.is_empty() { 0.0 } else { 6.0 };
+    if available >= 96.0 {
+        c.ellipsis(
+            detail,
+            Rect::new(14.0, 36.0, available, 22.0),
+            10.0,
+            false,
+            MUTED,
+        );
+    }
 }
 
 pub(crate) unsafe fn blit(
