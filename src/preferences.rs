@@ -698,7 +698,8 @@ fn update_controls(
 
 struct Popup {
     state: RefCell<State>,
-    suggested: Cell<Option<RECT>>,
+    suggested: Cell<Option<(RECT, u32)>>,
+    placement: Cell<Option<(RECT, u32)>>,
     owner: HWND,
     focus: Cell<HWND>,
 }
@@ -1209,6 +1210,7 @@ pub(crate) fn show(
                 updates: crate::update::CheckSession::new(settings.update),
             }),
             suggested: Cell::new(None),
+            placement: Cell::new(None),
             owner,
             focus: Cell::new(null_mut()),
         });
@@ -1736,6 +1738,47 @@ unsafe fn initial_layout(hwnd: HWND, state: &RefCell<State>, anchor: POINT) -> R
         let height = height.min(info.rcWork.bottom - info.rcWork.top);
         let origin = clamp_anchor(geometry.origin, info.rcWork, width, height);
         // Native calls can synchronously reenter proc; no State borrow crosses them.
+        position_in_work_area(
+            hwnd,
+            RECT {
+                left: origin.x,
+                top: origin.y,
+                right: origin.x + width,
+                bottom: origin.y + height,
+            },
+            info.rcWork,
+            dpi,
+        );
+        reflow(hwnd, state)
+    }
+}
+
+fn tracking_minimum(dpi: u32, work: RECT) -> POINT {
+    let scale = dpi.max(96) as f32 / 96.0;
+    POINT {
+        x: ((420.0 * scale).round() as i32).min((work.right - work.left).max(1)),
+        y: ((560.0 * scale).round() as i32).min((work.bottom - work.top).max(1)),
+    }
+}
+
+unsafe fn position_in_work_area(hwnd: HWND, rect: RECT, work: RECT, dpi: u32) {
+    let minimum = tracking_minimum(dpi, work);
+    let width = (rect.right - rect.left).clamp(minimum.x, (work.right - work.left).max(1));
+    let height = (rect.bottom - rect.top).clamp(minimum.y, (work.bottom - work.top).max(1));
+    let origin = clamp_anchor(
+        POINT {
+            x: rect.left,
+            y: rect.top,
+        },
+        work,
+        width,
+        height,
+    );
+    unsafe {
+        let popup = &*(GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const Popup);
+        // SetWindowPos asks for tracking limits synchronously, possibly before
+        // the HWND has adopted the destination monitor's DPI or location.
+        let previous = popup.placement.replace(Some((work, dpi)));
         SetWindowPos(
             hwnd,
             null_mut(),
@@ -1745,7 +1788,7 @@ unsafe fn initial_layout(hwnd: HWND, state: &RefCell<State>, anchor: POINT) -> R
             height,
             SWP_NOZORDER | SWP_NOACTIVATE,
         );
-        reflow(hwnd, state)
+        popup.placement.set(previous);
     }
 }
 
@@ -1937,14 +1980,29 @@ unsafe extern "system" fn proc(
         }
         match message {
             WM_GETMINMAXINFO => {
-                let scale =
-                    windows_sys::Win32::UI::HiDpi::GetDpiForWindow(hwnd).max(96) as f32 / 96.0;
-                let (x, y) = client_outer_size(
-                    (420.0 * scale).round() as i32,
-                    (560.0 * scale).round() as i32,
-                    (scale * 96.0) as u32,
-                );
-                (*(lparam as *mut MINMAXINFO)).ptMinTrackSize = POINT { x, y };
+                let destination = (*ptr).placement.get().or_else(|| {
+                    let suggested = (*ptr).suggested.get();
+                    let monitor = suggested.map_or_else(
+                        || MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST),
+                        |(rect, _)| MonitorFromRect(&rect, MONITOR_DEFAULTTONEAREST),
+                    );
+                    let mut info = MONITORINFO {
+                        cbSize: size_of::<MONITORINFO>() as u32,
+                        ..Default::default()
+                    };
+                    (GetMonitorInfoW(monitor, &mut info) != 0).then(|| {
+                        (
+                            info.rcWork,
+                            suggested.map_or_else(
+                                || windows_sys::Win32::UI::HiDpi::GetDpiForWindow(hwnd),
+                                |(_, dpi)| dpi,
+                            ),
+                        )
+                    })
+                });
+                if let Some((work, dpi)) = destination {
+                    (*(lparam as *mut MINMAXINFO)).ptMinTrackSize = tracking_minimum(dpi, work);
+                }
                 0
             }
             WM_SIZE if wparam != SIZE_MINIMIZED as usize => {
@@ -1956,13 +2014,16 @@ unsafe extern "system" fn proc(
                 // Copy the temporary suggested rectangle and defer native calls and
                 // State mutation until the message loop has no outstanding borrow.
                 if lparam != 0 {
-                    (*ptr).suggested.set(Some(*(lparam as *const RECT)));
+                    (*ptr).suggested.set(Some((
+                        *(lparam as *const RECT),
+                        (wparam as u32 & 0xffff).max(96),
+                    )));
                 }
                 PostMessageW(hwnd, RELAYOUT, 0, 0);
                 0
             }
             RELAYOUT => {
-                if let Some(mut rect) = (*ptr).suggested.take() {
+                if let Some((rect, dpi)) = (*ptr).suggested.take() {
                     let mut info = MONITORINFO {
                         cbSize: size_of::<MONITORINFO>() as u32,
                         ..Default::default()
@@ -1970,37 +2031,18 @@ unsafe extern "system" fn proc(
                     if GetMonitorInfoW(MonitorFromRect(&rect, MONITOR_DEFAULTTONEAREST), &mut info)
                         != 0
                     {
-                        let width = (rect.right - rect.left)
-                            .min(info.rcWork.right - info.rcWork.left)
-                            .max(1);
-                        let height = (rect.bottom - rect.top)
-                            .min(info.rcWork.bottom - info.rcWork.top)
-                            .max(1);
-                        let origin = clamp_anchor(
-                            POINT {
-                                x: rect.left,
-                                y: rect.top,
-                            },
-                            info.rcWork,
-                            width,
-                            height,
+                        position_in_work_area(hwnd, rect, info.rcWork, dpi);
+                    } else {
+                        SetWindowPos(
+                            hwnd,
+                            null_mut(),
+                            rect.left,
+                            rect.top,
+                            rect.right - rect.left,
+                            rect.bottom - rect.top,
+                            SWP_NOZORDER | SWP_NOACTIVATE,
                         );
-                        rect = RECT {
-                            left: origin.x,
-                            top: origin.y,
-                            right: origin.x + width,
-                            bottom: origin.y + height,
-                        };
                     }
-                    SetWindowPos(
-                        hwnd,
-                        null_mut(),
-                        rect.left,
-                        rect.top,
-                        rect.right - rect.left,
-                        rect.bottom - rect.top,
-                        SWP_NOZORDER | SWP_NOACTIVATE,
-                    );
                 }
                 let _ = reflow(hwnd, &(*ptr).state);
                 0
@@ -2377,11 +2419,19 @@ pub(crate) mod tests {
                     r.x >= layout.content.x && r.x + r.w <= layout.content.x + layout.content.w
                 );
             }
-            for control in &controls {
+            for (index, control) in controls.iter().enumerate() {
                 let r = layout.rect(control.rect);
                 let section = layout.section_rect(control.section.index());
                 assert!(r.x >= section.x && r.x + r.w <= section.x + section.w + 0.01);
                 assert!(r.y >= section.y && r.y + r.h <= section.y + section.h);
+                for other in &controls[index + 1..] {
+                    let overlap = r.intersect(layout.rect(other.rect));
+                    assert!(
+                        overlap.w < 0.01 || overlap.h < 0.01,
+                        "controls {index} and {} overlap at width {width}",
+                        other.label
+                    );
+                }
             }
         }
     }
@@ -2922,6 +2972,7 @@ pub(crate) mod tests {
                 let popup = Box::new(Popup {
                     state: RefCell::new(state_for_test(Settings::default(), scale)),
                     suggested: Cell::new(None),
+                    placement: Cell::new(None),
                     owner: null_mut(),
                     focus: Cell::new(null_mut()),
                 });
@@ -3340,6 +3391,7 @@ pub(crate) mod tests {
             let popup = Box::new(Popup {
                 state: RefCell::new(state_for_test(Settings::default(), 1.0)),
                 suggested: Cell::new(None),
+                placement: Cell::new(None),
                 owner: null_mut(),
                 focus: Cell::new(null_mut()),
             });
@@ -3450,6 +3502,114 @@ pub(crate) mod tests {
             );
             assert_eq!(info.ptMinTrackSize.x, 420);
             assert_eq!(info.ptMinTrackSize.y, 560);
+        }
+    }
+
+    #[test]
+    fn native_minimum_cannot_expand_creation_or_dpi_relayout_past_work_area() {
+        unsafe extern "system" fn sizing_proc(
+            hwnd: HWND,
+            message: u32,
+            wparam: WPARAM,
+            lparam: LPARAM,
+            _id: usize,
+            _data: usize,
+        ) -> LRESULT {
+            unsafe {
+                match message {
+                    WM_GETMINMAXINFO => proc(hwnd, message, wparam, lparam),
+                    WM_NCCALCSIZE => 0,
+                    _ => DefSubclassProc(hwnd, message, wparam, lparam),
+                }
+            }
+        }
+        unsafe {
+            let popup = HiddenPopup::new(1.0);
+            SetWindowSubclass(popup.hwnd, Some(sizing_proc), 7, 0);
+            SetWindowLongW(popup.hwnd, GWL_STYLE, (WS_POPUP | WS_THICKFRAME) as i32);
+            let mut info = MONITORINFO {
+                cbSize: size_of::<MONITORINFO>() as u32,
+                ..Default::default()
+            };
+            assert_ne!(
+                GetMonitorInfoW(
+                    MonitorFromWindow(popup.hwnd, MONITOR_DEFAULTTONEAREST),
+                    &mut info
+                ),
+                0
+            );
+            let work = RECT {
+                right: info.rcWork.left + (info.rcWork.right - info.rcWork.left).min(600),
+                bottom: info.rcWork.top + (info.rcWork.bottom - info.rcWork.top).min(300),
+                ..info.rcWork
+            };
+            let geometry = popup_geometry(
+                POINT {
+                    x: work.right,
+                    y: work.bottom,
+                },
+                work,
+                192,
+            );
+            position_in_work_area(
+                popup.hwnd,
+                RECT {
+                    left: geometry.origin.x,
+                    top: geometry.origin.y,
+                    right: geometry.origin.x + geometry.width_px,
+                    bottom: geometry.origin.y + geometry.height_px,
+                },
+                work,
+                192,
+            );
+            let mut actual = RECT::default();
+            assert_ne!(GetWindowRect(popup.hwnd, &mut actual), 0);
+            assert!(
+                actual.left >= work.left
+                    && actual.top >= work.top
+                    && actual.right <= work.right
+                    && actual.bottom <= work.bottom,
+                "creation escaped work area: {}x{}",
+                actual.right - actual.left,
+                actual.bottom - actual.top
+            );
+
+            // A synthetic destination DPI makes the scaled minimum exceed even
+            // a large desktop, without changing the user's display settings.
+            let dpi = (((info.rcWork.bottom - info.rcWork.top) / 560 + 1) * 96).max(192) as u32;
+            let suggested = RECT {
+                left: info.rcWork.left,
+                top: info.rcWork.top,
+                right: info.rcWork.right + 100,
+                bottom: info.rcWork.bottom + 100,
+            };
+            proc(
+                popup.hwnd,
+                WM_DPICHANGED,
+                (dpi | dpi << 16) as usize,
+                (&suggested as *const RECT) as isize,
+            );
+            let mut limits = MINMAXINFO::default();
+            SendMessageW(
+                popup.hwnd,
+                WM_GETMINMAXINFO,
+                0,
+                (&mut limits as *mut MINMAXINFO) as isize,
+            );
+            assert_eq!(
+                limits.ptMinTrackSize.y,
+                info.rcWork.bottom - info.rcWork.top,
+                "pending DPI transition must use the destination DPI and work area"
+            );
+            proc(popup.hwnd, RELAYOUT, 0, 0);
+            assert_ne!(GetWindowRect(popup.hwnd, &mut actual), 0);
+            assert!(
+                actual.left >= info.rcWork.left
+                    && actual.top >= info.rcWork.top
+                    && actual.right <= info.rcWork.right
+                    && actual.bottom <= info.rcWork.bottom,
+                "DPI relayout escaped work area"
+            );
         }
     }
 
