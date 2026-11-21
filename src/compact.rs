@@ -6,6 +6,14 @@ use crate::settings::{LyricsMode, Settings};
 const SIZE: f32 = 13.0;
 pub(crate) const SOURCE_SPACE: f32 = 13.0;
 
+pub(crate) fn wait_pulse(remaining: f64, playing: bool, visible: bool) -> f32 {
+    if playing && visible && remaining > 0.0 && remaining <= 3.0 {
+        (0.8 + 0.2 * (std::f64::consts::TAU * (3.0 - remaining) / 1.6).cos()) as f32
+    } else {
+        1.0
+    }
+}
+
 #[derive(Clone)]
 struct Frame {
     line: LyricLine,
@@ -384,6 +392,39 @@ pub(crate) fn draw_source(c: &mut Canvas<'_>, right: f32, height: f32, source: &
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn pulse_boundaries_and_playback_visibility_gates() {
+        for (remaining, playing, visible, expected) in [
+            (3.0, true, true, 1.0),
+            (2.2, true, true, 0.6),
+            (2.2, false, true, 1.0),
+            (2.2, true, false, 1.0),
+            (4.0, true, true, 1.0),
+            (0.0, true, true, 1.0),
+            (-0.1, true, true, 1.0),
+        ] {
+            assert_eq!(super::wait_pulse(remaining, playing, visible), expected);
+        }
+    }
+
+    #[test]
+    fn pulse_has_a_continuous_bounded_one_point_six_second_cycle() {
+        for (elapsed, expected) in [(0.0, 1.0), (0.4, 0.8), (0.8, 0.6), (1.2, 0.8), (1.6, 1.0)] {
+            assert!((super::wait_pulse(3.0 - elapsed, true, true) - expected).abs() < 0.00001);
+        }
+        let mut previous = 1.0;
+        for step in 0..1600 {
+            let remaining = 3.0 - step as f64 / 1000.0;
+            let pulse = super::wait_pulse(remaining, true, true);
+            assert!((0.6..=1.0).contains(&pulse));
+            assert!((pulse - previous).abs() < 0.001);
+            if remaining > 1.6 {
+                assert!((pulse - super::wait_pulse(remaining - 1.6, true, true)).abs() < 0.00001);
+            }
+            previous = pulse;
+        }
+    }
+
     #[test]
     fn collapse_line_change_preserves_one_continuous_composition() {
         use std::time::{Duration, Instant};
