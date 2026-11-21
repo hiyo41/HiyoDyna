@@ -4,6 +4,24 @@ use std::path::PathBuf;
 use crate::animation::SpringTuning;
 use crate::clock::ClockFormat;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DockAnchor {
+    Left,
+    #[default]
+    Center,
+    Right,
+}
+
+impl DockAnchor {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Left => "left",
+            Self::Center => "center",
+            Self::Right => "right",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum MotionPreset {
     Slow,
@@ -31,16 +49,30 @@ pub(crate) enum UpdateChannel {
     Stable,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum LyricsMode {
+    #[default]
+    Auto,
+    Lines,
+    Words,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Settings {
     pub motion: MotionPreset,
     pub bounce: BouncePreset,
     pub shadow: bool,
     pub top_gap: f32,
+    pub dock: DockAnchor,
     pub clock: ClockFormat,
     pub accent: AccentPreset,
     pub show_seconds: bool,
     pub update: UpdateChannel,
+    pub lyrics: LyricsMode,
+    pub lyric_offset_ms: i32,
+    pub compact_lyrics: bool,
+    pub language: crate::i18n::Language,
+    pub shortcut: crate::hotkey::Shortcut,
 }
 
 impl Default for Settings {
@@ -50,10 +82,16 @@ impl Default for Settings {
             bounce: BouncePreset::Medium,
             shadow: true,
             top_gap: 0.0,
+            dock: DockAnchor::Center,
             clock: ClockFormat::TwentyFourHour,
             accent: AccentPreset::Ice,
             show_seconds: true,
             update: UpdateChannel::Build,
+            lyrics: LyricsMode::Auto,
+            lyric_offset_ms: 0,
+            compact_lyrics: true,
+            language: crate::i18n::Language::System,
+            shortcut: crate::hotkey::Shortcut::default(),
         }
     }
 }
@@ -128,6 +166,12 @@ impl Settings {
                     "12" => settings.clock = ClockFormat::TwelveHour,
                     _ => {}
                 },
+                "dock" => match value {
+                    "left" => settings.dock = DockAnchor::Left,
+                    "center" => settings.dock = DockAnchor::Center,
+                    "right" => settings.dock = DockAnchor::Right,
+                    _ => {}
+                },
                 "accent" => {
                     if let Some(accent) = AccentPreset::parse(value) {
                         settings.accent = accent;
@@ -143,6 +187,32 @@ impl Settings {
                         settings.update = update;
                     }
                 }
+                "lyrics" => match value {
+                    "lines" => settings.lyrics = LyricsMode::Lines,
+                    "words" => settings.lyrics = LyricsMode::Words,
+                    "auto" => settings.lyrics = LyricsMode::Auto,
+                    _ => {}
+                },
+                "lyric_offset_ms" => {
+                    if let Ok(offset) = value.parse::<i32>() {
+                        settings.lyric_offset_ms = offset.clamp(-10_000, 10_000);
+                    }
+                }
+                "compact_lyrics" => match value {
+                    "on" => settings.compact_lyrics = true,
+                    "off" => settings.compact_lyrics = false,
+                    _ => {}
+                },
+                "language" => {
+                    if let Some(language) = crate::i18n::Language::parse(value) {
+                        settings.language = language;
+                    }
+                }
+                "shortcut" => {
+                    if let Some(shortcut) = crate::hotkey::Shortcut::parse(value) {
+                        settings.shortcut = shortcut;
+                    }
+                }
                 _ => {}
             }
         }
@@ -152,18 +222,28 @@ impl Settings {
 
     pub fn serialize(&self) -> String {
         format!(
-            "motion={}\nbounce={}\nshadow={}\ntop_gap={}\nclock={}\naccent={}\nseconds={}\nupdate={}\n",
+            "motion={}\nbounce={}\nshadow={}\ntop_gap={}\ndock={}\nclock={}\naccent={}\nseconds={}\nupdate={}\nlyrics={}\nlyric_offset_ms={}\ncompact_lyrics={}\nlanguage={}\nshortcut={}\n",
             self.motion.as_str(),
             self.bounce.as_str(),
             if self.shadow { "soft" } else { "off" },
             self.top_gap as i32,
+            self.dock.as_str(),
             match self.clock {
                 ClockFormat::TwentyFourHour => "24",
                 ClockFormat::TwelveHour => "12",
             },
             self.accent.as_str(),
             if self.show_seconds { "on" } else { "off" },
-            self.update.as_str()
+            self.update.as_str(),
+            match self.lyrics {
+                LyricsMode::Auto => "auto",
+                LyricsMode::Lines => "lines",
+                LyricsMode::Words => "words",
+            },
+            self.lyric_offset_ms,
+            if self.compact_lyrics { "on" } else { "off" },
+            self.language.as_str(),
+            self.shortcut.serialize()
         )
     }
 
@@ -318,6 +398,56 @@ pub(crate) fn config_path() -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn new_ui_preferences_default_and_survive_serialization() {
+        let defaults = super::Settings::default().serialize();
+        assert!(defaults.lines().any(|line| line == "compact_lyrics=on"));
+        assert!(defaults.lines().any(|line| line == "language=system"));
+        assert!(defaults.lines().any(|line| line == "shortcut=3:68"));
+        let changed = super::Settings::parse("compact_lyrics=off\nlanguage=vi\nshortcut=6:37\n");
+        let saved = changed.serialize();
+        for expected in ["compact_lyrics=off", "language=vi", "shortcut=6:37"] {
+            assert!(saved.lines().any(|line| line == expected), "{expected}");
+        }
+        assert_eq!(super::Settings::parse(&saved), changed);
+        assert_eq!(
+            super::Settings::parse("language=bad\nshortcut=0:68\ncompact_lyrics=bad"),
+            super::Settings::default()
+        );
+    }
+    #[test]
+    fn dock_values_round_trip_and_old_files_default_center() {
+        for (value, anchor) in [
+            ("left", super::DockAnchor::Left),
+            ("center", super::DockAnchor::Center),
+            ("right", super::DockAnchor::Right),
+        ] {
+            let settings = super::Settings::parse(&format!("dock={value}\n"));
+            assert_eq!(settings.dock, anchor);
+            assert!(settings.serialize().contains(&format!("dock={value}\n")));
+        }
+        assert!(
+            super::Settings::parse("clock=12\n")
+                .serialize()
+                .contains("dock=center\n")
+        );
+        assert!(
+            super::Settings::parse("dock=invalid\n")
+                .serialize()
+                .contains("dock=center\n")
+        );
+    }
+
+    #[test]
+    fn lyrics_preferences_clamp_offsets_and_preserve_old_defaults() {
+        let s = super::Settings::parse("lyrics=words\nlyric_offset_ms=999999\n");
+        assert_eq!(s.lyrics, super::LyricsMode::Words);
+        assert_eq!(s.lyric_offset_ms, 10000);
+        let old = super::Settings::parse("clock=12\n");
+        assert_eq!(old.lyric_offset_ms, 0);
+        assert_eq!(old.lyrics, super::LyricsMode::Auto);
+        assert_eq!(super::Settings::parse(&s.serialize()), s);
+    }
     use super::{AccentPreset, BouncePreset, MotionPreset, Settings, UpdateChannel};
     use crate::clock::ClockFormat;
 
@@ -329,6 +459,8 @@ mod tests {
         assert_eq!(settings.bounce, BouncePreset::Medium);
         assert!(settings.shadow);
         assert_eq!(settings.top_gap, 0.0);
+        assert_eq!(settings.dock, super::DockAnchor::Center);
+        assert_eq!(super::DockAnchor::default(), super::DockAnchor::Center);
         assert_eq!(settings.clock, ClockFormat::TwentyFourHour);
     }
 
@@ -364,10 +496,14 @@ mod tests {
             bounce: BouncePreset::High,
             shadow: false,
             top_gap: 16.0,
+            dock: super::DockAnchor::Left,
             clock: ClockFormat::TwelveHour,
             accent: AccentPreset::Mint,
             show_seconds: false,
             update: UpdateChannel::Stable,
+            lyrics: super::LyricsMode::Words,
+            lyric_offset_ms: -250,
+            ..Settings::default()
         };
 
         let parsed = Settings::parse(&original.serialize());

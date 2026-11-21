@@ -7,11 +7,20 @@ repository = "https://github.com/hiyo41/HiyoDyna"
 license = "AGPL-3.0-only"
 
 [dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+roxmltree = "0.21"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 
 [target.'cfg(windows)'.dependencies]
+windows-core = "0.62"
+windows = { version = "0.62", features = ["Foundation", "Foundation_Collections", "Media_Control", "Storage_Streams", "Win32_System_WinRT", "Win32_UI_Accessibility", "Win32_System_Com", "Win32_System_Ole", "Win32_System_Variant"] }
 windows-sys = { version = "0.61.2", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
+    "Win32_Graphics_Dwm",
     "Win32_Media",
     "Win32_Networking_WinInet",
     "Win32_System_LibraryLoader",

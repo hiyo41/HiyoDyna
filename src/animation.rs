@@ -31,9 +31,9 @@ impl Default for SpringTuning {
 }
 
 pub(crate) const COMPACT: ShapeState = ShapeState {
-    width: 184.0,
-    height: 54.0,
-    radius: 27.0,
+    width: 148.0,
+    height: 40.0,
+    radius: 20.0,
 };
 
 pub(crate) const EXPANDED: ShapeState = ShapeState {
@@ -95,6 +95,9 @@ pub(crate) struct Animation {
     hover_velocity: f32,
     hover_target: f32,
     tuning: SpringTuning,
+    previous_target: ShapeState,
+    page_shrink: bool,
+    compact_resize: bool,
 }
 
 impl Animation {
@@ -112,6 +115,9 @@ impl Animation {
             hover_velocity: 0.0,
             hover_target: 0.0,
             tuning,
+            previous_target: COMPACT,
+            page_shrink: false,
+            compact_resize: false,
         }
     }
 
@@ -142,7 +148,16 @@ impl Animation {
             return self.is_active();
         }
 
-        let (damping, response) = if self.target == EXPANDED {
+        if self.target != self.previous_target {
+            self.compact_resize = self.target.height == COMPACT.height
+                && self.previous_target.height == COMPACT.height
+                && (self.current.height - COMPACT.height).abs() < 0.03;
+            self.page_shrink =
+                self.target.height >= EXPANDED.height && self.target.height < self.current.height;
+            self.previous_target = self.target;
+        }
+
+        let (damping, response) = if self.target.height >= EXPANDED.height {
             (
                 self.tuning.expand_damping,
                 self.tuning.expand_response_seconds,
@@ -201,6 +216,7 @@ impl Animation {
     }
 
     fn integrate_axis(&mut self, dt: f32, axis: usize, omega: f32, damping: f32) {
+        let current_width = self.current.width;
         let current_height = self.current.height;
         let (position, velocity, target, min, max) = match axis {
             0 => (
@@ -208,14 +224,14 @@ impl Animation {
                 &mut self.velocity.width,
                 self.target.width,
                 COMPACT.width * OVERSHOOT_MIN,
-                EXPANDED.width * OVERSHOOT_MAX,
+                (EXPANDED.width.max(self.target.width) * OVERSHOOT_MAX).max(current_width),
             ),
             1 => (
                 &mut self.current.height,
                 &mut self.velocity.height,
                 self.target.height,
                 COMPACT.height * OVERSHOOT_MIN,
-                EXPANDED.height * OVERSHOOT_MAX,
+                (EXPANDED.height.max(self.target.height) * OVERSHOOT_MAX).max(current_height),
             ),
             _ => (
                 &mut self.current.radius,
@@ -226,10 +242,36 @@ impl Animation {
             ),
         };
 
+        // Expanded pages can differ greatly in height. Their shrinking axes must
+        // approach the destination without revealing compact content or rebounding.
+        let monotonic_shrink = self.page_shrink && *position >= target;
+        let compact_resize = axis == 0 && self.compact_resize;
+        let previous = *position;
+        let damping = if monotonic_shrink || compact_resize {
+            damping.max(1.0)
+        } else {
+            damping
+        };
         let acceleration =
             -2.0 * damping * omega * *velocity - omega * omega * (*position - target);
         *velocity += acceleration * dt;
         *position += *velocity * dt;
+
+        if monotonic_shrink {
+            let clamped = position.clamp(target, previous);
+            if *position != clamped {
+                *position = clamped;
+                *velocity = 0.0;
+            }
+        }
+
+        if compact_resize {
+            let clamped = position.clamp(previous.min(target), previous.max(target));
+            if *position != clamped {
+                *position = clamped;
+                *velocity = 0.0;
+            }
+        }
 
         if *position < min {
             *position = min;
@@ -277,7 +319,169 @@ impl Animation {
 
 #[cfg(test)]
 mod tests {
-    use super::{Animation, COMPACT, EXPANDED, ShapeVelocity, SpringTuning};
+    #[test]
+    fn compact_sentence_width_changes_do_not_rebound() {
+        use crate::settings::{BouncePreset, MotionPreset, Settings};
+        for motion in [MotionPreset::Slow, MotionPreset::Normal, MotionPreset::Fast] {
+            for bounce in [BouncePreset::Low, BouncePreset::Medium, BouncePreset::High] {
+                let settings = Settings {
+                    motion,
+                    bounce,
+                    ..Settings::default()
+                };
+                let mut animation = Animation::new_with_tuning(settings.tuning());
+                for width in [700.0, 220.0, 1100.0, 148.0] {
+                    animation.target = ShapeState { width, ..COMPACT };
+                    for _ in 0..240 {
+                        let previous = animation.current.width;
+                        animation.advance(1.0 / 120.0);
+                        assert!(
+                            (previous.min(width)..=previous.max(width))
+                                .contains(&animation.current.width),
+                            "compact resize rebounded: {previous} -> {} toward {width}, {motion:?}/{bounce:?}",
+                            animation.current.width
+                        );
+                    }
+                    assert_eq!(animation.current, animation.target);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn display_sized_compact_width_settles_and_can_expand_then_return() {
+        let mut animation = Animation::new();
+        let compact = ShapeState {
+            width: 1100.0,
+            ..COMPACT
+        };
+        for target in [compact, EXPANDED, compact] {
+            animation.target = target;
+            let mut moving = true;
+            for _ in 0..600 {
+                moving = animation.advance(1.0 / 120.0);
+            }
+            assert!(
+                !moving,
+                "display-sized compact widths must settle instead of continuously rendering"
+            );
+            assert_eq!(animation.current, target);
+        }
+    }
+
+    use super::{Animation, COMPACT, EXPANDED, ShapeState, ShapeVelocity, SpringTuning};
+
+    #[test]
+    fn player_to_clock_shrinks_monotonically_without_crossing_the_destination() {
+        for dt in [1.0 / 30.0, 1.0 / 120.0] {
+            let mut animation = Animation::new();
+            animation.current = ShapeState {
+                width: 440.0,
+                height: 500.0,
+                radius: 32.0,
+            };
+            animation.expand();
+            for frame in 0..360 {
+                let previous = animation.current;
+                animation.advance(dt);
+                if frame == 0 {
+                    assert!(animation.current.height < previous.height);
+                }
+                for (current, previous, destination) in [
+                    (animation.current.height, previous.height, 150.0),
+                    (animation.current.width, previous.width, 420.0),
+                    (animation.current.radius, previous.radius, 30.0),
+                ] {
+                    assert!(current >= destination, "undershot {destination}: {current}");
+                    assert!(
+                        current <= previous,
+                        "rebounded from {previous} to {current}"
+                    );
+                }
+            }
+            assert_eq!(animation.current, EXPANDED);
+        }
+    }
+
+    #[test]
+    fn interrupted_page_shrink_returns_to_clock_without_a_deep_dip() {
+        let mut animation = Animation::new();
+        let player = ShapeState {
+            height: 500.0,
+            ..EXPANDED
+        };
+        animation.current = player;
+        animation.expand();
+        animation.advance(0.1);
+        animation.target = player;
+        let before_reversal = animation.current;
+        animation.advance(1.0 / 120.0);
+        assert!((animation.current.height - before_reversal.height).abs() < 30.0);
+        animation.advance(0.1);
+        animation.expand();
+        for _ in 0..360 {
+            animation.advance(1.0 / 120.0);
+            assert!(animation.current.height >= 150.0);
+            assert!(animation.current.width >= 420.0);
+            assert!(animation.current.radius >= 30.0);
+            assert!(animation.current.height <= 540.0);
+        }
+        assert_eq!(animation.current, EXPANDED);
+    }
+
+    #[test]
+    fn page_shrink_honors_the_selected_response_speed() {
+        let mut regular = Animation::new();
+        let mut fast = Animation::new_with_tuning(SpringTuning {
+            expand_response_seconds: 0.12,
+            ..SpringTuning::default()
+        });
+        for animation in [&mut regular, &mut fast] {
+            animation.current = ShapeState {
+                height: 500.0,
+                ..EXPANDED
+            };
+            animation.expand();
+            animation.advance(0.08);
+            assert!(animation.current.height >= 150.0);
+        }
+        assert!(fast.current.height < regular.current.height);
+    }
+
+    #[test]
+    fn compact_lyrics_width_retargets_and_settles_at_capsule_height() {
+        let mut animation = Animation::new();
+        for width in [360.0, 220.0, 148.0] {
+            animation.target = ShapeState { width, ..COMPACT };
+            for _ in 0..360 {
+                animation.advance(1.0 / 120.0);
+                assert_eq!(animation.current.height, 40.0);
+                assert_eq!(animation.current.radius, 20.0);
+                assert!(animation.current.width <= 453.6);
+            }
+            assert_eq!(animation.current.width, width);
+        }
+    }
+
+    #[test]
+    fn taller_player_settles_and_collapses_without_snapping() {
+        let mut animation = Animation::new();
+        animation.target = super::ShapeState {
+            height: 500.0,
+            ..EXPANDED
+        };
+        for _ in 0..300 {
+            animation.advance(1.0 / 120.0);
+        }
+        assert_eq!(animation.current.height, 500.0);
+        animation.collapse();
+        animation.advance(1.0 / 120.0);
+        assert!(animation.current.height > 450.0);
+        for _ in 0..300 {
+            animation.advance(1.0 / 120.0);
+        }
+        assert_eq!(animation.current, COMPACT);
+    }
 
     #[test]
     fn starts_in_the_compact_capsule_state() {

@@ -1,17 +1,45 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+#[cfg(windows)]
+mod accessibility;
 #[cfg(any(windows, test))]
 mod animation;
 #[cfg(any(windows, test))]
 mod autostart;
+#[cfg(windows)]
+mod canvas;
 #[cfg(any(windows, test))]
 mod clock;
+#[cfg(windows)]
+mod compact;
+mod compact_glow;
+#[cfg(windows)]
+mod fullscreen;
 #[cfg(any(windows, test))]
 mod geometry;
+mod hotkey;
 #[cfg(any(windows, test))]
 mod hover;
+mod i18n;
+#[cfg(windows)]
+mod island_surface;
+mod lyric_provider;
+#[cfg(windows)]
+mod lyric_search;
+mod lyrics;
+#[cfg(windows)]
+mod media;
+#[cfg(windows)]
+mod native_ui;
 #[cfg(any(windows, test))]
 mod net;
+#[cfg(windows)]
+mod player;
+#[cfg(windows)]
+mod preferences;
+mod presentation;
+#[cfg(windows)]
+mod quick_menu;
 #[cfg(any(windows, test))]
 mod render;
 #[cfg(any(windows, test))]
@@ -28,6 +56,8 @@ mod tray_icon;
 mod update;
 #[cfg(windows)]
 mod window;
+#[cfg(windows)]
+mod window_chrome;
 
 #[cfg(windows)]
 fn main() {
@@ -37,20 +67,13 @@ fn main() {
     }
     if let Err(error) = window::run() {
         eprintln!("HiyoDyna could not start: {error}");
-        let message: Vec<u16> = format!("HiyoDyna could not start: {error}")
-            .encode_utf16()
-            .chain(Some(0))
-            .collect();
-        let title: Vec<u16> = "HiyoDyna".encode_utf16().chain(Some(0)).collect();
-        unsafe {
-            windows_sys::Win32::UI::WindowsAndMessaging::MessageBoxW(
-                std::ptr::null_mut(),
-                message.as_ptr(),
-                title.as_ptr(),
-                windows_sys::Win32::UI::WindowsAndMessaging::MB_OK
-                    | windows_sys::Win32::UI::WindowsAndMessaging::MB_ICONERROR,
-            );
-        }
+        native_ui::notice_formatted(
+            std::ptr::null_mut(),
+            "HiyoDyna",
+            "HiyoDyna could not start: {error}",
+            &[("error", &error)],
+        );
+        native_ui::wait_for_notices();
         std::process::exit(1);
     }
 }

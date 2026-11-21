@@ -1,5 +1,5 @@
 use crate::animation::ShapeState;
-use crate::geometry::rounded_rect_distance;
+use crate::geometry::island_distance;
 
 pub(crate) const HOVER_GRACE_MILLISECONDS: u32 = 160;
 pub(crate) const HOVER_RECHECK_MILLISECONDS: u32 = 200;
@@ -10,9 +10,10 @@ pub(crate) fn pointer_inside_shape(
     top_margin: f32,
     x: f32,
     y: f32,
+    attached: bool,
 ) -> bool {
     let center = (canvas_size.0 as f32 * 0.5, top_margin + state.height * 0.5);
-    rounded_rect_distance(x, y, state, center) <= 1.0
+    island_distance(x, y, state, center, attached) < 0.5
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -33,6 +34,11 @@ pub(crate) struct HoverTracker {
 impl HoverTracker {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn synchronize(&mut self, expanded: bool) {
+        self.expanded = expanded;
+        self.grace_armed = false;
     }
 
     pub fn pointer_moved(&mut self, inside_shape: bool) -> HoverCommand {
@@ -76,31 +82,49 @@ mod tests {
     const TOP_MARGIN: f32 = 12.0;
 
     #[test]
+    fn restored_expanded_panel_rearms_collapse_after_external_timer_cancellation() {
+        let mut hover = HoverTracker::new();
+        assert_eq!(hover.pointer_moved(true), HoverCommand::Expand);
+        assert_eq!(hover.pointer_moved(false), HoverCommand::ArmGrace);
+        hover.synchronize(true);
+        assert_eq!(hover.pointer_moved(false), HoverCommand::ArmGrace);
+        assert_eq!(hover.grace_expired(false), HoverCommand::Collapse);
+
+        // A shortcut or context action can expand geometry without pointer entry.
+        hover.synchronize(true);
+        assert_eq!(hover.pointer_moved(false), HoverCommand::ArmGrace);
+        assert_eq!(hover.grace_expired(false), HoverCommand::Collapse);
+    }
+
+    #[test]
     fn compact_hit_test_matches_the_capsule_body_not_the_shadow() {
         let center = (CANVAS.0 as f32 / 2.0, TOP_MARGIN + COMPACT.height / 2.0);
         assert!(pointer_inside_shape(
-            CANVAS, COMPACT, TOP_MARGIN, center.0, center.1
+            CANVAS, COMPACT, TOP_MARGIN, center.0, center.1, false
         ));
         assert!(pointer_inside_shape(
             CANVAS,
             COMPACT,
             TOP_MARGIN,
             center.0 + COMPACT.width / 2.0,
-            center.1
+            center.1,
+            false
         ));
         assert!(!pointer_inside_shape(
             CANVAS,
             COMPACT,
             TOP_MARGIN,
             center.0 + COMPACT.width / 2.0 + 4.0,
-            center.1
+            center.1,
+            false
         ));
         assert!(!pointer_inside_shape(
             CANVAS,
             COMPACT,
             TOP_MARGIN,
             center.0,
-            center.1 + COMPACT.height / 2.0 + 4.0
+            center.1 + COMPACT.height / 2.0 + 4.0,
+            false
         ));
     }
 
@@ -108,21 +132,23 @@ mod tests {
     fn expanded_hit_test_uses_the_full_panel() {
         let center = (CANVAS.0 as f32 / 2.0, TOP_MARGIN + EXPANDED.height / 2.0);
         assert!(pointer_inside_shape(
-            CANVAS, EXPANDED, TOP_MARGIN, center.0, center.1
+            CANVAS, EXPANDED, TOP_MARGIN, center.0, center.1, false
         ));
         assert!(pointer_inside_shape(
             CANVAS,
             EXPANDED,
             TOP_MARGIN,
             center.0 + EXPANDED.width / 2.0 - 1.0,
-            center.1
+            center.1,
+            false
         ));
         assert!(!pointer_inside_shape(
             CANVAS,
             EXPANDED,
             TOP_MARGIN,
             center.0 + EXPANDED.width / 2.0 + 4.0,
-            center.1
+            center.1,
+            false
         ));
     }
 
@@ -139,14 +165,15 @@ mod tests {
         let center = (canvas.0 as f32 / 2.0, margin + scaled.height / 2.0);
 
         assert!(pointer_inside_shape(
-            canvas, scaled, margin, center.0, center.1
+            canvas, scaled, margin, center.0, center.1, false
         ));
         assert!(!pointer_inside_shape(
             canvas,
             scaled,
             margin,
             center.0 + scaled.width / 2.0 + 4.0,
-            center.1
+            center.1,
+            false
         ));
     }
 

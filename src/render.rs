@@ -1,5 +1,5 @@
 use crate::animation::ShapeState;
-use crate::geometry::rounded_rect_distance;
+use crate::geometry::{DistanceAxis, IslandDistance};
 
 const SHADOW_OFFSET_Y: f32 = 3.0;
 const SHADOW_SIGMA: f32 = 3.0;
@@ -22,6 +22,7 @@ pub(crate) const SHADOW_EXTENT: f32 = SHADOW_OFFSET_Y + 1.5 + (SHADOW_SIGMA + 1.
 pub(crate) struct RenderParams {
     pub state: ShapeState,
     pub top_margin: f32,
+    pub attached: bool,
     pub scale: f32,
     pub shadow_opacity: f32,
     pub hover: f32,
@@ -37,6 +38,7 @@ pub(crate) fn render_frame(pixels: &mut [u8], size: (u32, u32), state: ShapeStat
         RenderParams {
             state,
             top_margin: size.1 as f32 * 0.5 - state.height * 0.5,
+            attached: false,
             scale: 1.0,
             shadow_opacity: DEFAULT_SHADOW_OPACITY,
             hover: 0.0,
@@ -68,10 +70,12 @@ pub(crate) fn render_frame_with_margin(pixels: &mut [u8], size: (u32, u32), para
     let shadow_opacity = (params.shadow_opacity * (1.0 + 0.36 * hover)).clamp(0.0, 1.0);
     let halo_max_distance = HALO_MAX_DISTANCE * scale;
     let reach = shadow_max_distance.max(halo_max_distance);
-    let left = (center.0 - state.width * 0.5 - reach - 1.0)
+    let geometry = IslandDistance::new(state, params.attached);
+    let extension = geometry.horizontal_extension();
+    let left = (center.0 - state.width * 0.5 - extension - reach - 1.0)
         .floor()
         .max(0.0) as u32;
-    let right = (center.0 + state.width * 0.5 + reach + 1.0)
+    let right = (center.0 + state.width * 0.5 + extension + reach + 1.0)
         .ceil()
         .min(size.0 as f32) as u32;
     let top = (center.1 - state.height * 0.5 - reach - 1.0)
@@ -81,66 +85,179 @@ pub(crate) fn render_frame_with_margin(pixels: &mut [u8], size: (u32, u32), para
         .ceil()
         .min(size.1 as f32) as u32;
 
-    for y in top..bottom {
-        for x in left..right {
-            let px = x as f32 + 0.5;
-            let py = y as f32 + 0.5;
-            let index = ((y * size.0 + x) * 4) as usize;
+    let columns: Vec<_> = (left..right)
+        .map(|x| geometry.column(x as f32 + 0.5, center.0))
+        .collect();
+    if columns.is_empty() {
+        return;
+    }
+    let core_start = columns.iter().position(|column| column.q <= 0.0);
+    let core_end = columns
+        .iter()
+        .rposition(|column| column.q <= 0.0)
+        .map(|x| x + 1);
+    let middle = columns.len() / 2;
+    let center_row = geometry.row(center.1, center.1);
+    let exterior =
+        |column: &DistanceAxis| column.q > 0.0 && geometry.distance(*column, center_row) >= 0.5;
+    let exterior_left = columns[..middle].partition_point(exterior);
+    let exterior_right = middle + columns[middle..].partition_point(|column| !exterior(column));
+    let mut straight_pixels = vec![0; columns.len() * 4];
+    let mut straight_pixels_ready = false;
+    let mirrors: Vec<_> = columns
+        .iter()
+        .enumerate()
+        .map(|(index, column)| {
+            let mirrored_x = size.0 - 1 - (left + index as u32);
+            mirrored_x
+                .checked_sub(left)
+                .map(|x| x as usize)
+                .filter(|&other| other < index && columns[other].q.to_bits() == column.q.to_bits())
+        })
+        .collect();
+    let mut mirrorable = vec![false; columns.len()];
 
-            let distance = rounded_rect_distance(px, py, state, center);
+    for y in top..bottom {
+        mirrorable.fill(false);
+        let py = y as f32 + 0.5;
+        let row = geometry.row(py, center.1);
+        let shadow_row = geometry.row(py - shadow_offset, center.1);
+        let vertical =
+            ((py - (center.1 - state.height * 0.5)) / state.height.max(1.0)).clamp(0.0, 1.0);
+        let lift = hover * 4.0;
+        let colors: [[u8; 3]; 4] = std::array::from_fn(|x| {
+            let dither = dither_offset(x as u32, y);
+            [
+                (9.0 - 3.0 * vertical + lift + dither)
+                    .round()
+                    .clamp(0.0, 255.0) as u8,
+                (9.0 - 3.0 * vertical + lift + dither)
+                    .round()
+                    .clamp(0.0, 255.0) as u8,
+                (9.0 - 3.0 * vertical + lift + dither)
+                    .round()
+                    .clamp(0.0, 255.0) as u8,
+            ]
+        });
+        let rim_alpha = (0.055 + 0.025 * hover) * (1.0 - 0.65 * vertical);
+        let shade = |pixel: &mut [u8], column: DistanceAxis, x: u32| {
+            let distance = geometry.distance(column, row);
             if distance > 0.0 {
                 if shadow_opacity > 0.0 {
-                    let shadow_distance =
-                        rounded_rect_distance(px, py - shadow_offset, state, center);
+                    let shadow_distance = geometry.distance(column, shadow_row);
                     if shadow_distance < shadow_max_distance {
                         // Keep the offset silhouette itself, then soften its outer edge.
                         // Clipping to the front shape above leaves only the visible cast shadow.
                         let falloff_distance = shadow_distance.max(0.0);
                         let normalized = falloff_distance / shadow_sigma;
                         let alpha = (-0.5 * normalized * normalized).exp() * shadow_opacity;
-                        blend_pixel(&mut pixels[index..index + 4], [0, 0, 0], alpha);
+                        blend_pixel(pixel, [0, 0, 0], alpha);
                     }
                 }
 
                 if hover > 0.0 && distance < halo_max_distance {
                     let normalized = distance / (HALO_SIGMA * scale);
                     let alpha = (-0.5 * normalized * normalized).exp() * HALO_OPACITY * hover;
-                    blend_pixel(&mut pixels[index..index + 4], params.accent, alpha);
+                    blend_pixel(pixel, params.accent, alpha);
                 }
             }
 
             let coverage = (0.5 - distance).clamp(0.0, 1.0);
             if coverage > 0.0 {
-                let vertical = ((py - (center.1 - state.height * 0.5)) / state.height.max(1.0))
-                    .clamp(0.0, 1.0);
-                let lift = hover * 4.0;
-                let dither = dither_offset(x, y);
-                let blue = (28.0 - 8.0 * vertical + lift + dither).round();
-                let green = (27.0 - 8.0 * vertical + lift + dither).round();
-                let red = (25.0 - 7.0 * vertical + lift + dither).round();
-                blend_pixel(
-                    &mut pixels[index..index + 4],
-                    [
-                        blue.clamp(0.0, 255.0) as u8,
-                        green.clamp(0.0, 255.0) as u8,
-                        red.clamp(0.0, 255.0) as u8,
-                    ],
-                    coverage,
-                );
+                blend_pixel(pixel, colors[(x % 4) as usize], coverage);
 
                 let edge = (1.0 - (distance + 0.55).abs() / 0.65).clamp(0.0, 1.0);
                 if edge > 0.0 {
-                    let top_weight = 1.0 - 0.65 * vertical;
-                    let rim_alpha = (0.10 + 0.05 * hover) * top_weight;
-                    blend_pixel(
-                        &mut pixels[index..index + 4],
-                        [255, 255, 255],
-                        edge * coverage * rim_alpha,
+                    blend_pixel(pixel, [255, 255, 255], edge * coverage * rim_alpha);
+                }
+            }
+            coverage <= 0.0
+        };
+
+        // The rim ends at -1.2. A conservative -1.25 threshold also guarantees full coverage.
+        let opaque = |column: &DistanceAxis| geometry.distance(*column, row) <= -1.25;
+        let span = if opaque(&columns[middle]) {
+            let start = columns[..middle].partition_point(|column| !opaque(column));
+            let end = middle + columns[middle..].partition_point(opaque);
+            Some((start, end, true))
+        } else if row.q >= 0.0
+            && (shadow_row.q >= 0.0
+                || shadow_opacity == 0.0
+                || geometry.distance(columns[middle], row) <= 0.0)
+        {
+            core_start
+                .zip(core_end)
+                .map(|(start, end)| (start, end, false))
+        } else {
+            None
+        };
+        let row_start = ((y * size.0 + left) * 4) as usize;
+        let output = &mut pixels[row_start..row_start + columns.len() * 4];
+        let (start, end, opaque) = span.unwrap_or((columns.len(), columns.len(), false));
+        // In this band both silhouettes have identical column distances. Exterior pixels
+        // have no gradient or rim, so their fully blended shadow/halo bytes repeat exactly.
+        let (copy_left, copy_right) = if row.q <= 0.0 && shadow_row.q <= 0.0 {
+            if !straight_pixels_ready {
+                for index in (0..exterior_left).chain(exterior_right..columns.len()) {
+                    shade(
+                        &mut straight_pixels[index * 4..index * 4 + 4],
+                        columns[index],
+                        left + index as u32,
                     );
                 }
+                straight_pixels_ready = true;
+            }
+            output[..exterior_left * 4].copy_from_slice(&straight_pixels[..exterior_left * 4]);
+            output[exterior_right * 4..].copy_from_slice(&straight_pixels[exterior_right * 4..]);
+            (exterior_left, exterior_right)
+        } else {
+            (0, columns.len())
+        };
+        for (offset, column) in columns[copy_left..start.min(copy_right)].iter().enumerate() {
+            let index = copy_left + offset;
+            mirrorable[index] = shade(
+                &mut output[index * 4..index * 4 + 4],
+                *column,
+                left + index as u32,
+            );
+        }
+        if start < end {
+            let first_x = left + start as u32;
+            let mut pattern = [0; 16];
+            for (offset, pixel) in pattern.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+                let x = first_x + offset as u32;
+                if opaque {
+                    pixel[..3].copy_from_slice(&colors[(x % 4) as usize]);
+                    pixel[3] = 255;
+                } else {
+                    shade(pixel, columns[start], x);
+                }
+            }
+            fill_pattern(&mut output[start * 4..end * 4], &pattern);
+        }
+        let right_start = end.max(copy_left).min(copy_right);
+        for (offset, column) in columns[right_start..copy_right].iter().enumerate() {
+            let index = right_start + offset;
+            if let Some(other) = mirrors[index].filter(|&other| mirrorable[other]) {
+                // Only zero-coverage pixels are symmetric: shape colors retain their Bayer phase.
+                output.copy_within(other * 4..other * 4 + 4, index * 4);
+            } else {
+                shade(
+                    &mut output[index * 4..index * 4 + 4],
+                    *column,
+                    left + index as u32,
+                );
             }
         }
     }
+}
+
+fn fill_pattern(pixels: &mut [u8], pattern: &[u8; 16]) {
+    let (chunks, remainder) = pixels.as_chunks_mut::<16>();
+    for chunk in chunks {
+        chunk.copy_from_slice(pattern);
+    }
+    remainder.copy_from_slice(&pattern[..remainder.len()]);
 }
 
 fn dither_offset(x: u32, y: u32) -> f32 {
@@ -168,10 +285,425 @@ mod tests {
 
     const ICE: [u8; 3] = [255, 199, 143];
 
+    #[test]
+    fn attached_top_has_continuous_body_and_outward_concave_shoulders_at_each_dpi() {
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            for base in [COMPACT, EXPANDED] {
+                let state = crate::animation::ShapeState {
+                    width: base.width * scale,
+                    height: base.height * scale,
+                    radius: base.radius * scale,
+                };
+                let size = ((512.0 * scale) as u32, (592.0 * scale) as u32);
+                let mut pixels = vec![0; size.0 as usize * size.1 as usize * 4];
+                let mut options = params(state, 0.0, 0.0);
+                options.attached = true;
+                options.scale = scale;
+                options.shadow_opacity = 0.0;
+                render_frame_with_margin(&mut pixels, size, options);
+                let alpha = |x: u32, y: u32| pixels[((y * size.0 + x) * 4 + 3) as usize];
+                let left = (size.0 as f32 * 0.5 - state.width * 0.5).ceil() as u32;
+                let right = (size.0 as f32 * 0.5 + state.width * 0.5).floor() as u32;
+                for x in left..right {
+                    assert_eq!(
+                        alpha(x, 0),
+                        255,
+                        "top continuity at {scale}x, {base:?}, x={x}"
+                    );
+                }
+                assert!(
+                    alpha(right + scale as u32, 0) > 0,
+                    "outward shoulder at {scale}x"
+                );
+                assert_eq!(alpha(right + (13.0 * scale) as u32, 0), 0);
+                assert_eq!(alpha(right + scale as u32, (12.0 * scale) as u32), 0);
+                assert_eq!(
+                    alpha(right - 1, state.height as u32 - 1),
+                    0,
+                    "rounded bottom"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn rendered_body_and_hover_share_the_attached_and_detached_silhouettes() {
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            for base in [
+                COMPACT,
+                EXPANDED,
+                crate::animation::ShapeState {
+                    width: 360.0,
+                    ..COMPACT
+                },
+            ] {
+                let state = crate::animation::ShapeState {
+                    width: base.width * scale,
+                    height: base.height * scale,
+                    radius: base.radius * scale,
+                };
+                let size = ((512.0 * scale) as u32, (224.0 * scale) as u32);
+                for (attached, margin) in [(true, 0.0), (false, 0.0), (false, 12.0 * scale)] {
+                    let mut options = params(state, margin, 0.0);
+                    options.attached = attached;
+                    options.scale = scale;
+                    options.shadow_opacity = 0.0;
+                    let mut pixels = vec![0; size.0 as usize * size.1 as usize * 4];
+                    render_frame_with_margin(&mut pixels, size, options);
+                    for y in 0..size.1 {
+                        for x in 0..size.0 {
+                            let alpha = pixels[((y * size.0 + x) * 4 + 3) as usize];
+                            let hit = crate::hover::pointer_inside_shape(
+                                size,
+                                state,
+                                margin,
+                                x as f32 + 0.5,
+                                y as f32 + 0.5,
+                                attached,
+                            );
+                            // Sub-byte coverage can round to transparent; all visible
+                            // body pixels must hit, and every hit must have coverage.
+                            assert!(
+                                alpha == 0 || hit,
+                                "visible pixel misses: {options:?}, ({x}, {y})"
+                            );
+                            if hit && alpha == 0 {
+                                let center = (size.0 as f32 * 0.5, margin + state.height * 0.5);
+                                let distance = crate::geometry::island_distance(
+                                    x as f32 + 0.5,
+                                    y as f32 + 0.5,
+                                    state,
+                                    center,
+                                    attached,
+                                );
+                                assert!(
+                                    distance > 0.498,
+                                    "transparent interior hit: {options:?}, ({x}, {y})"
+                                );
+                            }
+                        }
+                    }
+                    let edge_x = (size.0 as f32 * 0.5 + state.width * 0.5 - 1.0) as u32;
+                    let top_y = margin as u32;
+                    let alpha = pixels[((top_y * size.0 + edge_x) * 4 + 3) as usize];
+                    assert_eq!(
+                        alpha == 255,
+                        attached,
+                        "explicit attachment controls top corners"
+                    );
+                }
+            }
+        }
+    }
+
+    // Frozen scalar renderer: keep its arithmetic independent of the optimized paths.
+    fn reference_frame(pixels: &mut [u8], size: (u32, u32), params: RenderParams) {
+        let state = params.state;
+        let scale = params.scale;
+        let hover = params.hover.clamp(0.0, 1.0);
+        let center = (size.0 as f32 * 0.5, params.top_margin + state.height * 0.5);
+        let shadow_offset = (super::SHADOW_OFFSET_Y + 1.5 * hover) * scale;
+        let shadow_sigma = (super::SHADOW_SIGMA + 1.5 * hover) * scale;
+        let shadow_max_distance = (super::SHADOW_MAX_DISTANCE + 4.5 * hover) * scale;
+        let shadow_opacity = (params.shadow_opacity * (1.0 + 0.36 * hover)).clamp(0.0, 1.0);
+        let halo_max_distance = super::HALO_MAX_DISTANCE * scale;
+        let reach = shadow_max_distance.max(halo_max_distance);
+        let radius = state
+            .radius
+            .max(0.0)
+            .min(state.width.max(0.0).min(state.height.max(0.0)) * 0.5);
+        let extension = if params.attached { radius * 0.4 } else { 0.0 };
+        let left = (center.0 - state.width * 0.5 - extension - reach - 1.0)
+            .floor()
+            .max(0.0) as u32;
+        let right = (center.0 + state.width * 0.5 + extension + reach + 1.0)
+            .ceil()
+            .min(size.0 as f32) as u32;
+        let top = (center.1 - state.height * 0.5 - reach - 1.0)
+            .floor()
+            .max(0.0) as u32;
+        let bottom = (center.1 + state.height * 0.5 + shadow_offset + reach + 1.0)
+            .ceil()
+            .min(size.1 as f32) as u32;
+        pixels.fill(0);
+        for y in top..bottom {
+            for x in left..right {
+                let px = x as f32 + 0.5;
+                let py = y as f32 + 0.5;
+                let index = ((y * size.0 + x) * 4) as usize;
+                let distance = reference_distance(px, py, state, center, params.attached);
+                if distance > 0.0 {
+                    if shadow_opacity > 0.0 {
+                        let shadow_distance = reference_distance(
+                            px,
+                            py - shadow_offset,
+                            state,
+                            center,
+                            params.attached,
+                        );
+                        if shadow_distance < shadow_max_distance {
+                            let normalized = shadow_distance.max(0.0) / shadow_sigma;
+                            let alpha = (-0.5 * normalized * normalized).exp() * shadow_opacity;
+                            super::blend_pixel(&mut pixels[index..index + 4], [0, 0, 0], alpha);
+                        }
+                    }
+                    if hover > 0.0 && distance < halo_max_distance {
+                        let normalized = distance / (super::HALO_SIGMA * scale);
+                        let alpha =
+                            (-0.5 * normalized * normalized).exp() * super::HALO_OPACITY * hover;
+                        super::blend_pixel(&mut pixels[index..index + 4], params.accent, alpha);
+                    }
+                }
+                let coverage = (0.5 - distance).clamp(0.0, 1.0);
+                if coverage > 0.0 {
+                    let vertical = ((py - (center.1 - state.height * 0.5)) / state.height.max(1.0))
+                        .clamp(0.0, 1.0);
+                    let lift = hover * 4.0;
+                    let dither = super::BAYER_4X4[(y % 4) as usize][(x % 4) as usize] / 16.0 - 0.5;
+                    let blue = (9.0 - 3.0 * vertical + lift + dither).round();
+                    let green = (9.0 - 3.0 * vertical + lift + dither).round();
+                    let red = (9.0 - 3.0 * vertical + lift + dither).round();
+                    super::blend_pixel(
+                        &mut pixels[index..index + 4],
+                        [
+                            blue.clamp(0.0, 255.0) as u8,
+                            green.clamp(0.0, 255.0) as u8,
+                            red.clamp(0.0, 255.0) as u8,
+                        ],
+                        coverage,
+                    );
+                    let edge = (1.0 - (distance + 0.55).abs() / 0.65).clamp(0.0, 1.0);
+                    if edge > 0.0 {
+                        let top_weight = 1.0 - 0.65 * vertical;
+                        let rim_alpha = (0.055 + 0.025 * hover) * top_weight;
+                        super::blend_pixel(
+                            &mut pixels[index..index + 4],
+                            [255, 255, 255],
+                            edge * coverage * rim_alpha,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    fn reference_distance(
+        x: f32,
+        y: f32,
+        state: crate::animation::ShapeState,
+        center: (f32, f32),
+        attached: bool,
+    ) -> f32 {
+        let half_width = state.width.max(0.0) * 0.5;
+        let half_height = state.height.max(0.0) * 0.5;
+        let radius = state.radius.max(0.0).min(half_width.min(half_height));
+        let qx = (x - center.0).abs() - (half_width - radius);
+        let qy =
+            (if attached { y.max(center.1) } else { y } - center.1).abs() - (half_height - radius);
+        let outside = (qx.max(0.0).powi(3) + qy.max(0.0).powi(3)).powf(1.0 / 3.0);
+        let rounded = outside + qx.max(qy).min(0.0) - radius;
+        if !attached {
+            return rounded;
+        }
+        let top = y - (center.1 - half_height);
+        let shoulder = radius * 0.4;
+        let side = if top < shoulder {
+            let dx = qx - radius - shoulder;
+            let dy = top - shoulder;
+            if dx > 0.0 {
+                (dx * dx + top * top).sqrt()
+            } else {
+                shoulder - (dx * dx + dy * dy).sqrt()
+            }
+        } else {
+            rounded
+        };
+        side.max(-top)
+    }
+
+    #[test]
+    fn matches_scalar_reference_for_animated_shapes_dpi_and_hover() {
+        use crate::animation::ShapeState;
+        let states = [
+            COMPACT,
+            EXPANDED,
+            ShapeState {
+                width: 420.0,
+                height: 500.0,
+                radius: 30.0,
+            },
+            ShapeState {
+                width: 373.37,
+                height: 317.73,
+                radius: 28.91,
+            },
+            ShapeState {
+                width: 453.6,
+                height: 540.0,
+                radius: 32.4,
+            },
+            ShapeState {
+                width: 93.7,
+                height: 47.3,
+                radius: 100.0,
+            },
+            ShapeState {
+                width: 31.25,
+                height: 12.75,
+                radius: 0.0,
+            },
+        ];
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let size = ((512.0 * scale) as u32 + 1, (592.0 * scale) as u32 + 1);
+            let mut actual = vec![91; size.0 as usize * size.1 as usize * 4];
+            let mut expected = actual.clone();
+            for state in states {
+                for (hover, shadow_opacity, top_margin, attached) in [
+                    (0.0, 0.22, 12.0, false),
+                    (0.37, 0.0, 0.0, false),
+                    (1.0, 0.47, -3.25, false),
+                    (0.0, 0.22, 0.0, true),
+                    (0.37, 0.0, 0.0, true),
+                    (1.0, 0.47, -3.25, true),
+                ] {
+                    let mut params = params(
+                        ShapeState {
+                            width: state.width * scale,
+                            height: state.height * scale,
+                            radius: state.radius * scale,
+                        },
+                        top_margin * scale,
+                        hover,
+                    );
+                    params.scale = scale;
+                    params.attached = attached;
+                    params.shadow_opacity = shadow_opacity;
+                    params.accent = [31, 203, 117];
+                    render_frame_with_margin(&mut actual, size, params);
+                    reference_frame(&mut expected, size, params);
+                    if let Some(index) = actual.iter().zip(&expected).position(|(a, b)| a != b) {
+                        panic!(
+                            "pixel ({}, {}), channel {}: {} != {}; {params:?}",
+                            index / 4 % size.0 as usize,
+                            index / 4 / size.0 as usize,
+                            index % 4,
+                            actual[index],
+                            expected[index]
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn matches_scalar_reference_for_clipped_and_degenerate_shapes() {
+        use crate::animation::ShapeState;
+        for size in [(1, 1), (13, 11), (127, 93), (128, 94)] {
+            for (width, height, radius, margin) in [
+                (0.0, 0.0, 0.0, 0.0),
+                (90.75, 0.0, 0.0, 12.75),
+                (0.0, 44.25, 40.0, -4.5),
+                (109.75, 67.25, 0.125, -13.25),
+                (109.75, 67.25, 1.0, 0.125),
+                (90.75, 44.25, 100.0, -7.75),
+                (270.75, 144.25, 14.0, -37.75),
+                (11.75, 1.75, 0.5, 4.125),
+            ] {
+                for (hover, attached) in [
+                    (-0.25, false),
+                    (0.125, false),
+                    (1.25, false),
+                    (-0.25, true),
+                    (0.125, true),
+                    (1.25, true),
+                ] {
+                    let params = RenderParams {
+                        state: ShapeState {
+                            width,
+                            height,
+                            radius,
+                        },
+                        top_margin: margin,
+                        attached,
+                        scale: 1.5,
+                        shadow_opacity: 0.22,
+                        hover,
+                        accent: [149, 19, 251],
+                    };
+                    let mut actual = vec![91; size.0 as usize * size.1 as usize * 4];
+                    let mut expected = actual.clone();
+                    render_frame_with_margin(&mut actual, size, params);
+                    reference_frame(&mut expected, size, params);
+                    assert!(actual == expected, "{size:?}: {params:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "release-mode background benchmark; run with --release --ignored --nocapture"]
+    fn benchmark_animated_backgrounds() {
+        use std::{hint::black_box, time::Instant};
+        for (name, height, attached) in [
+            ("clock", 150.0, false),
+            ("player", 500.0, false),
+            ("attached clock", 150.0, true),
+            ("attached player", 500.0, true),
+        ] {
+            for scale in [1.0, 1.25, 1.5, 2.0] {
+                let size = ((512.0 * scale) as u32, (592.0 * scale) as u32);
+                let frames: Vec<_> = [0.72, 0.85, 0.93, 0.98, 1.0, 1.04, 1.08, 1.02, 1.0]
+                    .into_iter()
+                    .map(|factor| RenderParams {
+                        state: crate::animation::ShapeState {
+                            width: 420.0 * factor * scale,
+                            height: height * factor * scale,
+                            radius: 30.0 * factor * scale,
+                        },
+                        scale,
+                        top_margin: if attached { 0.0 } else { 12.0 * scale },
+                        attached,
+                        hover: 0.5,
+                        shadow_opacity: 0.22,
+                        accent: ICE,
+                    })
+                    .collect();
+                let mut pixels = vec![0; size.0 as usize * size.1 as usize * 4];
+                let mut timings = [0.0; 2];
+                for (slot, render) in [reference_frame, render_frame_with_margin]
+                    .into_iter()
+                    .enumerate()
+                {
+                    render(&mut pixels, size, frames[0]);
+                    let start = Instant::now();
+                    for &params in &frames {
+                        render(black_box(&mut pixels), black_box(size), black_box(params));
+                        black_box(&pixels);
+                    }
+                    timings[slot] = start.elapsed().as_secs_f64() * 1000.0 / frames.len() as f64;
+                }
+                eprintln!(
+                    "{name} {scale}x: scalar {:.3} ms/frame, optimized {:.3} ms/frame ({:.1}x)",
+                    timings[0],
+                    timings[1],
+                    timings[0] / timings[1]
+                );
+                if name.ends_with("player") && scale == 2.0 {
+                    assert!(
+                        timings[1] < timings[0] / 30.0,
+                        "large animated background must be at least thirty times faster than scalar rendering"
+                    );
+                }
+            }
+        }
+    }
+
     fn params(state: crate::animation::ShapeState, top_margin: f32, hover: f32) -> RenderParams {
         RenderParams {
             state,
             top_margin,
+            attached: false,
             scale: 1.0,
             shadow_opacity: 0.22,
             hover,
@@ -273,6 +805,7 @@ mod tests {
                 RenderParams {
                     state: scaled,
                     top_margin,
+                    attached: false,
                     scale,
                     shadow_opacity: 0.22,
                     hover: 0.0,
@@ -294,7 +827,7 @@ mod tests {
     fn draws_the_offset_shadow_just_below_the_capsule_edge() {
         let size = (256, 128);
         let mut pixels = vec![0_u8; size.0 as usize * size.1 as usize * 4];
-        let y = 70;
+        let y = 12 + COMPACT.height as u32 + 4;
 
         render_frame_with_margin(&mut pixels, size, params(COMPACT, 12.0, 0.0));
 
@@ -309,7 +842,7 @@ mod tests {
     fn shadow_reach_stays_tight_below_the_shape() {
         let size = (256, 128);
         let mut pixels = vec![0_u8; size.0 as usize * size.1 as usize * 4];
-        let y = 12 + 54 + 15;
+        let y = 12 + COMPACT.height as u32 + 15;
 
         render_frame_with_margin(&mut pixels, size, params(COMPACT, 12.0, 0.0));
 
@@ -321,7 +854,7 @@ mod tests {
     fn shadow_can_be_disabled() {
         let size = (256, 128);
         let mut pixels = vec![0_u8; size.0 as usize * size.1 as usize * 4];
-        let y = 70;
+        let y = 12 + COMPACT.height as u32 + 4;
 
         render_frame_with_margin(
             &mut pixels,
@@ -329,6 +862,7 @@ mod tests {
             RenderParams {
                 state: COMPACT,
                 top_margin: 12.0,
+                attached: false,
                 scale: 1.0,
                 shadow_opacity: 0.0,
                 hover: 0.0,
@@ -346,7 +880,8 @@ mod tests {
             let size = (256, 128);
             let mut pixels = vec![0_u8; size.0 as usize * size.1 as usize * 4];
             render_frame_with_margin(&mut pixels, size, params(COMPACT, 12.0, hover));
-            pixels[((70 * size.0 + size.0 / 2) * 4 + 3) as usize]
+            let y = 12 + COMPACT.height as u32 + 4;
+            pixels[((y * size.0 + size.0 / 2) * 4 + 3) as usize]
         }
 
         assert!(alpha(1.0) > alpha(0.0));
@@ -363,6 +898,7 @@ mod tests {
                 RenderParams {
                     state: COMPACT,
                     top_margin: 12.0,
+                    attached: false,
                     scale: 1.0,
                     shadow_opacity: 0.0,
                     hover,
@@ -394,6 +930,7 @@ mod tests {
             RenderParams {
                 state,
                 top_margin: 0.0,
+                attached: false,
                 scale,
                 shadow_opacity: 0.22,
                 hover: 0.0,

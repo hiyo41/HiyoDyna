@@ -5,6 +5,8 @@ use std::process::Command;
 use std::ptr::null;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::mpsc::{Receiver, TryRecvError};
+use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Foundation::{
     CloseHandle, ERROR_ALREADY_EXISTS, ERROR_INVALID_PARAMETER, GetLastError, HANDLE, HWND,
@@ -22,6 +24,220 @@ use crate::settings::{Settings, UpdateChannel};
 struct Release {
     tag: String,
     published: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum CheckStatus {
+    Idle,
+    Checking,
+    UpToDate { tag: String, url: String },
+    Available { tag: String, url: String },
+    LatestPublished { tag: String, url: String },
+    NoReleases,
+    Error(String),
+}
+
+#[derive(Default)]
+struct BuildIdentity {
+    tag: Option<String>,
+    published: Option<i64>,
+}
+
+impl BuildIdentity {
+    fn from_metadata(text: &str) -> Self {
+        Self {
+            tag: json_string(text, "releaseTag").filter(|tag| !tag.trim().is_empty()),
+            published: json_string(text, "releasePublishedAt")
+                .and_then(|time| parse_rfc3339(&time)),
+        }
+    }
+
+    fn current() -> Self {
+        let embedded = Self {
+            tag: option_env!("HIYODYNA_RELEASE_TAG")
+                .filter(|tag| !tag.trim().is_empty())
+                .map(str::to_owned),
+            published: option_env!("HIYODYNA_RELEASE_PUBLISHED_AT").and_then(parse_rfc3339),
+        };
+        if embedded.tag.is_some() || embedded.published.is_some() {
+            return embedded;
+        }
+        std::env::current_exe()
+            .ok()
+            .and_then(|exe| {
+                let path = exe.parent()?.join("install.json");
+                let file = fs::File::open(path).ok()?;
+                use std::io::Read;
+                let mut text = String::new();
+                file.take(64 * 1024).read_to_string(&mut text).ok()?;
+                Some(Self::from_metadata(&text))
+            })
+            .unwrap_or_default()
+    }
+}
+
+fn classify(release: Option<Release>, identity: &BuildIdentity) -> CheckStatus {
+    let Some(release) = release else {
+        return CheckStatus::NoReleases;
+    };
+    let url = format!(
+        "https://github.com/{}/releases/tag/{}",
+        repo_slug(),
+        encode_tag(&release.tag)
+    );
+    if identity.tag.as_deref() == Some(release.tag.as_str()) {
+        return CheckStatus::UpToDate {
+            tag: release.tag,
+            url,
+        };
+    }
+    let comparable = identity.published.is_some() && parse_rfc3339(&release.published).is_some();
+    if !comparable {
+        CheckStatus::LatestPublished {
+            tag: release.tag,
+            url,
+        }
+    } else if should_apply(
+        &release,
+        None,
+        None,
+        identity.published,
+        identity.tag.as_deref(),
+    ) {
+        CheckStatus::Available {
+            tag: release.tag,
+            url,
+        }
+    } else {
+        CheckStatus::UpToDate {
+            tag: release.tag,
+            url,
+        }
+    }
+}
+
+fn encode_tag(tag: &str) -> String {
+    tag.bytes()
+        .map(|byte| {
+            if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) {
+                (byte as char).to_string()
+            } else {
+                format!("%{byte:02X}")
+            }
+        })
+        .collect()
+}
+
+static MANUAL_WORKER_BUSY: AtomicBool = AtomicBool::new(false);
+const MANUAL_CHECK_TIMEOUT: Duration = Duration::from_secs(35);
+
+pub(crate) struct CheckSession {
+    channel: UpdateChannel,
+    status: CheckStatus,
+    receiver: Option<Receiver<CheckStatus>>,
+    started: Option<Instant>,
+}
+
+impl CheckSession {
+    pub(crate) fn new(channel: UpdateChannel) -> Self {
+        Self {
+            channel,
+            status: CheckStatus::Idle,
+            receiver: None,
+            started: None,
+        }
+    }
+
+    pub(crate) fn status(&self) -> &CheckStatus {
+        &self.status
+    }
+
+    fn attach(&mut self, receiver: Receiver<CheckStatus>) -> bool {
+        if self.receiver.is_some() {
+            return false;
+        }
+        self.receiver = Some(receiver);
+        self.started = Some(Instant::now());
+        self.status = CheckStatus::Checking;
+        true
+    }
+
+    pub(crate) fn set_channel(&mut self, channel: UpdateChannel) {
+        if self.channel != channel {
+            self.channel = channel;
+            self.receiver = None;
+            self.started = None;
+            self.status = CheckStatus::Idle;
+        }
+    }
+
+    pub(crate) fn start(&mut self) -> bool {
+        if self.receiver.is_some() {
+            return false;
+        }
+        if MANUAL_WORKER_BUSY
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            self.status = CheckStatus::Error("An earlier update check is still finishing".into());
+            return false;
+        }
+        let (sender, receiver) = std::sync::mpsc::channel();
+        self.attach(receiver);
+        let channel = self.channel;
+        let worker = std::thread::Builder::new()
+            .name("manual-update-check".into())
+            .spawn(move || {
+                struct BusyGuard;
+                impl Drop for BusyGuard {
+                    fn drop(&mut self) {
+                        MANUAL_WORKER_BUSY.store(false, Ordering::Release);
+                    }
+                }
+                let _guard = BusyGuard;
+                let result = select_release(channel)
+                    .map(|release| classify(release, &BuildIdentity::current()))
+                    .unwrap_or_else(CheckStatus::Error);
+                if let CheckStatus::Error(error) = &result {
+                    eprintln!("Manual update check: {error}");
+                }
+                let _ = sender.send(result);
+            });
+        if let Err(error) = worker {
+            MANUAL_WORKER_BUSY.store(false, Ordering::Release);
+            self.receiver = None;
+            self.started = None;
+            self.status = CheckStatus::Error(error.to_string());
+        }
+        true
+    }
+
+    pub(crate) fn poll(&mut self) -> bool {
+        let Some(receiver) = &self.receiver else {
+            return false;
+        };
+        let next = match receiver.try_recv() {
+            Ok(status) => Some(status),
+            Err(TryRecvError::Disconnected) => {
+                Some(CheckStatus::Error("Update worker stopped".into()))
+            }
+            Err(TryRecvError::Empty)
+                if self
+                    .started
+                    .is_some_and(|start| start.elapsed() >= MANUAL_CHECK_TIMEOUT) =>
+            {
+                Some(CheckStatus::Error("Update check timed out".into()))
+            }
+            Err(TryRecvError::Empty) => None,
+        };
+        let Some(status) = next else {
+            return false;
+        };
+        self.receiver = None;
+        self.started = None;
+        self.status = status;
+        true
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1162,6 +1378,28 @@ fn wide(text: &str) -> Vec<u16> {
 #[cfg(test)]
 mod tests {
     use crate::settings::UpdateChannel;
+
+    #[test]
+    fn manual_update_session_reports_a_missing_build_identity() {
+        let release = super::Release {
+            tag: "v0.0.1-3".into(),
+            published: "2026-11-19T09:00:00Z".into(),
+        };
+        assert!(matches!(
+            super::classify(Some(release), &super::BuildIdentity::default()),
+            super::CheckStatus::LatestPublished { .. }
+        ));
+    }
+
+    #[test]
+    fn manual_update_session_turns_a_disconnected_worker_into_an_error() {
+        let mut session = super::CheckSession::new(UpdateChannel::Build);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        assert!(session.attach(receiver));
+        drop(sender);
+        assert!(session.poll());
+        assert!(matches!(session.status(), super::CheckStatus::Error(_)));
+    }
 
     const ATOM: &str = r#"<feed>
 <entry><updated>2026-11-19T08:07:44Z</updated>

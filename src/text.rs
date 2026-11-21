@@ -15,27 +15,28 @@ use windows_sys::Win32::Graphics::Gdi::{
 use crate::animation::ShapeState;
 use crate::clock::{ClockFormat, ClockSnapshot};
 use crate::geometry::rounded_rect_distance;
+use crate::i18n::{self, Language};
 use crate::render::blend_pixel;
 
 const TEXT_SUPERSAMPLE: usize = 3;
 const SUPERSAMPLE_SCALE: f32 = TEXT_SUPERSAMPLE as f32;
-const COMPACT_TIME_PX: f32 = 27.0;
+const COMPACT_TIME_PX: f32 = 21.0;
 const EXPANDED_TIME_PX: f32 = 50.0;
-const COMPACT_SUFFIX_PX: f32 = 11.0;
+const COMPACT_SUFFIX_PX: f32 = 9.0;
 const EXPANDED_SUFFIX_PX: f32 = 14.0;
-const COMPACT_SECONDS_PX: f32 = 12.0;
+const COMPACT_SECONDS_PX: f32 = 10.0;
 const EXPANDED_SECONDS_PX: f32 = 15.0;
 const DATE_PX: f32 = 13.0;
 const DIGIT_GAP_PX: f32 = 2.0;
 const MERIDIEM_GAP_PX: f32 = 6.0;
 const DATE_GAP_PX: f32 = 9.0;
-const COMPACT_SECONDS_GAP_PX: f32 = 5.0;
+const COMPACT_SECONDS_GAP_PX: f32 = 4.0;
 const EXPANDED_SECONDS_GAP_PX: f32 = 6.0;
 const DIVIDER_GAP_PX: f32 = 12.0;
 const DIVIDER_WIDTH_PX: f32 = 28.0;
 const DIVIDER_HEIGHT_PX: f32 = 2.0;
-const DOT_PX: f32 = 5.0;
-const DOT_GAP_PX: f32 = 8.0;
+const DOT_PX: f32 = 4.0;
+const DOT_GAP_PX: f32 = 6.0;
 const DATE_TRACKING_EM: f32 = 0.1;
 const SCRATCH_ORIGIN_PX: f32 = 8.0;
 const SCRATCH_DESIGN: (f32, f32) = (280.0, 90.0);
@@ -57,11 +58,69 @@ const EMBEDDED_FONTS: [(&str, &[u8]); 3] = [
     ),
 ];
 
-struct Mask {
-    width: u32,
-    height: u32,
+pub(crate) fn clock_date_in(clock: &ClockSnapshot, language: Language) -> String {
+    if i18n::resolve_language(language) != Language::Vietnamese {
+        return clock.date_text();
+    }
+    const WEEKDAYS: [&str; 7] = [
+        "Sunday",
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday",
+        "Saturday",
+    ];
+    i18n::format_copy_in(
+        Language::Vietnamese,
+        "{weekday} · {month} {day}",
+        &[
+            (
+                "weekday",
+                i18n::tr_in(Language::Vietnamese, WEEKDAYS[clock.weekday as usize % 7]),
+            ),
+            ("month", &clock.month.clamp(1, 12).to_string()),
+            ("day", &clock.day.to_string()),
+        ],
+    )
+}
+
+pub(crate) fn clock_meridiem_in(
+    clock: &ClockSnapshot,
+    format: ClockFormat,
+    language: Language,
+) -> Option<&'static str> {
+    clock
+        .meridiem(format)
+        .map(|suffix| i18n::tr_in(language, suffix))
+}
+
+pub(crate) fn clock_hint(clock: &ClockSnapshot, format: ClockFormat) -> String {
+    clock_hint_in(clock, format, i18n::resolved_language())
+}
+
+pub(crate) fn clock_hint_in(
+    clock: &ClockSnapshot,
+    format: ClockFormat,
+    language: Language,
+) -> String {
+    let mut hint = format!(
+        "{} · {}",
+        clock_date_in(clock, language),
+        clock.time_text(format)
+    );
+    if let Some(suffix) = clock_meridiem_in(clock, format, language) {
+        hint.push(' ');
+        hint.push_str(suffix);
+    }
+    hint
+}
+
+pub(crate) struct Mask {
+    pub width: u32,
+    pub height: u32,
     advance: u32,
-    coverage: Vec<u8>,
+    pub coverage: Vec<u8>,
 }
 
 struct FontResources {
@@ -233,6 +292,7 @@ pub(crate) struct TextParams {
     pub accent: [u8; 3],
     pub show_seconds: bool,
     pub hover: f32,
+    pub compact_trailing_space: f32,
 }
 
 pub(crate) struct TextLayer {
@@ -246,7 +306,7 @@ pub(crate) struct TextLayer {
     scale: f32,
     fonts: Fonts,
     _font_resources: Option<FontResources>,
-    key: Option<(ClockSnapshot, ClockFormat)>,
+    key: Option<(ClockSnapshot, ClockFormat, Language)>,
     compact: Option<Mask>,
     expanded: Option<Mask>,
     compact_seconds: Option<Mask>,
@@ -255,6 +315,111 @@ pub(crate) struct TextLayer {
 }
 
 impl TextLayer {
+    pub(crate) fn label_advance(&self, text: &str, px: f32, bold: bool) -> f32 {
+        let face = wide("Inter");
+        unsafe {
+            let font = CreateFontW(
+                -(px * self.scale * SUPERSAMPLE_SCALE).round() as i32,
+                0,
+                0,
+                0,
+                if bold { 600 } else { 400 },
+                0,
+                0,
+                0,
+                DEFAULT_CHARSET as u32,
+                OUT_TT_PRECIS as u32,
+                CLIP_DEFAULT_PRECIS as u32,
+                ANTIALIASED_QUALITY as u32,
+                (DEFAULT_PITCH | FF_DONTCARE) as u32,
+                face.as_ptr(),
+            );
+            if font.is_null() {
+                return 0.0;
+            }
+            let previous = SelectObject(self.dc, font);
+            let width = text_extent(self.dc, text).0 as f32 / (SUPERSAMPLE_SCALE * self.scale);
+            SelectObject(self.dc, previous);
+            DeleteObject(font);
+            width
+        }
+    }
+    pub(crate) fn label_mask(&mut self, text: &str, px: f32, bold: bool) -> Option<Mask> {
+        let face = wide("Inter");
+        let font = unsafe {
+            CreateFontW(
+                -(px * self.scale * SUPERSAMPLE_SCALE).round() as i32,
+                0,
+                0,
+                0,
+                if bold { 600 } else { 400 },
+                0,
+                0,
+                0,
+                DEFAULT_CHARSET as u32,
+                OUT_TT_PRECIS as u32,
+                CLIP_DEFAULT_PRECIS as u32,
+                ANTIALIASED_QUALITY as u32,
+                (DEFAULT_PITCH | FF_DONTCARE) as u32,
+                face.as_ptr(),
+            )
+        };
+        if font.is_null() {
+            return None;
+        }
+        let previous = unsafe { SelectObject(self.dc, font) };
+        let (width, height) = text_extent(self.dc, text);
+        let result = if self.ensure_scratch((
+            (width + self.origin * 2).max(1) as u32,
+            (height + self.origin * 2).max(1) as u32,
+        )) {
+            self.clear();
+            draw_text(self.dc, text, self.origin, self.origin);
+            // Keep the measured cell, including whitespace and baseline, so independently
+            // colored word fragments occupy the same positions as the complete line.
+            unsafe {
+                GdiFlush();
+            }
+            let pixels = unsafe {
+                std::slice::from_raw_parts(
+                    self.bits,
+                    self.scratch_size.0 as usize * self.scratch_size.1 as usize * 4,
+                )
+            };
+            let w = (width.max(1) as usize).div_ceil(TEXT_SUPERSAMPLE);
+            let h = (height.max(1) as usize).div_ceil(TEXT_SUPERSAMPLE);
+            let mut coverage = vec![0; w * h];
+            for y in 0..h {
+                for x in 0..w {
+                    let mut sum = 0_u32;
+                    for sy in 0..TEXT_SUPERSAMPLE {
+                        for sx in 0..TEXT_SUPERSAMPLE {
+                            let ix = self.origin as usize + x * TEXT_SUPERSAMPLE + sx;
+                            let iy = self.origin as usize + y * TEXT_SUPERSAMPLE + sy;
+                            let i = (iy * self.scratch_size.0 as usize + ix) * 4;
+                            sum += u32::from(pixels[i].max(pixels[i + 1]).max(pixels[i + 2]));
+                        }
+                    }
+                    coverage[y * w + x] =
+                        (sum / (TEXT_SUPERSAMPLE * TEXT_SUPERSAMPLE) as u32) as u8;
+                }
+            }
+            Some(Mask {
+                width: w as u32,
+                height: h as u32,
+                advance: w as u32,
+                coverage,
+            })
+        } else {
+            None
+        };
+        unsafe {
+            SelectObject(self.dc, previous);
+            DeleteObject(font);
+        }
+        result
+    }
+
     pub(crate) fn new(scale: f32) -> Result<Self, String> {
         let scale = scale.max(0.5);
         let scratch_size = (
@@ -316,11 +481,16 @@ impl TextLayer {
     }
 
     pub(crate) fn update(&mut self, clock: &ClockSnapshot, format: ClockFormat) {
-        if self.key.is_none_or(|(previous, old_format)| {
-            (previous.hour, previous.minute, old_format) != (clock.hour, clock.minute, format)
+        self.update_in(clock, format, i18n::resolved_language());
+    }
+
+    fn update_in(&mut self, clock: &ClockSnapshot, format: ClockFormat, language: Language) {
+        if self.key.is_none_or(|(previous, old_format, old_language)| {
+            (previous.hour, previous.minute, old_format, old_language)
+                != (clock.hour, clock.minute, format, language)
         }) {
             let time = clock.time_text(format);
-            let meridiem = clock.meridiem(format);
+            let meridiem = clock_meridiem_in(clock, format, language);
             self.clear();
             self.compact = self.draw_time(
                 &time,
@@ -338,7 +508,7 @@ impl TextLayer {
         }
         if self
             .key
-            .is_none_or(|(previous, _)| previous.second != clock.second)
+            .is_none_or(|(previous, _, _)| previous.second != clock.second)
         {
             let seconds = clock.seconds_text();
             self.clear();
@@ -346,23 +516,32 @@ impl TextLayer {
             self.clear();
             self.expanded_seconds = self.draw_seconds(&seconds, self.fonts.expanded_seconds);
         }
-        if self.key.is_none_or(|(previous, _)| {
-            (previous.weekday, previous.month, previous.day)
-                != (clock.weekday, clock.month, clock.day)
+        if self.key.is_none_or(|(previous, _, old_language)| {
+            (previous.weekday, previous.month, previous.day, old_language)
+                != (clock.weekday, clock.month, clock.day, language)
         }) {
             self.clear();
-            self.date = self.draw_date(&clock.date_text().to_uppercase());
+            self.date = self.draw_date(&clock_date_in(clock, language).to_uppercase());
         }
-        self.key = Some((*clock, format));
+        self.key = Some((*clock, format, language));
     }
 
+    #[cfg(test)]
     pub(crate) fn draw(&self, pixels: &mut [u8], params: TextParams) {
+        self.draw_with_opacity(pixels, params, 1.0);
+    }
+
+    pub(crate) fn draw_with_opacity(&self, pixels: &mut [u8], params: TextParams, opacity: f32) {
+        let opacity = opacity.clamp(0.0, 1.0);
+        if opacity <= 0.0 {
+            return;
+        }
         let shape = scale_shape(params.state, params.scale);
         let center = (
             params.size.0 as f32 * 0.5,
             params.top_margin + shape.height * 0.5,
         );
-        let compact_alpha = params.state.compact_content_alpha().clamp(0.0, 1.0);
+        let compact_alpha = params.state.compact_content_alpha().clamp(0.0, 1.0) * opacity;
         let compact_center_y =
             params.top_margin + shape.height * 0.5 + params.state.compact_lift() * params.scale;
 
@@ -374,7 +553,7 @@ impl TextLayer {
                 .then_some(self.compact_seconds.as_ref())
                 .flatten();
             let layout = compact_layout(
-                params.size.0 as f32,
+                params.size.0 as f32 - params.compact_trailing_space * params.scale,
                 compact_center_y,
                 (mask.width as f32, mask.height as f32),
                 seconds.map(|value| (value.advance as f32, value.height as f32)),
@@ -429,7 +608,7 @@ impl TextLayer {
             }
         }
 
-        let expanded_alpha = params.state.expanded_content_alpha().clamp(0.0, 1.0);
+        let expanded_alpha = params.state.expanded_content_alpha().clamp(0.0, 1.0) * opacity;
         if expanded_alpha > 0.0
             && let Some(mask) = &self.expanded
         {
@@ -1191,6 +1370,7 @@ mod tests {
     use super::{Mask, TextLayer, TextParams, blend_mask, compact_layout, expanded_layout};
     use crate::animation::{COMPACT, EXPANDED};
     use crate::clock::{ClockFormat, ClockSnapshot};
+    use crate::i18n::Language;
 
     const ICE: [u8; 3] = [255, 199, 143];
 
@@ -1207,6 +1387,162 @@ mod tests {
             month: 11,
             day: 18,
         }
+    }
+
+    #[test]
+    fn vietnamese_clock_uses_day_month_order_and_localized_meridiem() {
+        assert_eq!(
+            super::clock_date_in(&snapshot(), Language::Vietnamese),
+            "Thứ tư · 18 tháng 11"
+        );
+        assert_eq!(
+            super::clock_date_in(&snapshot(), Language::English),
+            "Wednesday · November 18"
+        );
+        let sunday = ClockSnapshot {
+            weekday: 0,
+            month: 1,
+            day: 1,
+            hour: 0,
+            ..snapshot()
+        };
+        assert_eq!(
+            super::clock_date_in(&sunday, Language::Vietnamese),
+            "Chủ nhật · 1 tháng 1"
+        );
+        assert_eq!(
+            super::clock_meridiem_in(&sunday, ClockFormat::TwelveHour, Language::Vietnamese),
+            Some("SA")
+        );
+        assert_eq!(
+            super::clock_meridiem_in(&snapshot(), ClockFormat::TwelveHour, Language::Vietnamese),
+            Some("CH")
+        );
+        assert_eq!(
+            super::clock_meridiem_in(
+                &snapshot(),
+                ClockFormat::TwentyFourHour,
+                Language::Vietnamese
+            ),
+            None
+        );
+        assert_eq!(
+            super::clock_meridiem_in(&snapshot(), ClockFormat::TwelveHour, Language::English),
+            Some("PM")
+        );
+    }
+
+    #[test]
+    fn clock_hint_contains_the_localized_date_and_unambiguous_time() {
+        assert_eq!(
+            super::clock_hint_in(&snapshot(), ClockFormat::TwelveHour, Language::Vietnamese),
+            "Thứ tư · 18 tháng 11 · 9:41 CH"
+        );
+        assert_eq!(
+            super::clock_hint_in(&snapshot(), ClockFormat::TwentyFourHour, Language::English),
+            "Wednesday · November 18 · 21:41"
+        );
+        let invalid = ClockSnapshot {
+            weekday: 9,
+            month: 99,
+            ..snapshot()
+        };
+        assert_eq!(
+            super::clock_date_in(&invalid, Language::Vietnamese),
+            "Thứ ba · 18 tháng 12"
+        );
+    }
+
+    #[test]
+    fn language_switch_refreshes_date_and_suffix_without_a_clock_tick() {
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let mut layer = layer(scale);
+            layer.update_in(&snapshot(), ClockFormat::TwelveHour, Language::English);
+            let english_date = layer.date.as_ref().unwrap().coverage.clone();
+            let english_time = layer.compact.as_ref().unwrap().coverage.clone();
+            let seconds = layer.compact_seconds.as_ref().unwrap().coverage.clone();
+            layer.update_in(&snapshot(), ClockFormat::TwelveHour, Language::Vietnamese);
+            assert!(
+                layer.date.as_ref().unwrap().coverage != english_date,
+                "date at {scale}x"
+            );
+            assert!(
+                layer.compact.as_ref().unwrap().coverage != english_time,
+                "suffix at {scale}x"
+            );
+            assert_eq!(layer.compact_seconds.as_ref().unwrap().coverage, seconds);
+            layer.update_in(&snapshot(), ClockFormat::TwelveHour, Language::English);
+            assert_eq!(layer.date.as_ref().unwrap().coverage, english_date);
+            assert_eq!(layer.compact.as_ref().unwrap().coverage, english_time);
+        }
+    }
+
+    #[test]
+    fn vietnamese_clock_masks_fit_the_existing_capsule_at_each_dpi() {
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let mut layer = layer(scale);
+            for format in [ClockFormat::TwentyFourHour, ClockFormat::TwelveHour] {
+                for hour in [0, 9, 12, 21, 23] {
+                    for weekday in 0..7 {
+                        let clock = ClockSnapshot {
+                            hour,
+                            weekday,
+                            month: 12,
+                            day: 31,
+                            ..snapshot()
+                        };
+                        layer.update_in(&clock, format, Language::Vietnamese);
+                        let time = layer.compact.as_ref().unwrap();
+                        let seconds = layer.compact_seconds.as_ref().unwrap();
+                        let layout = compact_layout(
+                            148.0 * scale,
+                            20.0 * scale,
+                            (time.width as f32, time.height as f32),
+                            Some((seconds.advance as f32, seconds.height as f32)),
+                            scale,
+                        );
+                        assert!(layout.dot.x >= 12.0 * scale, "{layout:?}");
+                        let seconds = layout.seconds.unwrap();
+                        assert!(seconds.x + seconds.width <= 136.0 * scale, "{layout:?}");
+                        assert!(layout.time.y >= 8.0 * scale, "{layout:?}");
+                        assert!(
+                            layout.time.y + layout.time.height <= 32.0 * scale,
+                            "{layout:?}"
+                        );
+                        let date = layer.date.as_ref().unwrap();
+                        assert!(date.width as f32 <= (EXPANDED.width - 24.0) * scale);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn bundled_date_font_contains_all_vietnamese_clock_accents() {
+        use windows_sys::Win32::Graphics::Gdi::{
+            GGI_MARK_NONEXISTING_GLYPHS, GetGlyphIndicesW, SelectObject,
+        };
+        let layer = layer(1.0);
+        let text: Vec<u16> = "CHỦ NHẬT THỨ HAI BA TƯ NĂM SÁU BẢY THÁNG"
+            .encode_utf16()
+            .collect();
+        let mut glyphs = vec![0_u16; text.len()];
+        unsafe {
+            let previous = SelectObject(layer.dc, layer.fonts.date);
+            let count = GetGlyphIndicesW(
+                layer.dc,
+                text.as_ptr(),
+                text.len() as i32,
+                glyphs.as_mut_ptr(),
+                GGI_MARK_NONEXISTING_GLYPHS,
+            );
+            SelectObject(layer.dc, previous);
+            assert_ne!(count, u32::MAX);
+        }
+        assert!(
+            !glyphs.contains(&u16::MAX),
+            "clock accents must have glyphs in the bundled font"
+        );
     }
 
     fn layer(scale: f32) -> TextLayer {
@@ -1226,6 +1562,7 @@ mod tests {
             accent: ICE,
             show_seconds,
             hover: 0.0,
+            compact_trailing_space: 0.0,
         }
     }
 
@@ -1236,6 +1573,35 @@ mod tests {
             && (0..width).any(|x| mask.coverage[(height - 1) * width + x] > 0)
             && (0..height).any(|y| mask.coverage[y * width] > 0)
             && (0..height).any(|y| mask.coverage[y * width + width - 1] > 0)
+    }
+
+    #[test]
+    fn compact_clock_with_seconds_fits_the_small_capsule_at_each_display_scale() {
+        for scale in [1.0, 1.5, 2.0] {
+            let mut layer = layer(scale);
+            for format in [ClockFormat::TwentyFourHour, ClockFormat::TwelveHour] {
+                for hour in [0, 12, 20, 23] {
+                    layer.update(&ClockSnapshot { hour, ..snapshot() }, format);
+                    let time = layer.compact.as_ref().unwrap();
+                    let seconds = layer.compact_seconds.as_ref().unwrap();
+                    let layout = compact_layout(
+                        148.0 * scale,
+                        20.0 * scale,
+                        (time.width as f32, time.height as f32),
+                        Some((seconds.advance as f32, seconds.height as f32)),
+                        scale,
+                    );
+                    assert!(
+                        layout.dot.x >= 12.0 * scale,
+                        "{format:?} at {scale}: {layout:?}"
+                    );
+                    let seconds = layout.seconds.unwrap();
+                    assert!(seconds.x + seconds.width <= 136.0 * scale);
+                    assert!(layout.time.y >= 8.0 * scale);
+                    assert!(layout.time.y + layout.time.height <= 32.0 * scale);
+                }
+            }
+        }
     }
 
     #[test]
@@ -1497,6 +1863,36 @@ mod tests {
 
         let bright = pixels.chunks(4).filter(|pixel| pixel[0] > 200).count();
         assert!(bright > 50, "expected compact clock pixels, got {bright}");
+    }
+
+    #[test]
+    fn clock_page_opacity_fades_all_content_without_moving_the_layout() {
+        let size = (512, 224);
+        let mut layer = layer(1.0);
+        layer.update(&snapshot(), ClockFormat::TwentyFourHour);
+        for state in [COMPACT, EXPANDED] {
+            let mut normal = vec![0; size.0 as usize * size.1 as usize * 4];
+            layer.draw(&mut normal, params(size, state, true));
+            for opacity in [0.0, 0.5, 1.0] {
+                let mut faded = vec![0; normal.len()];
+                layer.draw_with_opacity(&mut faded, params(size, state, true), opacity);
+                for (original, actual) in normal
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .zip(faded.as_chunks::<4>().0)
+                {
+                    for channel in 0..4 {
+                        let expected = (original[channel] as f32 * opacity).round() as u8;
+                        assert!(
+                            actual[channel].abs_diff(expected) <= u8::from(opacity == 0.5),
+                            "state {state:?}, opacity {opacity}: expected {expected}, got {}",
+                            actual[channel]
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
