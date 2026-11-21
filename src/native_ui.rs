@@ -413,6 +413,61 @@ pub(crate) unsafe fn style_window(hwnd: windows_sys::Win32::Foundation::HWND) {
     }
 }
 
+/// Apply group opacity after composing overlapping rounded fills.
+fn composite_rects(c: &mut Canvas<'_>, shapes: &[(Rect, f32, [u8; 3])]) {
+    if c.opacity <= 0.0 {
+        return;
+    }
+    if c.opacity >= 1.0 {
+        for &(rect, radius, color) in shapes {
+            c.rect(rect, radius, color, 1.0);
+        }
+        return;
+    }
+    let scale = c.painter.scale;
+    let bounds = shapes[0].0.intersect(c.clip);
+    let left = (bounds.x * scale).floor().clamp(0.0, c.size.0 as f32) as u32;
+    let top = (bounds.y * scale).floor().clamp(0.0, c.size.1 as f32) as u32;
+    let right = ((bounds.x + bounds.w) * scale)
+        .ceil()
+        .clamp(0.0, c.size.0 as f32) as u32;
+    let bottom = ((bounds.y + bounds.h) * scale)
+        .ceil()
+        .clamp(0.0, c.size.1 as f32) as u32;
+    if left >= right || top >= bottom {
+        return;
+    }
+    let size = (right - left, bottom - top);
+    let origin = (left as f32 / scale, top as f32 / scale);
+    let mut pixels = vec![0; size.0 as usize * size.1 as usize * 4];
+    {
+        let mut layer = Canvas::new(&mut pixels, size, c.painter);
+        layer.clip = Rect::new(c.clip.x - origin.0, c.clip.y - origin.1, c.clip.w, c.clip.h);
+        for &(rect, radius, color) in shapes {
+            layer.rect(
+                Rect::new(rect.x - origin.0, rect.y - origin.1, rect.w, rect.h),
+                radius,
+                color,
+                1.0,
+            );
+        }
+    }
+    for y in 0..size.1 {
+        for x in 0..size.0 {
+            let source = ((y * size.0 + x) * 4) as usize;
+            let destination = (((top + y) * c.size.0 + left + x) * 4) as usize;
+            let inverse = 1.0 - pixels[source + 3] as f32 / 255.0 * c.opacity;
+            for channel in 0..4 {
+                // The layer already contains premultiplied channels. Scale
+                // them once, without multiplying them by alpha a second time.
+                let value = pixels[source + channel] as f32 * c.opacity
+                    + c.pixels[destination + channel] as f32 * inverse;
+                c.pixels[destination + channel] = (f64::from(value) + 0.5) as u8;
+            }
+        }
+    }
+}
+
 /// Rounded card with a one-logical-pixel inset border (normally radius 14).
 #[allow(dead_code)] // Shared primitives are adopted by the window rewrites.
 pub(crate) fn card(c: &mut Canvas<'_>, rect: Rect, radius: f32, fill: [u8; 3], border: [u8; 3]) {
@@ -420,15 +475,16 @@ pub(crate) fn card(c: &mut Canvas<'_>, rect: Rect, radius: f32, fill: [u8; 3], b
         return;
     }
     let radius = radius.clamp(0.0, rect.w.min(rect.h) * 0.5);
-    c.rect(rect, radius, border, 1.0);
-    if rect.w > 2.0 && rect.h > 2.0 {
-        c.rect(
+    let shapes = [
+        (rect, radius, border),
+        (
             Rect::new(rect.x + 1.0, rect.y + 1.0, rect.w - 2.0, rect.h - 2.0),
             (radius - 1.0).max(0.0),
             fill,
-            1.0,
-        );
-    }
+        ),
+    ];
+    let count = if rect.w > 2.0 && rect.h > 2.0 { 2 } else { 1 };
+    composite_rects(c, &shapes[..count]);
 }
 
 #[allow(dead_code)]
@@ -496,26 +552,29 @@ pub(crate) fn switch(c: &mut Canvas<'_>, rect: Rect, on: bool, accent: [u8; 3]) 
         36.0,
         20.0,
     );
-    c.rect(
-        track,
-        10.0,
-        if on {
-            accent
-        } else {
-            crate::theme::BORDER_STRONG
-        },
-        1.0,
-    );
-    c.rect(
-        Rect::new(
-            track.x + if on { 19.0 } else { 3.0 },
-            track.y + 3.0,
-            14.0,
-            14.0,
-        ),
-        7.0,
-        crate::theme::TEXT,
-        1.0,
+    composite_rects(
+        c,
+        &[
+            (
+                track,
+                10.0,
+                if on {
+                    accent
+                } else {
+                    crate::theme::BORDER_STRONG
+                },
+            ),
+            (
+                Rect::new(
+                    track.x + if on { 19.0 } else { 3.0 },
+                    track.y + 3.0,
+                    14.0,
+                    14.0,
+                ),
+                7.0,
+                crate::theme::TEXT,
+            ),
+        ],
     );
     c.clip = old_clip;
 }
@@ -1362,6 +1421,82 @@ mod tests {
                     "ink outside bounds at ({x}, {y}), scale {scale}"
                 );
                 assert!(pixel[..3].iter().all(|channel| *channel <= pixel[3]));
+            }
+        }
+    }
+
+    #[test]
+    fn card_applies_opacity_once_over_transparent_and_translucent_pixels() {
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            for (background, expected) in [
+                ([0, 0, 0, 0], [11, 12, 14, 128]),
+                ([20, 40, 60, 100], [21, 32, 44, 178]),
+            ] {
+                let (pixels, size) = raster(scale, |c| {
+                    for pixel in c.pixels.as_chunks_mut::<4>().0 {
+                        pixel.copy_from_slice(&background);
+                    }
+                    c.opacity = 0.5;
+                    card(
+                        c,
+                        Rect::new(12.0, 12.0, 100.0, 60.0),
+                        14.0,
+                        crate::theme::SURFACE,
+                        crate::theme::BORDER,
+                    );
+                });
+                assert_eq!(
+                    pixel_at(&pixels, size, scale, 60.0, 40.0),
+                    expected,
+                    "card interior at {scale}x, background {background:?}"
+                );
+                assert_eq!(
+                    pixel_at(&pixels, size, scale, 60.0, 12.0),
+                    [
+                        21 + background[0] / 2,
+                        23 + background[1] / 2,
+                        27 + background[2] / 2,
+                        expected[3]
+                    ]
+                );
+                assert_eq!(pixel_at(&pixels, size, scale, 0.0, 0.0), background);
+            }
+        }
+    }
+
+    #[test]
+    fn switch_applies_opacity_once_to_knob_and_track() {
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            for on in [false, true] {
+                for (background, expected_knob) in [
+                    ([0, 0, 0, 0], [124, 124, 124, 128]),
+                    ([20, 40, 60, 100], [134, 144, 154, 178]),
+                ] {
+                    let (pixels, size) = raster(scale, |c| {
+                        for pixel in c.pixels.as_chunks_mut::<4>().0 {
+                            pixel.copy_from_slice(&background);
+                        }
+                        c.opacity = 0.5;
+                        switch(c, Rect::new(12.0, 12.0, 36.0, 20.0), on, crate::theme::ICE);
+                    });
+                    let knob_x = if on { 38.0 } else { 22.0 };
+                    assert_eq!(
+                        pixel_at(&pixels, size, scale, knob_x, 22.0),
+                        expected_knob,
+                        "knob at {scale}x, on {on}, background {background:?}"
+                    );
+                    let track = if on { [123, 100, 85] } else { [30, 33, 38] };
+                    assert_eq!(
+                        pixel_at(&pixels, size, scale, 30.0, 14.0),
+                        [
+                            track[0] + background[0] / 2,
+                            track[1] + background[1] / 2,
+                            track[2] + background[2] / 2,
+                            expected_knob[3]
+                        ]
+                    );
+                    assert_eq!(pixel_at(&pixels, size, scale, 0.0, 0.0), background);
+                }
             }
         }
     }
