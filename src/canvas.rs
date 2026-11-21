@@ -2,9 +2,7 @@ use crate::render::blend_pixel;
 use crate::text::{Mask, TextLayer};
 use std::collections::HashMap;
 
-pub(crate) const WHITE: [u8; 3] = [248, 248, 248];
-pub(crate) const MUTED: [u8; 3] = [164, 164, 168];
-pub(crate) const DIM: [u8; 3] = [112, 112, 118];
+pub(crate) use crate::theme::{DIM, MUTED, TEXT as WHITE};
 
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct Rect {

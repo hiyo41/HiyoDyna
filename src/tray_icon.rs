@@ -134,10 +134,10 @@ pub(crate) fn render_tray_pixels(size: u32, accent: [u8; 3]) -> Vec<u8> {
             let distance = rounded_rect_distance(px, py, state, center);
             let coverage = (0.5 - distance).clamp(0.0, 1.0);
             if coverage > 0.0 {
-                over(&mut pixel, [22, 21, 23], coverage);
+                over(&mut pixel, crate::theme::SURFACE, coverage);
                 let rim = (1.0 - (distance + 0.45).abs() / 0.6).clamp(0.0, 1.0);
                 if rim > 0.0 {
-                    over(&mut pixel, [255, 255, 255], rim * 0.75);
+                    over(&mut pixel, crate::theme::TEXT, rim * 0.75);
                 }
             }
             let dot = (dot_radius + 0.5 - (px - center.0).hypot(py - center.1)).clamp(0.0, 1.0);
@@ -175,20 +175,22 @@ mod tests {
 
     #[test]
     fn creates_an_icon_handle() {
-        assert!(super::TrayIcon::create(32, [255, 199, 143]).is_some());
+        assert!(super::TrayIcon::create(32, crate::theme::ICE).is_some());
     }
 
     #[test]
     fn tray_pixels_have_an_opaque_center_and_transparent_corner() {
-        let pixels = render_tray_pixels(32, [255, 199, 143]);
-        assert_eq!(pixels[(16 * 32 + 16) * 4 + 3], 255);
+        let pixels = render_tray_pixels(32, crate::theme::ICE);
+        let center = (16 * 32 + 16) * 4;
+        assert_eq!(&pixels[center..center + 4], &[245, 200, 169, 255]);
+        let capsule = (16 * 32 + 8) * 4;
+        assert_eq!(&pixels[capsule..capsule + 4], &[22, 24, 28, 255]);
         assert_eq!(pixels[3], 0);
-        assert!(pixels.chunks(4).any(|pixel| pixel[..3] == [255, 199, 143]));
     }
 
     #[test]
     fn tray_pixels_scale_down_for_small_icons() {
-        let pixels = render_tray_pixels(16, [255, 199, 143]);
+        let pixels = render_tray_pixels(16, crate::theme::ICE);
         assert_eq!(pixels.len(), 16 * 16 * 4);
         assert_eq!(pixels[(8 * 16 + 8) * 4 + 3], 255);
         assert_eq!(pixels[3], 0);

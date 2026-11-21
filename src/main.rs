@@ -48,6 +48,7 @@ mod settings;
 mod sha256;
 #[cfg(any(windows, test))]
 mod text;
+mod theme;
 #[cfg(any(windows, test))]
 mod tray;
 #[cfg(any(windows, test))]

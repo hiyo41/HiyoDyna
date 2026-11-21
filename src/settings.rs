@@ -350,9 +350,9 @@ fn default_update_channel() -> UpdateChannel {
 impl AccentPreset {
     pub fn bgra(self) -> [u8; 3] {
         match self {
-            Self::Ice => [255, 199, 143],
-            Self::Amber => [120, 196, 255],
-            Self::Mint => [200, 240, 150],
+            Self::Ice => crate::theme::ICE,
+            Self::Amber => crate::theme::AMBER,
+            Self::Mint => crate::theme::MINT,
         }
     }
 
@@ -629,8 +629,8 @@ mod tests {
 
     #[test]
     fn accent_presets_map_to_bgra() {
-        assert_eq!(AccentPreset::Ice.bgra(), [255, 199, 143]);
-        assert_eq!(AccentPreset::Amber.bgra(), [120, 196, 255]);
-        assert_eq!(AccentPreset::Mint.bgra(), [200, 240, 150]);
+        assert_eq!(AccentPreset::Ice.bgra(), [245, 200, 169]);
+        assert_eq!(AccentPreset::Amber.bgra(), [168, 201, 246]);
+        assert_eq!(AccentPreset::Mint.bgra(), [200, 232, 167]);
     }
 }

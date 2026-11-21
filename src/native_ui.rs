@@ -1,7 +1,6 @@
 use crate::canvas::{Canvas, DIM, MUTED, Rect, WHITE};
 
-pub(crate) const BACKGROUND: [u8; 3] = [8, 8, 8];
-pub(crate) const SURFACE: [u8; 3] = [25, 25, 25];
+pub(crate) use crate::theme::{BG as BACKGROUND, SURFACE};
 
 /// Bounded, elapsed-time scrolling. Input changes the target; the frame timer
 /// advances the viewport, so bursts of wheel messages share the same repaint.
