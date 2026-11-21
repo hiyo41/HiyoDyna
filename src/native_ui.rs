@@ -413,6 +413,158 @@ pub(crate) unsafe fn style_window(hwnd: windows_sys::Win32::Foundation::HWND) {
     }
 }
 
+/// Rounded card with a one-logical-pixel inset border (normally radius 14).
+#[allow(dead_code)] // Shared primitives are adopted by the window rewrites.
+pub(crate) fn card(c: &mut Canvas<'_>, rect: Rect, radius: f32, fill: [u8; 3], border: [u8; 3]) {
+    if rect.w <= 0.0 || rect.h <= 0.0 {
+        return;
+    }
+    let radius = radius.clamp(0.0, rect.w.min(rect.h) * 0.5);
+    c.rect(rect, radius, border, 1.0);
+    if rect.w > 2.0 && rect.h > 2.0 {
+        c.rect(
+            Rect::new(rect.x + 1.0, rect.y + 1.0, rect.w - 2.0, rect.h - 2.0),
+            (radius - 1.0).max(0.0),
+            fill,
+            1.0,
+        );
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) fn section_header(
+    c: &mut Canvas<'_>,
+    rect: Rect,
+    title: &str,
+    detail: &str,
+    text_scale: f32,
+) {
+    if rect.w <= 0.0 || rect.h <= 0.0 || text_scale <= 0.0 {
+        return;
+    }
+    let old_clip = c.clip;
+    c.clip = old_clip.intersect(rect);
+    let title_height = (22.0 * text_scale).min(rect.h);
+    c.ellipsis(
+        title,
+        Rect::new(rect.x, rect.y, rect.w, title_height),
+        14.0 * text_scale,
+        true,
+        crate::theme::TEXT,
+    );
+    let detail_y = rect.y + title_height + 4.0 * text_scale;
+    if detail_y < rect.y + rect.h {
+        c.ellipsis(
+            detail,
+            Rect::new(rect.x, detail_y, rect.w, rect.y + rect.h - detail_y),
+            11.0 * text_scale,
+            false,
+            crate::theme::MUTED,
+        );
+    }
+    c.clip = old_clip;
+}
+
+#[allow(dead_code)]
+pub(crate) fn chip(c: &mut Canvas<'_>, rect: Rect, label: &str, tint: [u8; 3], text_scale: f32) {
+    if rect.w <= 0.0 || rect.h <= 0.0 {
+        return;
+    }
+    c.rect(rect, 999.0_f32.min(rect.w.min(rect.h) * 0.5), tint, 0.1);
+    if rect.w <= 16.0 || text_scale <= 0.0 {
+        return;
+    }
+    let available = Rect::new(rect.x + 8.0, rect.y, rect.w - 16.0, rect.h);
+    let old_clip = c.clip;
+    c.clip = old_clip.intersect(available);
+    let size = 11.0 * text_scale;
+    c.ellipsis(label, available, size, false, tint);
+    c.clip = old_clip;
+}
+
+/// A 36x20 logical-pixel track, centered in the supplied control rectangle.
+#[allow(dead_code)]
+pub(crate) fn switch(c: &mut Canvas<'_>, rect: Rect, on: bool, accent: [u8; 3]) {
+    if rect.w <= 0.0 || rect.h <= 0.0 {
+        return;
+    }
+    let old_clip = c.clip;
+    c.clip = old_clip.intersect(rect);
+    let track = Rect::new(
+        rect.x + (rect.w - 36.0) * 0.5,
+        rect.y + (rect.h - 20.0) * 0.5,
+        36.0,
+        20.0,
+    );
+    c.rect(
+        track,
+        10.0,
+        if on {
+            accent
+        } else {
+            crate::theme::BORDER_STRONG
+        },
+        1.0,
+    );
+    c.rect(
+        Rect::new(
+            track.x + if on { 19.0 } else { 3.0 },
+            track.y + 3.0,
+            14.0,
+            14.0,
+        ),
+        7.0,
+        crate::theme::TEXT,
+        1.0,
+    );
+    c.clip = old_clip;
+}
+
+/// An inset 1.5-pixel rounded stroke (normally radius 10), preserving its interior.
+#[allow(dead_code)]
+pub(crate) fn focus_ring(c: &mut Canvas<'_>, rect: Rect, radius: f32, accent: [u8; 3]) {
+    if rect.w <= 0.0 || rect.h <= 0.0 || c.opacity <= 0.0 {
+        return;
+    }
+    // Canvas has filled rounded rectangles only. Subtract the inner coverage
+    // before blending once so translucent surfaces keep their original pixels.
+    let scale = c.painter.scale;
+    let radius = radius.clamp(0.0, rect.w.min(rect.h) * 0.5);
+    let bounds = rect.intersect(c.clip);
+    let left = (bounds.x * scale).floor().max(0.0) as u32;
+    let top = (bounds.y * scale).floor().max(0.0) as u32;
+    let right = ((bounds.x + bounds.w) * scale)
+        .ceil()
+        .clamp(0.0, c.size.0 as f32) as u32;
+    let bottom = ((bounds.y + bounds.h) * scale)
+        .ceil()
+        .clamp(0.0, c.size.1 as f32) as u32;
+    let inset = 1.5_f32.min(rect.w.min(rect.h) * 0.5);
+    for y in top..bottom {
+        for x in left..right {
+            let px = (x as f32 + 0.5) / scale - rect.x - rect.w * 0.5;
+            let py = (y as f32 + 0.5) / scale - rect.y - rect.h * 0.5;
+            let coverage = |inset: f32| {
+                let r = (radius - inset).max(0.0);
+                let dx = px.abs() - rect.w * 0.5 + inset + r;
+                let dy = py.abs() - rect.h * 0.5 + inset + r;
+                let distance = dx.max(0.0).hypot(dy.max(0.0)) + dx.max(dy).min(0.0) - r;
+                (0.5 - distance * scale).clamp(0.0, 1.0)
+            };
+            let inner = if rect.w > inset * 2.0 && rect.h > inset * 2.0 {
+                coverage(inset)
+            } else {
+                0.0
+            };
+            let alpha = (coverage(0.0) - inner).max(0.0) * c.opacity;
+            if alpha > 0.0 {
+                let index = ((y * c.size.0 + x) * 4) as usize;
+                crate::render::blend_pixel(&mut c.pixels[index..index + 4], accent, alpha);
+            }
+        }
+    }
+}
+
 pub(crate) struct ButtonStyle {
     pub text_scale: f32,
     pub accent: [u8; 3],
@@ -1165,6 +1317,205 @@ pub(crate) use notices::{
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn raster(scale: f32, draw: impl FnOnce(&mut Canvas<'_>)) -> (Vec<u8>, (u32, u32)) {
+        let size = ((160.0 * scale) as u32, (100.0 * scale) as u32);
+        let mut pixels = vec![0; size.0 as usize * size.1 as usize * 4];
+        let mut painter = crate::canvas::Painter::new(scale).unwrap();
+        draw(&mut Canvas::new(&mut pixels, size, &mut painter));
+        (pixels, size)
+    }
+
+    fn pixel_at(pixels: &[u8], size: (u32, u32), scale: f32, x: f32, y: f32) -> &[u8] {
+        let index = (((y * scale) as u32 * size.0 + (x * scale) as u32) * 4) as usize;
+        &pixels[index..index + 4]
+    }
+
+    fn assert_ink_inside(pixels: &[u8], size: (u32, u32), scale: f32, rect: Rect) {
+        assert!(pixels.as_chunks::<4>().0.iter().any(|p| p[3] != 0));
+        for (index, pixel) in pixels.as_chunks::<4>().0.iter().enumerate() {
+            if pixel[3] != 0 {
+                let x = (index as u32 % size.0) as f32 / scale;
+                let y = (index as u32 / size.0) as f32 / scale;
+                assert!(
+                    rect.contains(x, y),
+                    "ink outside bounds at ({x}, {y}), scale {scale}"
+                );
+                assert!(pixel[..3].iter().all(|channel| *channel <= pixel[3]));
+            }
+        }
+    }
+
+    #[test]
+    fn card_keeps_fill_and_border_inside_rounded_bounds() {
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let rect = Rect::new(12.0, 12.0, 100.0, 60.0);
+            let (pixels, size) = raster(scale, |c| {
+                card(c, rect, 14.0, crate::theme::SURFACE, crate::theme::BORDER);
+            });
+            assert_ink_inside(&pixels, size, scale, rect);
+            assert_eq!(
+                pixel_at(&pixels, size, scale, 60.0, 40.0),
+                &[22, 24, 28, 255]
+            );
+            assert_eq!(
+                pixel_at(&pixels, size, scale, 60.0, 12.0),
+                &[42, 46, 54, 255]
+            );
+            assert_eq!(pixel_at(&pixels, size, scale, 12.0, 12.0), &[0; 4]);
+        }
+    }
+
+    #[test]
+    fn chip_label_respects_eight_pixel_padding_and_uses_an_ellipsis() {
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let rect = Rect::new(12.0, 12.0, 72.0, 28.0);
+            let (label, size) = raster(scale, |c| {
+                chip(c, rect, "WWWWWWWWWW", crate::theme::ICE, 1.0)
+            });
+            let (blank, _) = raster(scale, |c| chip(c, rect, "", crate::theme::ICE, 1.0));
+            let mut ink = false;
+            for (index, (a, b)) in label
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .zip(blank.as_chunks::<4>().0)
+                .enumerate()
+            {
+                if a != b {
+                    ink = true;
+                    let x = (index as u32 % size.0) as f32 / scale;
+                    assert!((20.0..76.0).contains(&x), "chip padding lost at {scale}x");
+                }
+            }
+            assert!(ink);
+            assert_ink_inside(&label, size, scale, rect);
+            let (narrow, _) = raster(scale, |c| {
+                chip(
+                    c,
+                    Rect::new(12.0, 12.0, 28.0, 28.0),
+                    "WWWWWW",
+                    crate::theme::ICE,
+                    1.0,
+                )
+            });
+            let (ellipsis, _) = raster(scale, |c| {
+                chip(
+                    c,
+                    Rect::new(12.0, 12.0, 28.0, 28.0),
+                    "…",
+                    crate::theme::ICE,
+                    1.0,
+                )
+            });
+            assert_eq!(
+                narrow, ellipsis,
+                "narrow chip must show an ellipsis at {scale}x"
+            );
+            let (narrow_blank, _) = raster(scale, |c| {
+                chip(
+                    c,
+                    Rect::new(12.0, 12.0, 28.0, 28.0),
+                    "",
+                    crate::theme::ICE,
+                    1.0,
+                )
+            });
+            assert!(narrow != narrow_blank, "ellipsis must remain visible");
+            assert_eq!(pixel_at(&blank, size, scale, 40.0, 24.0), &[25, 20, 17, 26]);
+        }
+    }
+
+    #[test]
+    fn switch_changes_track_color_and_moves_its_fourteen_pixel_knob() {
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let rect = Rect::new(12.0, 12.0, 36.0, 20.0);
+            let (on, size) = raster(scale, |c| switch(c, rect, true, crate::theme::ICE));
+            let (off, _) = raster(scale, |c| switch(c, rect, false, crate::theme::ICE));
+            assert_ink_inside(&on, size, scale, rect);
+            assert_ink_inside(&off, size, scale, rect);
+            assert_eq!(
+                pixel_at(&on, size, scale, 30.0, 14.0),
+                &[245, 200, 169, 255]
+            );
+            assert_eq!(pixel_at(&off, size, scale, 30.0, 14.0), &[60, 66, 76, 255]);
+            assert_eq!(
+                pixel_at(&off, size, scale, 22.0, 22.0),
+                &[248, 248, 248, 255]
+            );
+            assert_eq!(
+                pixel_at(&on, size, scale, 38.0, 22.0),
+                &[248, 248, 248, 255]
+            );
+            assert_ne!(
+                pixel_at(&on, size, scale, 22.0, 22.0),
+                pixel_at(&off, size, scale, 22.0, 22.0)
+            );
+        }
+    }
+
+    #[test]
+    fn focus_ring_preserves_interior_and_draws_all_four_edges() {
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let rect = Rect::new(12.0, 12.0, 100.0, 60.0);
+            let (pixels, size) = raster(scale, |c| focus_ring(c, rect, 10.0, crate::theme::ICE));
+            assert_ink_inside(&pixels, size, scale, rect);
+            for (x, y) in [(60.0, 12.0), (60.0, 71.0), (12.0, 40.0), (111.0, 40.0)] {
+                assert!(
+                    pixel_at(&pixels, size, scale, x, y)[3] > 0,
+                    "missing edge at {scale}x"
+                );
+            }
+            assert_eq!(pixel_at(&pixels, size, scale, 60.0, 40.0), &[0; 4]);
+            assert_eq!(pixel_at(&pixels, size, scale, 12.0, 12.0), &[0; 4]);
+            assert!(
+                pixels
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .any(|p| p[3] > 0 && p[3] < 255)
+            );
+            let (over_fill, _) = raster(scale, |c| {
+                c.rect(rect, 0.0, crate::theme::SURFACE, 1.0);
+                focus_ring(c, rect, 10.0, crate::theme::ICE);
+            });
+            assert_eq!(
+                pixel_at(&over_fill, size, scale, 60.0, 40.0),
+                &[22, 24, 28, 255]
+            );
+        }
+    }
+
+    #[test]
+    fn section_header_clips_both_lines_and_truncates_to_ellipsis() {
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let rect = Rect::new(12.0, 12.0, 14.0, 44.0);
+            let (long, size) = raster(scale, |c| {
+                section_header(c, rect, "WWWWWWWW", "WWWWWWWW", 1.0)
+            });
+            let (ellipsis, _) = raster(scale, |c| section_header(c, rect, "…", "…", 1.0));
+            assert_eq!(long, ellipsis, "both lines must truncate at {scale}x");
+            assert_ink_inside(&long, size, scale, rect);
+            for (top, bottom) in [(12.0, 34.0), (38.0, 56.0)] {
+                assert!(
+                    long.as_chunks::<4>()
+                        .0
+                        .iter()
+                        .enumerate()
+                        .any(|(index, pixel)| {
+                            let y = (index as u32 / size.0) as f32 / scale;
+                            pixel[3] != 0 && (top..bottom).contains(&y)
+                        }),
+                    "each header line must remain visible at {scale}x"
+                );
+            }
+            let shallow = Rect::new(12.0, 12.0, 100.0, 8.0);
+            let (pixels, size) = raster(scale, |c| {
+                section_header(c, shallow, "Tall glyphs", "Detail", 2.0)
+            });
+            assert_ink_inside(&pixels, size, scale, shallow);
+        }
+    }
 
     #[test]
     fn surface_reuses_storage_and_zeroes_resized_pixels() {
