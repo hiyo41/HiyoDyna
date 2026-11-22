@@ -6,6 +6,8 @@
 
 Một overlay kiểu Dynamic Island viết bằng Rust native cho Windows. Bản hiện tại cung cấp capsule đồng hồ trực tiếp, mở rộng khi rê chuột; sẽ bổ sung thêm nhiều tính năng hệ thống.
 
+Website: [hiyo41.github.io/HiyoDyna](https://hiyo41.github.io/HiyoDyna/)
+
 ## Tính năng hiện có
 
 - Capsule mở rộng khi rê chuột và thu lại sau một khoảng ngắn với hiệu ứng lò xo
@@ -28,6 +30,16 @@ Một overlay kiểu Dynamic Island viết bằng Rust native cho Windows. Bản
 
 ## Cài đặt
 
+### Cài đặt từ bản phát hành
+
+1. Tải `HiyoDyna.exe` từ [trang Releases](https://github.com/hiyo41/HiyoDyna/releases).
+2. Chuyển nó vào một thư mục cố định.
+3. Chạy `HiyoDyna.exe`.
+
+Không cần installer hay quyền admin. Chỉ hỗ trợ Windows 10/11 x64. Cài đặt nằm ở `%APPDATA%\HiyoDyna\settings.ini`.
+
+### Cài đặt từ mã nguồn
+
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup.ps1
 ```
@@ -48,6 +60,12 @@ HiyoDyna tự cập nhật từ GitHub. App kiểm tra lúc khởi động và m
 Bộ cập nhật chạy trong HiyoDyna. Chỉ một tiến trình phụ ngắn hạn được tạo khi thay executable; không có watcher thường trú và không có shortcut Startup cho việc cập nhật.
 
 ## Gỡ cài đặt
+
+### Gỡ bản phát hành
+
+Tắt Start with Windows trong tray, thoát HiyoDyna và xoá `HiyoDyna.exe`. Xoá luôn `%APPDATA%\HiyoDyna` nếu muốn xoá cài đặt.
+
+### Gỡ bản cài từ mã nguồn
 
 Dùng **Settings > Apps** hoặc chạy:
 
@@ -83,7 +101,7 @@ Tệp thực thi được ghi vào `target\release\hiyodyna.exe`.
 
 ## Phát hành
 
-Tải bản dựng từ [trang Releases](https://github.com/hiyo41/HiyoDyna/releases). Mỗi bản phát hành có một file zip gồm executable, hai bản README, giấy phép và giấy phép font Inter, cùng executable thô và SHA-256 cho bộ cập nhật trong app.
+Tải bản dựng từ [trang Releases](https://github.com/hiyo41/HiyoDyna/releases). Mỗi bản phát hành có executable thô và SHA-256 cho bộ cập nhật trong app, cùng một file zip gồm executable, hai bản README, giấy phép và giấy phép font Inter.
 
 Bản pre-release là bản thử nghiệm từ `main` và cấp cho kênh Build. Bản chính thức cấp cho kênh Stable và có changelog đầy đủ.
 

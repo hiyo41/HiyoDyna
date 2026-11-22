@@ -1,0 +1,81 @@
+---
+import '../styles/global.css';
+import mediumFont from '../assets/fonts/Inter-Medium.woff2?url';
+import displayFont from '../assets/fonts/InterDisplay-SemiBold.woff2?url';
+
+interface Props {
+  title?: string;
+  description?: string;
+  noindex?: boolean;
+}
+
+const {
+  title = 'HiyoDyna — A Dynamic Island-style clock for Windows',
+  description = 'A native clock capsule for the top of your screen. Hover to expand. Under 2 MB, no webview, no Electron.',
+  noindex = false,
+} = Astro.props;
+
+const rawBase = import.meta.env.BASE_URL;
+const base = rawBase.endsWith('/') ? rawBase : `${rawBase}/`;
+const canonical = new URL(Astro.url.pathname, Astro.site);
+const ogImage = new URL(`${base}og.png`, Astro.site).toString();
+
+const jsonLd = {
+  '@context': 'https://schema.org',
+  '@type': 'SoftwareApplication',
+  name: 'HiyoDyna',
+  description,
+  applicationCategory: 'UtilitiesApplication',
+  operatingSystem: 'Windows 10, Windows 11',
+  url: canonical.toString(),
+  downloadUrl: 'https://github.com/hiyo41/HiyoDyna/releases',
+  license: 'https://www.gnu.org/licenses/agpl-3.0.html',
+  offers: {
+    '@type': 'Offer',
+    price: '0',
+    priceCurrency: 'USD',
+  },
+};
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="generator" content={Astro.generator} />
+    <meta name="theme-color" content="#0A0B0C" />
+    <meta name="color-scheme" content="dark" />
+
+    <title>{title}</title>
+    <meta name="description" content={description} />
+    <link rel="canonical" href={canonical} />
+    {noindex && <meta name="robots" content="noindex" />}
+
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="HiyoDyna" />
+    <meta property="og:locale" content="en_US" />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:url" content={canonical} />
+    <meta property="og:image" content={ogImage} />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content={title} />
+    <meta name="twitter:description" content={description} />
+    <meta name="twitter:image" content={ogImage} />
+
+    <link rel="icon" type="image/svg+xml" href={`${base}favicon.svg`} />
+    <link rel="preload" href={mediumFont} as="font" type="font/woff2" crossorigin />
+    <link rel="preload" href={displayFont} as="font" type="font/woff2" crossorigin />
+
+    <script type="application/ld+json" is:inline set:html={JSON.stringify(jsonLd)}></script>
+
+    <slot name="head" />
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <slot />
+  </body>
+</html>

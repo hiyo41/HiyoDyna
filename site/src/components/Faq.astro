@@ -1,0 +1,119 @@
+---
+const faqs = [
+  {
+    question: 'Is this an Apple product?',
+    answer:
+      'No. HiyoDyna is an independent open-source project for Windows. It is not affiliated with or endorsed by Apple. “Dynamic Island” is used descriptively.',
+  },
+  {
+    question: 'Does it use Electron or a webview?',
+    answer:
+      'No. The app is Rust with Win32 and GDI software rendering. It does not load HTML, run JavaScript, or ship a browser engine.',
+  },
+  {
+    question: 'Does it work on Windows 10?',
+    answer:
+      'Yes. HiyoDyna supports Windows 10 and Windows 11 on x64. The download is a portable executable, so there is no installer and no administrator prompt.',
+  },
+  {
+    question: 'Which monitor does it use?',
+    answer:
+      'It pins to the primary display, centered at the top edge. Position presets can add an 8 or 16 px gap below the edge.',
+  },
+  {
+    question: 'How do updates work?',
+    answer:
+      'The app checks at startup and every 30 minutes. Build follows pre-releases from main; Stable follows official releases and uses the newest pre-release until the first official release. A portable build starts on Stable; a setup install starts on Build. Each download is verified with SHA-256 before it replaces the executable.',
+  },
+  {
+    question: 'How do I uninstall it?',
+    answer:
+      'Turn off Start with Windows in the tray, exit the app, and delete HiyoDyna.exe. Delete %APPDATA%\\HiyoDyna too if you want to remove your settings.',
+  },
+  {
+    question: 'Do I need Rust?',
+    answer:
+      'No for the release. Rust is only needed if you build from source with the setup script.',
+  },
+  {
+    question: 'Is it free?',
+    answer:
+      'Yes. The source is on GitHub under AGPL-3.0. The bundled Inter fonts are under the SIL Open Font License.',
+  },
+] as const;
+---
+
+<div class="faq-list">
+  {
+    faqs.map((faq) => (
+      <details class="faq">
+        <summary>{faq.question}</summary>
+        <p>{faq.answer}</p>
+      </details>
+    ))
+  }
+</div>
+
+<style>
+  .faq-list {
+    border-top: 1px solid var(--hairline);
+  }
+
+  .faq {
+    border-bottom: 1px solid var(--hairline);
+  }
+
+  .faq summary {
+    position: relative;
+    padding: 20px 40px 20px 0;
+    cursor: pointer;
+    font-family: var(--font-display);
+    font-size: 16px;
+    letter-spacing: -0.015em;
+    list-style: none;
+  }
+
+  .faq summary::-webkit-details-marker {
+    display: none;
+  }
+
+  .faq summary::after {
+    content: '';
+    position: absolute;
+    top: 50%;
+    right: 8px;
+    width: 10px;
+    height: 1px;
+    background: var(--text-muted);
+    transform: translateY(-50%);
+    transition: transform 180ms var(--ease-out);
+  }
+
+  .faq summary::before {
+    content: '';
+    position: absolute;
+    top: 50%;
+    right: 8px;
+    width: 10px;
+    height: 1px;
+    background: var(--text-muted);
+    transform: translateY(-50%) rotate(90deg);
+    transition: transform 180ms var(--ease-out);
+  }
+
+  .faq[open] summary::before {
+    transform: translateY(-50%) rotate(0deg);
+  }
+
+  .faq summary:hover {
+    color: #fff;
+  }
+
+  .faq p {
+    max-width: 34rem;
+    padding: 0 40px 22px 0;
+    font-size: 14px;
+    line-height: 1.65;
+    color: var(--text-secondary);
+  }
+</style>

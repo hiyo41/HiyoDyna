@@ -6,6 +6,8 @@
 
 A native Rust Dynamic Island-style overlay for Windows with a live clock, media controls, and synchronized lyrics.
 
+Website: [hiyo41.github.io/HiyoDyna](https://hiyo41.github.io/HiyoDyna/)
+
 ## Current features
 
 - Spring-animated capsule that expands on hover and collapses after a short delay
@@ -34,6 +36,16 @@ A native Rust Dynamic Island-style overlay for Windows with a live clock, media 
 
 ## Install
 
+### Install a release
+
+1. Download `HiyoDyna.exe` from the [Releases page](https://github.com/hiyo41/HiyoDyna/releases).
+2. Move it to a folder where it can stay.
+3. Run `HiyoDyna.exe`.
+
+No installer or admin rights. Windows 10/11 x64 only. Settings live in `%APPDATA%\HiyoDyna\settings.ini`.
+
+### Install from source
+
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup.ps1
 ```
@@ -54,6 +66,12 @@ HiyoDyna updates itself from GitHub. It checks at startup and every 30 minutes, 
 The updater runs inside HiyoDyna. It starts a short-lived helper only while replacing the executable; there is no resident watcher and no Startup shortcut for updates.
 
 ## Uninstall
+
+### Uninstall a release
+
+Turn off Start with Windows from the tray, exit HiyoDyna, and delete `HiyoDyna.exe`. Delete `%APPDATA%\HiyoDyna` as well to remove your settings.
+
+### Uninstall a source install
 
 Use **Settings > Apps** or run:
 
@@ -95,7 +113,7 @@ The executable is written to `target\release\hiyodyna.exe`.
 
 ## Releases
 
-Download builds from the [Releases page](https://github.com/hiyo41/HiyoDyna/releases). Each release includes a zip with the executable, both READMEs, and the license, plus the raw executable and its SHA-256 for the in-app updater.
+Download builds from the [Releases page](https://github.com/hiyo41/HiyoDyna/releases). Each release includes the raw executable and its SHA-256 for the in-app updater, plus a zip with the executable, both READMEs, and the license.
 
 Pre-releases are test builds from `main` and feed the Build channel. Official releases feed the Stable channel and include a full changelog.
 
