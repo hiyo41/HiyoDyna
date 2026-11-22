@@ -1970,8 +1970,17 @@ mod tests {
         player.browse = Some(3);
         raster_player(&mut player, &Settings::default(), 1.0);
         // Sample a scroll transition so glyphs intersect both fade boundaries.
+        // Pin the interpolation clock and last position: otherwise the draw path
+        // eases smooth_line toward the browse target using wall-clock time, and a
+        // slow CI frame shifts the sampled glyphs out of the edge band.
+        player.last_lyric_frame = Instant::now();
+        player.last_lyric_position = Some(5.0);
         player.smooth_line = 2.65;
         let pixels = raster_player(&mut player, &Settings::default(), 1.0);
+        assert!(
+            (player.smooth_line - 2.65).abs() < 0.01,
+            "sampled frame must keep the requested scroll position"
+        );
         let top = player.lyrics_top() as usize;
         let edge: Vec<_> = (top..top + 6)
             .flat_map(|y| (24..396).map(move |x| (y * 420 + x) * 4 + 3))
