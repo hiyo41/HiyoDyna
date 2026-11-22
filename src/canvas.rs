@@ -2,9 +2,7 @@ use crate::render::blend_pixel;
 use crate::text::{Mask, TextLayer};
 use std::collections::HashMap;
 
-pub(crate) const WHITE: [u8; 3] = [248, 248, 248];
-pub(crate) const MUTED: [u8; 3] = [164, 164, 168];
-pub(crate) const DIM: [u8; 3] = [112, 112, 118];
+pub(crate) use crate::theme::{DIM, MUTED, TEXT as WHITE};
 
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct Rect {
@@ -255,7 +253,12 @@ impl<'a> Canvas<'a> {
             );
         }
         self.rect(Rect::new(cx - 6.0, cy - 6.0, 12.0, 12.0), 6.0, color, 1.0);
-        self.rect(Rect::new(cx - 2.7, cy - 2.7, 5.4, 5.4), 2.7, [8, 8, 8], 1.0);
+        self.rect(
+            Rect::new(cx - 2.7, cy - 2.7, 5.4, 5.4),
+            2.7,
+            crate::theme::INVERSE,
+            1.0,
+        );
     }
     pub fn transport(&mut self, rect: Rect, kind: i32, playing: bool, color: [u8; 3]) {
         let cx = rect.x + rect.w * 0.5;
@@ -436,9 +439,11 @@ mod tests {
             let mut pixels = vec![0; size.0 as usize * size.1 as usize * 4];
             let mut painter = Painter::new(scale).unwrap();
             let mut c = Canvas::new(&mut pixels, size, &mut painter);
+            // Synthetic artwork varies every channel to exercise the sampling benchmark.
             let art = image::RgbaImage::from_fn(1024, 1024, |x, y| {
                 image::Rgba([x as u8, y as u8, (x ^ y) as u8, 255])
             });
+            // The fixed asymmetric fill fixture keeps benchmark work independent of theme changes.
             let rect = measure(
                 || c.rect(Rect::new(50.0, 10.0, 420.0, 500.0), 30.0, [30, 25, 20], 0.8),
                 30,
@@ -454,7 +459,7 @@ mod tests {
                         Rect::new(75.0, 300.0, 370.0, 40.0),
                         21.0,
                         true,
-                        [248; 3],
+                        crate::theme::TEXT,
                     )
                 },
                 100,
@@ -468,7 +473,7 @@ mod tests {
                         Rect::new(75.0, 300.0, 370.0, 40.0),
                         21.0,
                         true,
-                        [248; 3],
+                        crate::theme::TEXT,
                         0.1,
                     )
                 },
@@ -491,8 +496,8 @@ mod tests {
         let rect = Rect::new(0.0, 0.0, 300.0, 40.0);
         let short = "Maybe you can show me how to love ";
         let long = short.repeat(80);
-        let short_time = measure(|| c.text(short, rect, 21.0, true, [248; 3]), 200);
-        let long_time = measure(|| c.text(&long, rect, 21.0, true, [248; 3]), 200);
+        let short_time = measure(|| c.text(short, rect, 21.0, true, crate::theme::TEXT), 200);
+        let long_time = measure(|| c.text(&long, rect, 21.0, true, crate::theme::TEXT), 200);
         black_box(&c.pixels);
         println!("clipped text: short {short_time:?}, long {long_time:?}");
         assert!(
@@ -502,7 +507,19 @@ mod tests {
     }
 
     #[test]
+    fn gear_cutout_uses_the_shared_inverse_color() {
+        let mut painter = Painter::new(1.0).unwrap();
+        let mut pixels = vec![0; 32 * 32 * 4];
+        Canvas::new(&mut pixels, (32, 32), &mut painter)
+            .gear(Rect::new(1.0, 1.0, 30.0, 30.0), crate::theme::MUTED);
+        let center = (16 * 32 + 16) * 4;
+        assert_eq!(&pixels[center..center + 3], &crate::theme::INVERSE);
+        assert_eq!(pixels[center + 3], 255);
+    }
+
+    #[test]
     fn text_clipping_and_fill_preserve_cached_glyph_coverage() {
+        // Asymmetric fixture channels expose channel-order and premultiplication mistakes.
         for scale in [1.0, 1.25, 1.5, 2.0] {
             let mut painter = Painter::new(scale).unwrap();
             let size = (97, 61);
@@ -559,6 +576,7 @@ mod tests {
 
     #[test]
     fn rounded_primitives_preserve_antialiasing_and_premultiplied_alpha() {
+        // Asymmetric fixture channels keep scalar comparison independent of theme changes.
         for scale in [1.0, 1.25, 1.5, 2.0] {
             let mut painter = Painter::new(scale).unwrap();
             let size = (97, 61);
@@ -608,6 +626,7 @@ mod tests {
 
     #[test]
     fn solid_spans_match_per_pixel_blending_for_all_channel_values() {
+        // Exhaustive synthetic channel values validate blending, not application colors.
         let initial: Vec<u8> = (0..=255).flat_map(|channel| [channel; 4]).collect();
         for source in 0..=255 {
             for alpha in [
@@ -636,6 +655,7 @@ mod tests {
 
     #[test]
     fn large_translucent_fills_match_scalar_blending() {
+        // Black, white and asymmetric fixture colors cover blend rounding boundaries.
         let size = (256, 24);
         let mut painter = Painter::new(1.0).unwrap();
         let initial: Vec<u8> = (0..size.0 * size.1)
@@ -670,6 +690,7 @@ mod tests {
 
     #[test]
     fn transport_triangles_have_no_interior_seams_at_fractional_dpi() {
+        // Full-white fixture channels make any interior coverage seam observable.
         for scale in [1.0, 1.25, 1.5, 2.0] {
             let size = ((52.0 * scale) as u32, (48.0 * scale) as u32);
             let mut painter = Painter::new(scale).unwrap();
@@ -698,6 +719,7 @@ mod tests {
 
     #[test]
     fn artwork_preserves_sampling_alpha_and_fractional_clipping() {
+        // Synthetic RGBA artwork exercises independent channel and opacity sampling.
         let image = image::RgbaImage::from_fn(13, 9, |x, y| {
             image::Rgba([x as u8 * 17, y as u8 * 23, 91, ((x + y) * 11) as u8])
         });

@@ -14,6 +14,8 @@ mod clock;
 mod compact;
 mod compact_glow;
 #[cfg(windows)]
+mod dark_scrollbar;
+#[cfg(windows)]
 mod fullscreen;
 #[cfg(any(windows, test))]
 mod geometry;
@@ -48,6 +50,7 @@ mod settings;
 mod sha256;
 #[cfg(any(windows, test))]
 mod text;
+mod theme;
 #[cfg(any(windows, test))]
 mod tray;
 #[cfg(any(windows, test))]
@@ -65,6 +68,7 @@ fn main() {
         update::run_apply_helper();
         return;
     }
+    dark_scrollbar::initialize();
     if let Err(error) = window::run() {
         eprintln!("HiyoDyna could not start: {error}");
         native_ui::notice_formatted(

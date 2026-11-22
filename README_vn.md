@@ -15,6 +15,8 @@ Một overlay kiểu Dynamic Island viết bằng Rust native cho Windows. Bản
 - Win32 native + render phần mềm — không dùng webview, HTML hay JavaScript
 - Biểu tượng khay hệ thống và menu chuột phải cho Motion, Bounce, Shadow, Accent, Seconds, Position, Clock và Update
 - Bộ cập nhật trong app với kênh Build và Stable, xác minh SHA-256, kiểm tra lúc khởi động và mỗi 30 phút
+- Giao diện đen/xám/trắng thống nhất với màu nhấn pastel trên Island, các cửa sổ native và biểu tượng khay
+- Cửa sổ Cài đặt và Tìm lời bài hát native có thể đổi kích thước, cùng chuyển đổi trực tiếp giữa tiếng Anh và tiếng Việt
 - Tùy chọn khởi động cùng Windows, cùng các mục khởi động lại, mở thư mục cài đặt và giới thiệu
 - Cài đặt lưu tại `%APPDATA%\HiyoDyna\settings.ini`
 - Mặc định sát mép trên, căn giữa, không xuất hiện trên taskbar và không kích hoạt khi nhấp
@@ -62,6 +64,12 @@ cargo run --release
 ```
 
 Rê chuột lên capsule để mở bảng đồng hồ; di chuyển chuột ra ngoài, bảng thu lại sau một khoảng ngắn. Nhấp chuột trái không bật/tắt bảng. Nhấp chuột phải lên capsule hoặc biểu tượng khay để mở các preset Motion, Bounce, Shadow, Accent, Seconds, Position, Clock và Update; menu cũng có Restart, Open settings folder, About và Exit.
+
+Mở **Cài đặt** từ biểu tượng bánh răng trên Island mở rộng hoặc từ khay hệ thống. Cửa sổ dùng bố cục hai cột: thanh danh mục bên trái và các thẻ nội dung có thể cuộn, với phần đầu và chân cố định. Khi cửa sổ hẹp, thanh bên chuyển thành hàng danh mục ngang; chọn danh mục sẽ cuộn đến phần tương ứng. Có thể di chuyển, đổi kích thước, thu nhỏ và để cửa sổ mở khi dùng ứng dụng khác; thay đổi có hiệu lực ngay. Tab/Shift+Tab đưa từng điều khiển vào vùng nhìn thấy, Enter/Space kích hoạt, Page Up/Down cuộn và Escape đóng cửa sổ.
+
+Capsule thu gọn hiển thị lời có thời gian và tự điều chỉnh chiều rộng; khi không có thời gian phù hợp, nó hiển thị đồng hồ. Trước câu tiếp theo, lời sắp hát có màu dịu hơn, vẫn giữ biểu tượng nốt nhạc và quầng sáng lấy từ bìa. Trong ba giây cuối, lời và nốt nhạc dao động độ sáng nhẹ khi đang phát; tạm dừng sẽ dừng hiệu ứng, còn capsule vẫn giữ nguyên. Đồng hồ đếm ngược căn theo đường cơ sở của chữ chỉ xuất hiện khi thời gian chờ dài hơn ba giây.
+
+Chọn **Tìm lời bài hát** ở chân trình phát hoặc menu nhanh của Island để tìm bằng tên bài hát và nghệ sĩ có thể chỉnh sửa. Cửa sổ native có phần đầu hiển thị bài đang phát, thẻ tìm kiếm, các hàng kết quả có thể cuộn và chân cửa sổ cố định chứa trạng thái cùng nút thao tác. Kết quả có nhãn nhà cung cấp, thời lượng và nhãn thời gian: **Theo từ**, **Theo dòng** hoặc **Chưa rõ** trước khi tải. Các trạng thái ban đầu, đang tìm, đã chọn kết quả, trống, lỗi nhà cung cấp/mạng và không có phiên phát đích giúp làm rõ thao tác tiếp theo. Kết quả đã biết là không có thời gian được lọc bỏ; bản ghi tải về phải có lời đồng bộ theo thời gian hoặc được xác định là không lời mới được áp dụng. Chọn bản ghi rồi chọn **Dùng lời bài hát đã chọn**; cửa sổ đóng ngay khi lựa chọn được xếp hàng. Lựa chọn giữ hiệu lực đến khi đổi bài hoặc làm mới lời; đổi truy vấn hoặc bài hát sẽ hủy yêu cầu cũ. Tìm kiếm chạy nền, không chặn điều khiển phát nhạc. Lựa chọn thủ công chỉ áp dụng cho phiên phát hiện tại và không được lưu vào bộ nhớ đệm ghép lời tự động.
 
 Preset Position có thể thêm khoảng cách 8 hoặc 16 px dưới mép trên. Đồng hồ mặc định dùng 24 giờ và có thể chuyển sang 12 giờ trong menu.
 

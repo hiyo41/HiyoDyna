@@ -776,9 +776,17 @@ fn run_loop(hwnd: HWND) -> Result<ExitAction, String> {
                         animation.current.width * scale,
                     )?;
                     let draw_start = Instant::now();
-                    surface.draw(animation.current, scale, &settings, &clock, animation.hover);
-                    let present_start = Instant::now();
-                    surface.present(hwnd, position)?;
+                    // A Settings/Find lyrics scroll has the floor for its short
+                    // motion. Advance the island state but defer drawing so the
+                    // two surfaces do not compete for the same frame budget.
+                    let present_start = if crate::native_ui::scroll_animating() && moving {
+                        draw_start
+                    } else {
+                        surface.draw(animation.current, scale, &settings, &clock, animation.hover);
+                        let present_start = Instant::now();
+                        surface.present(hwnd, position)?;
+                        present_start
+                    };
                     if trace_frames {
                         trace_max_draw_ms = trace_max_draw_ms
                             .max(present_start.duration_since(draw_start).as_secs_f64() * 1000.0);
@@ -1120,6 +1128,10 @@ impl PageFade {
     fn moving(&self) -> bool {
         self.value != if self.music { 1.0 } else { 0.0 }
     }
+    fn snap_to_music(&mut self) {
+        self.value = 1.0;
+        self.music = true;
+    }
 }
 
 struct HoverEntry {
@@ -1394,18 +1406,28 @@ impl Surface {
         if (goal - self.visibility).abs() < 0.002 {
             self.visibility = goal;
         }
-        let candidate = if state.compact_content_alpha() > 0.0 {
-            self.player
-                .compact_lyric(now, settings.lyric_offset_ms)
-                .map(|(line, at)| (line.clone(), at))
-        } else {
-            None
-        };
+        let candidate = self
+            .player
+            .compact_lyric(now, settings.lyric_offset_ms)
+            .map(|(line, at)| (line.clone(), at));
+        // Content remains current while hidden. Only invalid or replaced media
+        // discards the presentation, so collapse never revives a stale line.
+        if candidate.is_none()
+            || !self
+                .compact
+                .matches(&self.player.snapshot.key, self.player.snapshot.generation)
+        {
+            self.compact = crate::compact::Presentation::default();
+            if let Some(fade) = &mut self.compact_fade {
+                fade.value = 0.0;
+                fade.music = false;
+            }
+        }
         let compact_lyric = candidate
             .as_ref()
             .filter(|_| self.player.music && settings.compact_lyrics);
         self.compact_active = compact_lyric.is_some();
-        if let Some((line, at)) = compact_lyric {
+        if let Some((line, at)) = &candidate {
             self.compact.update(
                 &self.player.snapshot.key,
                 self.player.snapshot.generation,
@@ -1420,14 +1442,10 @@ impl Surface {
             fade.value = if fade.music { 1.0 } else { 0.0 };
             fade
         });
-        // Invalid or replaced media must never reveal a cached lyric during a fade.
-        if candidate.is_none()
-            || !self
-                .compact
-                .matches(&self.player.snapshot.key, self.player.snapshot.generation)
-        {
-            fade.value = 0.0;
-            fade.music = false;
+        // Prime the destination while compact content is fully hidden, before
+        // the first compact frame of a collapse can reveal clock glyphs.
+        if compact_lyric.is_some() && state.compact_content_alpha() == 0.0 {
+            fade.snap_to_music();
         }
         let compact_mix = fade.advance(compact_lyric.is_some(), now);
         let length = self.size.0 as usize * self.size.1 as usize * 4;
@@ -1491,7 +1509,16 @@ impl Surface {
             (state.height - 16.0).max(0.0),
         );
         if compact_mix > 0.0 {
-            canvas.opacity = state.compact_content_alpha() * compact_mix;
+            // Countdown is hidden within the pulse window; only lyric text and
+            // the note receive this opacity. Background and glow are already drawn.
+            let pulse = compact_lyric.map_or(1.0, |(line, at)| {
+                crate::compact::wait_pulse(
+                    line.start - at,
+                    self.player.snapshot.playing,
+                    state.compact_content_alpha() > 0.0 && !self.fullscreen.hidden,
+                )
+            });
+            canvas.opacity = state.compact_content_alpha() * compact_mix * pulse;
             self.compact.draw(
                 &mut canvas,
                 left,
@@ -2541,6 +2568,225 @@ mod tests {
         );
     }
 
+    #[test]
+    fn collapse_keeps_lyrics_selected_from_the_first_compact_frame() {
+        use super::*;
+        for (scale, dt) in [1.0, 1.25, 1.5, 2.0]
+            .into_iter()
+            .flat_map(|scale| [1.0 / 30.0, 1.0 / 120.0].map(|dt| (scale, dt)))
+        {
+            let mut surface = compact_icon_test_surface(scale, true);
+            let settings = Settings::default();
+            let clock = compact_icon_test_clock();
+            let mut animation = Animation::new();
+            animation.current = ShapeState {
+                height: 500.0,
+                ..crate::animation::EXPANDED
+            };
+            animation.target = animation.current;
+            // Begin with the clock mix, as when lyrics arrive while expanded.
+            surface.compact_fade = Some(PageFade::new(Instant::now()));
+            surface.draw(animation.current, scale, &settings, &clock, 0.0);
+            animation.target = surface.compact_shape(&settings);
+            let mut compact_frames = 0;
+            let mut previous_baseline = None;
+            for frame in 0..120 {
+                animation.advance(dt);
+                surface.draw(animation.current, scale, &settings, &clock, 0.0);
+                if animation.current.compact_content_alpha() > 0.0 {
+                    compact_frames += 1;
+                    assert_eq!(
+                        surface.compact_fade.as_ref().unwrap().value,
+                        1.0,
+                        "clock leaked into compact lyrics at {scale}x, dt={dt}, frame {frame}"
+                    );
+                    let pixels = compact_test_pixels(&surface);
+                    if compact_frames == 1 || animation.current == animation.target {
+                        let different_clock = ClockSnapshot {
+                            hour: 3,
+                            minute: 7,
+                            second: 11,
+                            ..clock
+                        };
+                        surface.draw(animation.current, scale, &settings, &different_clock, 0.0);
+                        assert_eq!(
+                            pixels,
+                            compact_test_pixels(&surface),
+                            "clock glyphs must not affect a lyric frame at {scale}x, dt={dt}, frame {frame}"
+                        );
+                    }
+                    let left = (surface.size.0 as f32 / scale - animation.current.width) * 0.5;
+                    // The last occupied lyric row tracks the real raster baseline, not just shape height.
+                    let glyph_left = ((left + 36.0) * scale).ceil() as u32;
+                    let glyph_right =
+                        ((left + animation.current.width - 14.0) * scale).ceil() as u32;
+                    let glyph_bottom = ((animation.current.height - 8.0) * scale).ceil() as u32;
+                    let baseline = ((8.0 * scale) as u32..glyph_bottom).rev().find(|y| {
+                        (glyph_left..glyph_right).any(|x| {
+                            let index = ((y * surface.size.0 + x) * 4) as usize;
+                            pixels[index..index + 3]
+                                .iter()
+                                .zip(&surface.background[index..index + 3])
+                                .any(|(ink, background)| ink > background)
+                        })
+                    });
+                    if let Some(baseline) = baseline {
+                        if let Some(previous) = previous_baseline {
+                            assert!(
+                                baseline <= previous,
+                                "lyric baseline bobbed down at {scale}x, dt={dt}, frame {frame}: {previous} -> {baseline}"
+                            );
+                        }
+                        previous_baseline = Some(baseline);
+                    }
+                }
+                if animation.current == animation.target {
+                    break;
+                }
+            }
+            assert!(compact_frames > 0);
+            assert!(
+                previous_baseline.is_some(),
+                "lyrics must be rasterized at {scale}x"
+            );
+            assert_eq!(animation.current, animation.target);
+        }
+    }
+
+    #[test]
+    fn collapse_tracks_lyric_changes_while_compact_content_is_hidden() {
+        use super::*;
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let mut surface = compact_icon_test_surface(scale, true);
+            let settings = Settings::default();
+            let clock = compact_icon_test_clock();
+            surface.draw(crate::animation::EXPANDED, scale, &settings, &clock, 0.0);
+            assert!(
+                surface.compact.matches("compact-icon-fixture", 0),
+                "expanded frames must retain a current compact lyric presentation"
+            );
+            surface.player.snapshot.generation += 1;
+            surface.player.snapshot.lyrics =
+                crate::lyrics::parse_lrc("[00:00]Replacement lyric").map(std::sync::Arc::new);
+            surface.draw(crate::animation::EXPANDED, scale, &settings, &clock, 0.0);
+            assert!(surface.compact.matches("compact-icon-fixture", 1));
+            assert_eq!(surface.compact_fade.as_ref().unwrap().value, 1.0);
+            surface.player.snapshot.lyrics = None;
+            surface.draw(crate::animation::COMPACT, scale, &settings, &clock, 0.0);
+            assert!(!surface.compact_active);
+            assert_eq!(surface.compact_fade.as_ref().unwrap().value, 0.0);
+            assert!(!surface.compact.matches("compact-icon-fixture", 1));
+        }
+    }
+
+    #[test]
+    fn pulse_dims_only_compact_lyric_and_note_pixels() {
+        use super::*;
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let mut surface = compact_icon_test_surface(scale, true);
+            surface.player.snapshot.lyrics =
+                crate::lyrics::parse_lrc("[00:10]Upcoming lyric").map(std::sync::Arc::new);
+            // Freeze the sampled position so the native raster comparison is exact.
+            surface.player.snapshot.timeline.as_mut().unwrap().position = 7.8;
+            let settings = Settings::default();
+            let clock = compact_icon_test_clock();
+            let shape = surface.compact_shape(&settings);
+            surface.player.snapshot.playing = false;
+            surface.draw(shape, scale, &settings, &clock, 0.0);
+            let bright = compact_test_pixels(&surface);
+            surface.player.snapshot.playing = true;
+            surface.draw(shape, scale, &settings, &clock, 0.0);
+            let dim = compact_test_pixels(&surface);
+            surface.player.snapshot.timeline.as_mut().unwrap().position = 8.6;
+            surface.draw(shape, scale, &settings, &clock, 0.0);
+            assert_eq!(
+                bright,
+                compact_test_pixels(&surface),
+                "the full-brightness phase must restore the exact native frame at {scale}x"
+            );
+            let left = (surface.size.0 as f32 / scale - shape.width) * 0.5;
+            let mut note_changes = 0;
+            let mut lyric_changes = 0;
+            for (index, (a, b)) in bright
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .zip(dim.as_chunks::<4>().0)
+                .enumerate()
+            {
+                assert_eq!(a[3], b[3], "capsule alpha must stay unchanged at {scale}x");
+                if a == b {
+                    continue;
+                }
+                let x = (index as u32 % surface.size.0) as f32 / scale - left;
+                let y = (index as u32 / surface.size.0) as f32 / scale;
+                assert!(
+                    (9.0..=32.0).contains(&y) && (12.0..shape.width - 12.0).contains(&x),
+                    "pulse changed background outside lyric/note bounds at {scale}x: {x}, {y}"
+                );
+                assert!(
+                    b[..3]
+                        .iter()
+                        .zip(&a[..3])
+                        .all(|(dim, bright)| dim <= bright)
+                );
+                if x < 32.0 {
+                    note_changes += 1;
+                } else {
+                    lyric_changes += 1;
+                }
+            }
+            assert!(note_changes > 10, "the music note must pulse at {scale}x");
+            assert!(lyric_changes > 20, "the lyric text must pulse at {scale}x");
+            // A visible countdown and an already active lyric retain full alpha.
+            for position in [6.0, 10.0] {
+                surface.player.snapshot.timeline.as_mut().unwrap().position = position;
+                surface.player.snapshot.playing = false;
+                surface.draw(shape, scale, &settings, &clock, 0.0);
+                let paused = compact_test_pixels(&surface);
+                surface.player.snapshot.playing = true;
+                surface.draw(shape, scale, &settings, &clock, 0.0);
+                assert_eq!(
+                    paused,
+                    compact_test_pixels(&surface),
+                    "countdown and active lyric frames must keep full alpha at {scale}x"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pulse_wait_reuses_playback_frames_and_paused_wait_is_idle() {
+        use super::*;
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let mut surface = compact_icon_test_surface(scale, true);
+            surface.player.snapshot.lyrics =
+                crate::lyrics::parse_lrc("[00:10]Upcoming lyric").map(std::sync::Arc::new);
+            surface.player.snapshot.timeline.as_mut().unwrap().position = 7.8;
+            let settings = Settings::default();
+            let shape = surface.compact_shape(&settings);
+            surface.draw(shape, scale, &settings, &compact_icon_test_clock(), 0.0);
+            assert!(
+                !surface.needs_animation(false, false),
+                "paused wait must remain idle"
+            );
+            surface.player.snapshot.playing = true;
+            surface.player.snapshot.timeline.as_mut().unwrap().playing = true;
+            assert!(
+                surface.needs_animation(false, false),
+                "visible playing wait must request frames"
+            );
+            surface.fullscreen.hidden = true;
+            for _ in 0..10 {
+                surface.fullscreen.advance(0.1);
+            }
+            assert!(
+                !surface.needs_animation(false, false),
+                "hidden playback must remain idle"
+            );
+        }
+    }
+
     fn compact_icon_test_surface(scale: f32, lyrics: bool) -> super::Surface {
         use super::*;
         let mut surface = Surface::new(canvas_size(scale), scale).unwrap();
@@ -2635,8 +2881,8 @@ mod tests {
                 assert!(surface.compact_active);
                 assert!(
                     icon.iter()
-                        .any(|p| p[0] >= 140 && p[0] == p[1] && p[1] == p[2]),
-                    "Active lyrics need a visible gray music note for {source:?} at {scale}x"
+                        .any(|p| p[..3] == crate::theme::MUTED && p[3] == 255),
+                    "Active lyrics need a visible muted music note for {source:?} at {scale}x"
                 );
                 assert!(
                     icon.iter().all(|p| i16::from(p[1]) - i16::from(p[0]) < 30),
@@ -2997,6 +3243,7 @@ mod tests {
                 surface.player.snapshot.artwork = match name {
                     "cover-live" => live_cover.clone(),
                     "cover-warm" | "cover-cool" | "upcoming" => Some(std::sync::Arc::new(
+                        // Synthetic warm/cool cover gradients verify artwork-derived glow, not UI colors.
                         image::RgbaImage::from_fn(32, 32, |x, _| {
                             let t = x as f32 / 31.0;
                             let (left, right) = if name == "cover-warm" || name == "upcoming" {
@@ -3139,6 +3386,7 @@ mod tests {
                             rate: 1.0,
                             sampled: Instant::now(),
                         }),
+                        // Synthetic cover gradients keep Island previews independent of theme accents.
                         artwork: Some(std::sync::Arc::new(image::RgbaImage::from_fn(
                             64,
                             64,

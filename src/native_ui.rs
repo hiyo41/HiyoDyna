@@ -1,7 +1,359 @@
 use crate::canvas::{Canvas, DIM, MUTED, Rect, WHITE};
 
-pub(crate) const BACKGROUND: [u8; 3] = [8, 8, 8];
-pub(crate) const SURFACE: [u8; 3] = [25, 25, 25];
+pub(crate) use crate::theme::{BG as BACKGROUND, SURFACE};
+
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
+use windows_sys::Win32::Foundation::{HWND, RECT, WPARAM};
+use windows_sys::Win32::Graphics::Gdi::{HBITMAP, HDC, HGDIOBJ};
+
+/// A persistent, top-down BGRA DIB selected into its own memory DC.
+pub(crate) struct WindowSurface {
+    dc: HDC,
+    bitmap: HBITMAP,
+    original: HGDIOBJ,
+    pixels: *mut u8,
+    size: (u32, u32),
+    len: usize,
+    #[cfg(test)]
+    pub(crate) presents: usize,
+}
+
+impl WindowSurface {
+    pub(crate) unsafe fn copy_from(&mut self, dc: HDC, source: RECT) -> bool {
+        unsafe {
+            windows_sys::Win32::Graphics::Gdi::BitBlt(
+                self.dc,
+                0,
+                0,
+                source.right - source.left,
+                source.bottom - source.top,
+                dc,
+                source.left,
+                source.top,
+                windows_sys::Win32::Graphics::Gdi::SRCCOPY,
+            ) != 0
+        }
+    }
+
+    pub(crate) unsafe fn copy_to(&self, dc: HDC, source: RECT, x: i32, y: i32) -> bool {
+        unsafe {
+            windows_sys::Win32::Graphics::Gdi::BitBlt(
+                dc,
+                x,
+                y,
+                source.right - source.left,
+                source.bottom - source.top,
+                self.dc,
+                source.left,
+                source.top,
+                windows_sys::Win32::Graphics::Gdi::SRCCOPY,
+            ) != 0
+        }
+    }
+
+    pub(crate) fn new() -> Option<Self> {
+        let dc =
+            unsafe { windows_sys::Win32::Graphics::Gdi::CreateCompatibleDC(std::ptr::null_mut()) };
+        if dc.is_null() {
+            return None;
+        }
+        Some(Self {
+            dc,
+            bitmap: std::ptr::null_mut(),
+            original: std::ptr::null_mut(),
+            pixels: std::ptr::null_mut(),
+            size: (0, 0),
+            len: 0,
+            #[cfg(test)]
+            presents: 0,
+        })
+    }
+
+    pub(crate) fn resize(&mut self, width: u32, height: u32) -> bool {
+        use windows_sys::Win32::Graphics::Gdi::*;
+        if width == 0 || height == 0 || width > i32::MAX as u32 || height > i32::MAX as u32 {
+            return false;
+        }
+        if self.size == (width, height) {
+            return true;
+        }
+        let Some(len) = (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|n| n.checked_mul(4))
+            .filter(|len| *len <= isize::MAX as usize)
+        else {
+            return false;
+        };
+        let info = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: width as i32,
+                biHeight: -(height as i32),
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        unsafe {
+            let mut bits = std::ptr::null_mut();
+            let bitmap = CreateDIBSection(
+                self.dc,
+                &info,
+                DIB_RGB_COLORS,
+                &mut bits,
+                std::ptr::null_mut(),
+                0,
+            );
+            if bitmap.is_null() {
+                return false;
+            }
+            let previous = SelectObject(self.dc, bitmap);
+            if previous.is_null() || previous as isize == -1 {
+                DeleteObject(bitmap);
+                return false;
+            }
+            if self.original.is_null() {
+                self.original = previous;
+            }
+            if !self.bitmap.is_null() {
+                DeleteObject(self.bitmap);
+            }
+            self.bitmap = bitmap;
+            self.pixels = bits.cast();
+            self.size = (width, height);
+            self.len = len;
+            self.pixels_mut().fill(0);
+        }
+        true
+    }
+
+    pub(crate) fn pixels_mut(&mut self) -> &mut [u8] {
+        if self.len == 0 {
+            return &mut [];
+        }
+        // Finish any batched GDI reads before the software renderer writes again.
+        unsafe {
+            windows_sys::Win32::Graphics::Gdi::GdiFlush();
+            std::slice::from_raw_parts_mut(self.pixels, self.len)
+        }
+    }
+
+    pub(crate) unsafe fn present(&mut self, dc: HDC, dirty: RECT) {
+        #[cfg(test)]
+        {
+            self.presents += 1;
+        }
+        use windows_sys::Win32::Graphics::Gdi::{BitBlt, SRCCOPY};
+        let left = dirty.left.clamp(0, self.size.0 as i32);
+        let top = dirty.top.clamp(0, self.size.1 as i32);
+        let right = dirty.right.clamp(left, self.size.0 as i32);
+        let bottom = dirty.bottom.clamp(top, self.size.1 as i32);
+        if right > left && bottom > top {
+            unsafe {
+                BitBlt(
+                    dc,
+                    left,
+                    top,
+                    right - left,
+                    bottom - top,
+                    self.dc,
+                    left,
+                    top,
+                    SRCCOPY,
+                );
+            }
+        }
+    }
+}
+
+impl Drop for WindowSurface {
+    fn drop(&mut self) {
+        use windows_sys::Win32::Graphics::Gdi::*;
+        unsafe {
+            if !self.original.is_null() {
+                SelectObject(self.dc, self.original);
+            }
+            if !self.bitmap.is_null() {
+                DeleteObject(self.bitmap);
+            }
+            DeleteDC(self.dc);
+        }
+    }
+}
+
+struct FrameWakeup {
+    hwnd: HWND,
+    message: u32,
+    generation: usize,
+    pending: AtomicBool,
+}
+
+enum FrameSource {
+    Multimedia(u32),
+    Window(usize),
+}
+
+pub(crate) struct FramePump {
+    wakeup: Box<FrameWakeup>,
+    source: Option<FrameSource>,
+    last_draw: Option<Instant>,
+}
+
+unsafe extern "system" fn frame_callback(_: u32, _: u32, user: usize, _: usize, _: usize) {
+    // TIME_KILL_SYNCHRONOUS keeps this allocation alive until callbacks finish.
+    let wakeup = unsafe { &*(user as *const FrameWakeup) };
+    if !wakeup.pending.swap(true, Ordering::AcqRel)
+        && unsafe {
+            windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW(
+                wakeup.hwnd,
+                wakeup.message,
+                wakeup.generation,
+                0,
+            )
+        } == 0
+    {
+        wakeup.pending.store(false, Ordering::Release);
+    }
+}
+
+impl FramePump {
+    pub(crate) fn new(message: u32) -> Self {
+        Self {
+            wakeup: Box::new(FrameWakeup {
+                hwnd: std::ptr::null_mut(),
+                message,
+                generation: 0,
+                pending: AtomicBool::new(false),
+            }),
+            source: None,
+            last_draw: None,
+        }
+    }
+
+    pub(crate) fn is_active(&self) -> bool {
+        self.source.is_some()
+    }
+
+    pub(crate) unsafe fn start(&mut self, hwnd: HWND) {
+        use windows_sys::Win32::Media::*;
+        use windows_sys::Win32::UI::WindowsAndMessaging::SetTimer;
+        static NEXT: AtomicUsize = AtomicUsize::new(0x10000);
+        if self.is_active() {
+            return;
+        }
+        self.wakeup.hwnd = hwnd;
+        self.wakeup.generation = NEXT.fetch_add(1, Ordering::Relaxed).max(1);
+        unsafe {
+            if timeBeginPeriod(1) == 0 {
+                let timer = timeSetEvent(
+                    16,
+                    1,
+                    Some(frame_callback),
+                    (&*self.wakeup as *const FrameWakeup) as usize,
+                    TIME_PERIODIC | TIME_CALLBACK_FUNCTION | TIME_KILL_SYNCHRONOUS,
+                );
+                if timer != 0 {
+                    self.source = Some(FrameSource::Multimedia(timer));
+                    return;
+                }
+                timeEndPeriod(1);
+            }
+            let timer = SetTimer(hwnd, self.wakeup.generation, 16, None);
+            if timer != 0 {
+                self.source = Some(FrameSource::Window(timer));
+            } else {
+                self.wakeup.generation = 0;
+            }
+        }
+    }
+
+    pub(crate) unsafe fn stop(&mut self) {
+        use windows_sys::Win32::Media::{timeEndPeriod, timeKillEvent};
+        unsafe {
+            match self.source.take() {
+                Some(FrameSource::Multimedia(timer)) => {
+                    timeKillEvent(timer);
+                    timeEndPeriod(1);
+                }
+                Some(FrameSource::Window(timer)) => {
+                    windows_sys::Win32::UI::WindowsAndMessaging::KillTimer(self.wakeup.hwnd, timer);
+                }
+                None => {}
+            }
+        }
+        self.wakeup.pending.store(false, Ordering::Release);
+        self.wakeup.generation = 0;
+    }
+
+    pub(crate) fn is_frame(&self, message: u32, wparam: WPARAM) -> bool {
+        (message == self.wakeup.message && wparam == self.wakeup.generation)
+            || matches!(self.source, Some(FrameSource::Window(timer))
+                if message == windows_sys::Win32::UI::WindowsAndMessaging::WM_TIMER && wparam == timer)
+    }
+
+    pub(crate) unsafe fn should_draw(&mut self, now: Instant) -> bool {
+        self.wakeup.pending.store(false, Ordering::Release);
+        // The 16 ms timer can post a catch-up message while a frame is still
+        // painting. Keep one display interval between frames instead of letting
+        // that catch-up double the scroll work.
+        if self
+            .last_draw
+            .is_some_and(|last| now.saturating_duration_since(last) < Duration::from_millis(14))
+        {
+            return false;
+        }
+        self.last_draw = Some(now);
+        true
+    }
+}
+
+impl Drop for FramePump {
+    fn drop(&mut self) {
+        unsafe {
+            self.stop();
+        }
+    }
+}
+
+fn trace_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("HIYODYNA_TRACE_UI").is_some())
+}
+
+fn trace_epoch() -> Instant {
+    static EPOCH: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    *EPOCH.get_or_init(Instant::now)
+}
+
+/// A dialog scroll owns the UI thread for its short motion. The island skips
+/// drawing while this is set, so both surfaces share the frame budget instead
+/// of competing for it.
+static SCROLL_ANIMATING: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn set_scroll_animating(active: bool) {
+    SCROLL_ANIMATING.store(active, Ordering::Relaxed);
+}
+
+pub(crate) fn scroll_animating() -> bool {
+    SCROLL_ANIMATING.load(Ordering::Relaxed)
+}
+
+pub(crate) fn trace_start() -> Option<Instant> {
+    trace_enabled().then(Instant::now)
+}
+
+pub(crate) fn trace_ui(window: &str, phase: &str, started: Option<Instant>) {
+    if let Some(started) = started {
+        eprintln!(
+            "HIYODYNA_TRACE_UI {window} {phase}={:.3}ms t={:.3}ms",
+            started.elapsed().as_secs_f64() * 1000.0,
+            trace_epoch().elapsed().as_secs_f64() * 1000.0
+        );
+    }
+}
 
 /// Bounded, elapsed-time scrolling. Input changes the target; the frame timer
 /// advances the viewport, so bursts of wheel messages share the same repaint.
@@ -100,9 +452,9 @@ pub(crate) unsafe fn style_window(hwnd: windows_sys::Win32::Foundation::HWND) {
     unsafe {
         use windows_sys::Win32::UI::WindowsAndMessaging::*;
         let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style | WS_EX_COMPOSITED as isize);
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style & !(WS_EX_COMPOSITED as isize));
         let dark = 1_i32;
-        DwmSetWindowAttribute(
+        let dark_result = DwmSetWindowAttribute(
             hwnd,
             DWMWA_USE_IMMERSIVE_DARK_MODE as u32,
             (&dark as *const i32).cast(),
@@ -110,13 +462,231 @@ pub(crate) unsafe fn style_window(hwnd: windows_sys::Win32::Foundation::HWND) {
         );
         let corner = 2_u32;
         // DWMWA_WINDOW_CORNER_PREFERENCE / DWMWCP_ROUND on supported Windows.
-        DwmSetWindowAttribute(hwnd, 33, (&corner as *const u32).cast(), 4);
+        let corner_result = DwmSetWindowAttribute(hwnd, 33, (&corner as *const u32).cast(), 4);
+        if trace_start().is_some() && (dark_result < 0 || corner_result < 0) {
+            eprintln!("HIYODYNA_TRACE_UI DWM dark={dark_result:#x} corner={corner_result:#x}");
+        }
+    }
+}
+
+/// Apply group opacity after composing overlapping rounded fills.
+fn composite_rects(c: &mut Canvas<'_>, shapes: &[(Rect, f32, [u8; 3])]) {
+    if c.opacity <= 0.0 {
+        return;
+    }
+    if c.opacity >= 1.0 {
+        for &(rect, radius, color) in shapes {
+            c.rect(rect, radius, color, 1.0);
+        }
+        return;
+    }
+    let scale = c.painter.scale;
+    let bounds = shapes[0].0.intersect(c.clip);
+    let left = (bounds.x * scale).floor().clamp(0.0, c.size.0 as f32) as u32;
+    let top = (bounds.y * scale).floor().clamp(0.0, c.size.1 as f32) as u32;
+    let right = ((bounds.x + bounds.w) * scale)
+        .ceil()
+        .clamp(0.0, c.size.0 as f32) as u32;
+    let bottom = ((bounds.y + bounds.h) * scale)
+        .ceil()
+        .clamp(0.0, c.size.1 as f32) as u32;
+    if left >= right || top >= bottom {
+        return;
+    }
+    let size = (right - left, bottom - top);
+    let origin = (left as f32 / scale, top as f32 / scale);
+    let mut pixels = vec![0; size.0 as usize * size.1 as usize * 4];
+    {
+        let mut layer = Canvas::new(&mut pixels, size, c.painter);
+        layer.clip = Rect::new(c.clip.x - origin.0, c.clip.y - origin.1, c.clip.w, c.clip.h);
+        for &(rect, radius, color) in shapes {
+            layer.rect(
+                Rect::new(rect.x - origin.0, rect.y - origin.1, rect.w, rect.h),
+                radius,
+                color,
+                1.0,
+            );
+        }
+    }
+    for y in 0..size.1 {
+        for x in 0..size.0 {
+            let source = ((y * size.0 + x) * 4) as usize;
+            let destination = (((top + y) * c.size.0 + left + x) * 4) as usize;
+            let inverse = 1.0 - pixels[source + 3] as f32 / 255.0 * c.opacity;
+            for channel in 0..4 {
+                // The layer already contains premultiplied channels. Scale
+                // them once, without multiplying them by alpha a second time.
+                let value = pixels[source + channel] as f32 * c.opacity
+                    + c.pixels[destination + channel] as f32 * inverse;
+                c.pixels[destination + channel] = (f64::from(value) + 0.5) as u8;
+            }
+        }
+    }
+}
+
+/// Rounded card with a one-logical-pixel inset border (normally radius 14).
+#[allow(dead_code)] // Shared primitives are adopted by the window rewrites.
+pub(crate) fn card(c: &mut Canvas<'_>, rect: Rect, radius: f32, fill: [u8; 3], border: [u8; 3]) {
+    if rect.w <= 0.0 || rect.h <= 0.0 {
+        return;
+    }
+    let radius = radius.clamp(0.0, rect.w.min(rect.h) * 0.5);
+    let shapes = [
+        (rect, radius, border),
+        (
+            Rect::new(rect.x + 1.0, rect.y + 1.0, rect.w - 2.0, rect.h - 2.0),
+            (radius - 1.0).max(0.0),
+            fill,
+        ),
+    ];
+    let count = if rect.w > 2.0 && rect.h > 2.0 { 2 } else { 1 };
+    composite_rects(c, &shapes[..count]);
+}
+
+#[allow(dead_code)]
+pub(crate) fn section_header(
+    c: &mut Canvas<'_>,
+    rect: Rect,
+    title: &str,
+    detail: &str,
+    text_scale: f32,
+) {
+    if rect.w <= 0.0 || rect.h <= 0.0 || text_scale <= 0.0 {
+        return;
+    }
+    let old_clip = c.clip;
+    c.clip = old_clip.intersect(rect);
+    let title_height = (22.0 * text_scale).min(rect.h);
+    c.ellipsis(
+        title,
+        Rect::new(rect.x, rect.y, rect.w, title_height),
+        14.0 * text_scale,
+        true,
+        crate::theme::TEXT,
+    );
+    let detail_y = rect.y + title_height + 4.0 * text_scale;
+    if detail_y < rect.y + rect.h {
+        c.ellipsis(
+            detail,
+            Rect::new(rect.x, detail_y, rect.w, rect.y + rect.h - detail_y),
+            11.0 * text_scale,
+            false,
+            crate::theme::MUTED,
+        );
+    }
+    c.clip = old_clip;
+}
+
+#[allow(dead_code)]
+pub(crate) fn chip(c: &mut Canvas<'_>, rect: Rect, label: &str, tint: [u8; 3], text_scale: f32) {
+    if rect.w <= 0.0 || rect.h <= 0.0 {
+        return;
+    }
+    c.rect(rect, 999.0_f32.min(rect.w.min(rect.h) * 0.5), tint, 0.1);
+    if rect.w <= 16.0 || text_scale <= 0.0 {
+        return;
+    }
+    // Text rounds its raster origin; keep that origin inside the clip at
+    // fractional DPI rather than cutting off the first glyph's edge pixels.
+    let x = ((rect.x + 8.0) * c.painter.scale).ceil() / c.painter.scale;
+    let available = Rect::new(x, rect.y, (rect.x + rect.w - 8.0 - x).max(0.0), rect.h);
+    let old_clip = c.clip;
+    c.clip = old_clip.intersect(available);
+    let size = 11.0 * text_scale;
+    c.ellipsis(label, available, size, false, tint);
+    c.clip = old_clip;
+}
+
+/// A 36x20 logical-pixel track, centered in the supplied control rectangle.
+#[allow(dead_code)]
+pub(crate) fn switch(c: &mut Canvas<'_>, rect: Rect, on: bool, accent: [u8; 3]) {
+    if rect.w <= 0.0 || rect.h <= 0.0 {
+        return;
+    }
+    let old_clip = c.clip;
+    c.clip = old_clip.intersect(rect);
+    let track = Rect::new(
+        rect.x + (rect.w - 36.0) * 0.5,
+        rect.y + (rect.h - 20.0) * 0.5,
+        36.0,
+        20.0,
+    );
+    composite_rects(
+        c,
+        &[
+            (
+                track,
+                10.0,
+                if on {
+                    accent
+                } else {
+                    crate::theme::BORDER_STRONG
+                },
+            ),
+            (
+                Rect::new(
+                    track.x + if on { 19.0 } else { 3.0 },
+                    track.y + 3.0,
+                    14.0,
+                    14.0,
+                ),
+                7.0,
+                crate::theme::TEXT,
+            ),
+        ],
+    );
+    c.clip = old_clip;
+}
+
+/// An inset 1.5-pixel rounded stroke (normally radius 10), preserving its interior.
+#[allow(dead_code)]
+pub(crate) fn focus_ring(c: &mut Canvas<'_>, rect: Rect, radius: f32, accent: [u8; 3]) {
+    if rect.w <= 0.0 || rect.h <= 0.0 || c.opacity <= 0.0 {
+        return;
+    }
+    // Canvas has filled rounded rectangles only. Subtract the inner coverage
+    // before blending once so translucent surfaces keep their original pixels.
+    let scale = c.painter.scale;
+    let radius = radius.clamp(0.0, rect.w.min(rect.h) * 0.5);
+    let bounds = rect.intersect(c.clip);
+    let left = (bounds.x * scale).floor().max(0.0) as u32;
+    let top = (bounds.y * scale).floor().max(0.0) as u32;
+    let right = ((bounds.x + bounds.w) * scale)
+        .ceil()
+        .clamp(0.0, c.size.0 as f32) as u32;
+    let bottom = ((bounds.y + bounds.h) * scale)
+        .ceil()
+        .clamp(0.0, c.size.1 as f32) as u32;
+    let inset = 1.5_f32.min(rect.w.min(rect.h) * 0.5);
+    for y in top..bottom {
+        for x in left..right {
+            let px = (x as f32 + 0.5) / scale - rect.x - rect.w * 0.5;
+            let py = (y as f32 + 0.5) / scale - rect.y - rect.h * 0.5;
+            let coverage = |inset: f32| {
+                let r = (radius - inset).max(0.0);
+                let dx = px.abs() - rect.w * 0.5 + inset + r;
+                let dy = py.abs() - rect.h * 0.5 + inset + r;
+                let distance = dx.max(0.0).hypot(dy.max(0.0)) + dx.max(dy).min(0.0) - r;
+                (0.5 - distance * scale).clamp(0.0, 1.0)
+            };
+            let inner = if rect.w > inset * 2.0 && rect.h > inset * 2.0 {
+                coverage(inset)
+            } else {
+                0.0
+            };
+            let alpha = (coverage(0.0) - inner).max(0.0) * c.opacity;
+            if alpha > 0.0 {
+                let index = ((y * c.size.0 + x) * 4) as usize;
+                crate::render::blend_pixel(&mut c.pixels[index..index + 4], accent, alpha);
+            }
+        }
     }
 }
 
 pub(crate) struct ButtonStyle {
     pub text_scale: f32,
     pub accent: [u8; 3],
+    pub background: [u8; 3],
     pub selected: bool,
     pub focused: bool,
     pub pressed: bool,
@@ -130,6 +700,7 @@ impl Default for ButtonStyle {
         Self {
             text_scale: 1.0,
             accent: WHITE,
+            background: BACKGROUND,
             selected: false,
             focused: false,
             pressed: false,
@@ -142,7 +713,7 @@ impl Default for ButtonStyle {
 
 pub(crate) fn button(c: &mut Canvas<'_>, label: &str, style: ButtonStyle) {
     let rect = c.clip;
-    c.rect(rect, 0.0, BACKGROUND, 1.0);
+    c.rect(rect, 0.0, style.background, 1.0);
     let inner = Rect::new(2.0, 2.0, (rect.w - 4.0).max(0.0), (rect.h - 4.0).max(0.0));
     if style.focused {
         c.rect(rect, rect.h * 0.5, style.accent, 0.9);
@@ -170,7 +741,7 @@ pub(crate) fn button(c: &mut Canvas<'_>, label: &str, style: ButtonStyle) {
     } else if style.selected {
         BACKGROUND
     } else if style.destructive {
-        [154, 164, 244]
+        crate::theme::DANGER
     } else {
         WHITE
     };
@@ -319,26 +890,27 @@ pub(crate) unsafe extern "system" fn hover_proc(
 }
 
 /// Two-line native list row. The LISTBOX retains navigation and accessibility.
-pub(crate) fn result_row(c: &mut Canvas<'_>, title: &str, detail: &str, style: ButtonStyle) {
+pub(crate) fn result_row(
+    c: &mut Canvas<'_>,
+    title: &str,
+    detail: &str,
+    chips: &[(&str, [u8; 3])],
+    style: ButtonStyle,
+) {
     let rect = c.clip;
     c.rect(rect, 0.0, BACKGROUND, 1.0);
-    let row = Rect::new(0.0, 2.0, rect.w, (rect.h - 4.0).max(0.0));
-    if style.focused {
-        c.rect(row, 14.0, WHITE, 0.55);
-    }
-    let row = Rect::new(1.0, 3.0, rect.w - 2.0, (rect.h - 6.0).max(0.0));
+    let row = Rect::new(1.0, 2.0, rect.w - 2.0, (rect.h - 4.0).max(0.0));
     c.rect(
         row,
         13.0,
         if style.selected {
-            [29, 29, 29]
+            crate::theme::SURFACE_RAISED
         } else {
             BACKGROUND
         },
         1.0,
     );
     if style.selected {
-        c.rect(row, 13.0, style.accent, 0.04);
         c.rect(
             Rect::new(3.0, 18.0, 3.0, (rect.h - 36.0).max(0.0)),
             1.5,
@@ -346,20 +918,42 @@ pub(crate) fn result_row(c: &mut Canvas<'_>, title: &str, detail: &str, style: B
             1.0,
         );
     }
+    if style.focused {
+        focus_ring(c, row, 13.0, style.accent);
+    }
     c.ellipsis(
         title,
-        Rect::new(14.0, 7.0, rect.w - 28.0, 22.0),
+        Rect::new(14.0, 8.0, rect.w - 28.0, 22.0),
         13.0,
         true,
         WHITE,
     );
-    c.ellipsis(
-        detail,
-        Rect::new(14.0, 30.0, rect.w - 28.0, 18.0),
-        10.0,
-        false,
-        MUTED,
-    );
+    let mut right = rect.w - 14.0;
+    for &(label, tint) in chips.iter().rev() {
+        // Round outward before adding padding. Subtracting padding again in
+        // chip() must not shrink the text box below a fractional glyph advance.
+        let width =
+            (c.painter.width(label, 11.0, false).ceil() + 17.0).min((right - 14.0).max(0.0));
+        chip(
+            c,
+            Rect::new(right - width, 36.0, width, 22.0),
+            label,
+            tint,
+            1.0,
+        );
+        right -= width + 6.0;
+    }
+    // Metadata stays legible; discard secondary prose before squeezing chips.
+    let available = right - 14.0 - if chips.is_empty() { 0.0 } else { 6.0 };
+    if available >= 96.0 {
+        c.ellipsis(
+            detail,
+            Rect::new(14.0, 36.0, available, 22.0),
+            10.0,
+            false,
+            MUTED,
+        );
+    }
 }
 
 pub(crate) unsafe fn blit(
@@ -587,8 +1181,8 @@ mod notices {
                 WM_ERASEBKGND => 1,
                 WM_CTLCOLORSTATIC | WM_CTLCOLOREDIT => {
                     let dc = wparam as HDC;
-                    SetTextColor(dc, 0x00f8f8f8);
-                    SetBkColor(dc, 0x00080808);
+                    SetTextColor(dc, crate::theme::colorref(crate::theme::TEXT));
+                    SetBkColor(dc, crate::theme::colorref(BACKGROUND));
                     (*ptr).brush as isize
                 }
                 WM_PAINT => {
@@ -759,7 +1353,7 @@ mod notices {
                     message: copy,
                     painter: RefCell::new(painter),
                     font: Cell::new(null_mut()),
-                    brush: CreateSolidBrush(0x00080808),
+                    brush: CreateSolidBrush(crate::theme::colorref(BACKGROUND)),
                 })) as isize,
             );
             if crate::window_chrome::install(hwnd, false, false).is_err() {
@@ -857,6 +1451,55 @@ mod notices {
             }
         }
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn notice_control_colors_use_the_shared_palette() {
+            unsafe {
+                // A hidden host provides HWND storage without opening a notice or taking focus.
+                let hwnd = CreateWindowExW(
+                    0,
+                    wide("STATIC").as_ptr(),
+                    null(),
+                    WS_POPUP,
+                    0,
+                    0,
+                    1,
+                    1,
+                    null_mut(),
+                    null_mut(),
+                    GetModuleHandleW(null()),
+                    null(),
+                );
+                assert!(!hwnd.is_null());
+                let notice = Notice {
+                    title: String::new(),
+                    message: NoticeCopy {
+                        template: String::new(),
+                        values: Vec::new(),
+                    },
+                    painter: RefCell::new(Painter::new(1.0).unwrap()),
+                    font: Cell::new(null_mut()),
+                    brush: null_mut(),
+                };
+                let surface = WindowSurface::new().unwrap();
+                SetWindowLongPtrW(hwnd, GWLP_USERDATA, &notice as *const Notice as isize);
+                let colors = [WM_CTLCOLORSTATIC, WM_CTLCOLOREDIT].map(|message| {
+                    proc(hwnd, message, surface.dc as usize, 0);
+                    (GetTextColor(surface.dc), GetBkColor(surface.dc))
+                });
+                SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+                DestroyWindow(hwnd);
+                for (text, background) in colors {
+                    assert_eq!(text, crate::theme::colorref(crate::theme::TEXT));
+                    assert_eq!(background, crate::theme::colorref(crate::theme::BG));
+                }
+            }
+        }
+    }
 }
 
 pub(crate) use notices::{
@@ -866,6 +1509,521 @@ pub(crate) use notices::{
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Fixed BGRA fixtures below independently check premultiplied blending, opacity and channel order.
+
+    fn raster(scale: f32, draw: impl FnOnce(&mut Canvas<'_>)) -> (Vec<u8>, (u32, u32)) {
+        let size = ((160.0 * scale) as u32, (100.0 * scale) as u32);
+        let mut pixels = vec![0; size.0 as usize * size.1 as usize * 4];
+        let mut painter = crate::canvas::Painter::new(scale).unwrap();
+        draw(&mut Canvas::new(&mut pixels, size, &mut painter));
+        (pixels, size)
+    }
+
+    fn pixel_at(pixels: &[u8], size: (u32, u32), scale: f32, x: f32, y: f32) -> &[u8] {
+        let index = (((y * scale) as u32 * size.0 + (x * scale) as u32) * 4) as usize;
+        &pixels[index..index + 4]
+    }
+
+    fn assert_ink_inside(pixels: &[u8], size: (u32, u32), scale: f32, rect: Rect) {
+        assert!(pixels.as_chunks::<4>().0.iter().any(|p| p[3] != 0));
+        for (index, pixel) in pixels.as_chunks::<4>().0.iter().enumerate() {
+            if pixel[3] != 0 {
+                let x = (index as u32 % size.0) as f32 / scale;
+                let y = (index as u32 / size.0) as f32 / scale;
+                assert!(
+                    rect.contains(x, y),
+                    "ink outside bounds at ({x}, {y}), scale {scale}"
+                );
+                assert!(pixel[..3].iter().all(|channel| *channel <= pixel[3]));
+            }
+        }
+    }
+
+    #[test]
+    fn destructive_button_uses_the_shared_danger_text_color() {
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let (pixels, _) = raster(scale, |c| {
+                button(
+                    c,
+                    "Delete",
+                    ButtonStyle {
+                        destructive: true,
+                        ..Default::default()
+                    },
+                )
+            });
+            assert!(
+                pixels
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .any(|pixel| pixel[..3] == crate::theme::DANGER && pixel[3] == 255),
+                "destructive text must use DANGER at {scale}x"
+            );
+            for (selected, enabled) in [(true, true), (false, false)] {
+                let draw = |destructive| {
+                    raster(scale, |c| {
+                        button(
+                            c,
+                            "Delete",
+                            ButtonStyle {
+                                selected,
+                                enabled,
+                                destructive,
+                                ..Default::default()
+                            },
+                        )
+                    })
+                };
+                let (destructive, _) = draw(true);
+                let (ordinary, _) = draw(false);
+                assert_eq!(
+                    destructive, ordinary,
+                    "selection and disabled colors take precedence"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn card_applies_opacity_once_over_transparent_and_translucent_pixels() {
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            for (background, expected) in [
+                ([0, 0, 0, 0], [11, 12, 14, 128]),
+                ([20, 40, 60, 100], [21, 32, 44, 178]),
+            ] {
+                let (pixels, size) = raster(scale, |c| {
+                    for pixel in c.pixels.as_chunks_mut::<4>().0 {
+                        pixel.copy_from_slice(&background);
+                    }
+                    c.opacity = 0.5;
+                    card(
+                        c,
+                        Rect::new(12.0, 12.0, 100.0, 60.0),
+                        14.0,
+                        crate::theme::SURFACE,
+                        crate::theme::BORDER,
+                    );
+                });
+                assert_eq!(
+                    pixel_at(&pixels, size, scale, 60.0, 40.0),
+                    expected,
+                    "card interior at {scale}x, background {background:?}"
+                );
+                assert_eq!(
+                    pixel_at(&pixels, size, scale, 60.0, 12.0),
+                    [
+                        21 + background[0] / 2,
+                        23 + background[1] / 2,
+                        27 + background[2] / 2,
+                        expected[3]
+                    ]
+                );
+                assert_eq!(pixel_at(&pixels, size, scale, 0.0, 0.0), background);
+            }
+        }
+    }
+
+    #[test]
+    fn switch_applies_opacity_once_to_knob_and_track() {
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            for on in [false, true] {
+                for (background, expected_knob) in [
+                    ([0, 0, 0, 0], [124, 124, 124, 128]),
+                    ([20, 40, 60, 100], [134, 144, 154, 178]),
+                ] {
+                    let (pixels, size) = raster(scale, |c| {
+                        for pixel in c.pixels.as_chunks_mut::<4>().0 {
+                            pixel.copy_from_slice(&background);
+                        }
+                        c.opacity = 0.5;
+                        switch(c, Rect::new(12.0, 12.0, 36.0, 20.0), on, crate::theme::ICE);
+                    });
+                    let knob_x = if on { 38.0 } else { 22.0 };
+                    assert_eq!(
+                        pixel_at(&pixels, size, scale, knob_x, 22.0),
+                        expected_knob,
+                        "knob at {scale}x, on {on}, background {background:?}"
+                    );
+                    let track = if on { [123, 100, 85] } else { [30, 33, 38] };
+                    assert_eq!(
+                        pixel_at(&pixels, size, scale, 30.0, 14.0),
+                        [
+                            track[0] + background[0] / 2,
+                            track[1] + background[1] / 2,
+                            track[2] + background[2] / 2,
+                            expected_knob[3]
+                        ]
+                    );
+                    assert_eq!(pixel_at(&pixels, size, scale, 0.0, 0.0), background);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn card_keeps_fill_and_border_inside_rounded_bounds() {
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let rect = Rect::new(12.0, 12.0, 100.0, 60.0);
+            let (pixels, size) = raster(scale, |c| {
+                card(c, rect, 14.0, crate::theme::SURFACE, crate::theme::BORDER);
+            });
+            assert_ink_inside(&pixels, size, scale, rect);
+            assert_eq!(
+                pixel_at(&pixels, size, scale, 60.0, 40.0),
+                &[22, 24, 28, 255]
+            );
+            assert_eq!(
+                pixel_at(&pixels, size, scale, 60.0, 12.0),
+                &[42, 46, 54, 255]
+            );
+            assert_eq!(pixel_at(&pixels, size, scale, 12.0, 12.0), &[0; 4]);
+        }
+    }
+
+    #[test]
+    fn chip_label_respects_eight_pixel_padding_and_uses_an_ellipsis() {
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let rect = Rect::new(12.0, 12.0, 72.0, 28.0);
+            let (label, size) = raster(scale, |c| {
+                chip(c, rect, "WWWWWWWWWW", crate::theme::ICE, 1.0)
+            });
+            let (blank, _) = raster(scale, |c| chip(c, rect, "", crate::theme::ICE, 1.0));
+            let mut ink = false;
+            for (index, (a, b)) in label
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .zip(blank.as_chunks::<4>().0)
+                .enumerate()
+            {
+                if a != b {
+                    ink = true;
+                    let x = (index as u32 % size.0) as f32 / scale;
+                    assert!((20.0..76.0).contains(&x), "chip padding lost at {scale}x");
+                }
+            }
+            assert!(ink);
+            assert_ink_inside(&label, size, scale, rect);
+            let (narrow, _) = raster(scale, |c| {
+                chip(
+                    c,
+                    Rect::new(12.0, 12.0, 28.0, 28.0),
+                    "WWWWWW",
+                    crate::theme::ICE,
+                    1.0,
+                )
+            });
+            let (ellipsis, _) = raster(scale, |c| {
+                chip(
+                    c,
+                    Rect::new(12.0, 12.0, 28.0, 28.0),
+                    "…",
+                    crate::theme::ICE,
+                    1.0,
+                )
+            });
+            assert_eq!(
+                narrow, ellipsis,
+                "narrow chip must show an ellipsis at {scale}x"
+            );
+            let (narrow_blank, _) = raster(scale, |c| {
+                chip(
+                    c,
+                    Rect::new(12.0, 12.0, 28.0, 28.0),
+                    "",
+                    crate::theme::ICE,
+                    1.0,
+                )
+            });
+            assert!(narrow != narrow_blank, "ellipsis must remain visible");
+            assert_eq!(pixel_at(&blank, size, scale, 40.0, 24.0), &[25, 20, 17, 26]);
+        }
+    }
+
+    #[test]
+    fn switch_changes_track_color_and_moves_its_fourteen_pixel_knob() {
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let rect = Rect::new(12.0, 12.0, 36.0, 20.0);
+            let (on, size) = raster(scale, |c| switch(c, rect, true, crate::theme::ICE));
+            let (off, _) = raster(scale, |c| switch(c, rect, false, crate::theme::ICE));
+            assert_ink_inside(&on, size, scale, rect);
+            assert_ink_inside(&off, size, scale, rect);
+            assert_eq!(
+                pixel_at(&on, size, scale, 30.0, 14.0),
+                &[245, 200, 169, 255]
+            );
+            assert_eq!(pixel_at(&off, size, scale, 30.0, 14.0), &[60, 66, 76, 255]);
+            assert_eq!(
+                pixel_at(&off, size, scale, 22.0, 22.0),
+                &[248, 248, 248, 255]
+            );
+            assert_eq!(
+                pixel_at(&on, size, scale, 38.0, 22.0),
+                &[248, 248, 248, 255]
+            );
+            assert_ne!(
+                pixel_at(&on, size, scale, 22.0, 22.0),
+                pixel_at(&off, size, scale, 22.0, 22.0)
+            );
+        }
+    }
+
+    #[test]
+    fn focus_ring_preserves_interior_and_draws_all_four_edges() {
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let rect = Rect::new(12.0, 12.0, 100.0, 60.0);
+            let (pixels, size) = raster(scale, |c| focus_ring(c, rect, 10.0, crate::theme::ICE));
+            assert_ink_inside(&pixels, size, scale, rect);
+            for (x, y) in [(60.0, 12.0), (60.0, 71.0), (12.0, 40.0), (111.0, 40.0)] {
+                assert!(
+                    pixel_at(&pixels, size, scale, x, y)[3] > 0,
+                    "missing edge at {scale}x"
+                );
+            }
+            assert_eq!(pixel_at(&pixels, size, scale, 60.0, 40.0), &[0; 4]);
+            assert_eq!(pixel_at(&pixels, size, scale, 12.0, 12.0), &[0; 4]);
+            assert!(
+                pixels
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .any(|p| p[3] > 0 && p[3] < 255)
+            );
+            let (over_fill, _) = raster(scale, |c| {
+                c.rect(rect, 0.0, crate::theme::SURFACE, 1.0);
+                focus_ring(c, rect, 10.0, crate::theme::ICE);
+            });
+            assert_eq!(
+                pixel_at(&over_fill, size, scale, 60.0, 40.0),
+                &[22, 24, 28, 255]
+            );
+        }
+    }
+
+    #[test]
+    fn section_header_clips_both_lines_and_truncates_to_ellipsis() {
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let rect = Rect::new(12.0, 12.0, 14.0, 44.0);
+            let (long, size) = raster(scale, |c| {
+                section_header(c, rect, "WWWWWWWW", "WWWWWWWW", 1.0)
+            });
+            let (ellipsis, _) = raster(scale, |c| section_header(c, rect, "…", "…", 1.0));
+            assert_eq!(long, ellipsis, "both lines must truncate at {scale}x");
+            assert_ink_inside(&long, size, scale, rect);
+            for (top, bottom) in [(12.0, 34.0), (38.0, 56.0)] {
+                assert!(
+                    long.as_chunks::<4>()
+                        .0
+                        .iter()
+                        .enumerate()
+                        .any(|(index, pixel)| {
+                            let y = (index as u32 / size.0) as f32 / scale;
+                            pixel[3] != 0 && (top..bottom).contains(&y)
+                        }),
+                    "each header line must remain visible at {scale}x"
+                );
+            }
+            let shallow = Rect::new(12.0, 12.0, 100.0, 8.0);
+            let (pixels, size) = raster(scale, |c| {
+                section_header(c, shallow, "Tall glyphs", "Detail", 2.0)
+            });
+            assert_ink_inside(&pixels, size, scale, shallow);
+        }
+    }
+
+    #[test]
+    fn result_chips_keep_complete_bilingual_timing_labels() {
+        use crate::canvas::Painter;
+        use crate::i18n::{Language, tr_in};
+        for language in [Language::English, Language::Vietnamese] {
+            for scale in [1.0, 1.25, 1.5, 2.0] {
+                let mut painter = Painter::new(scale).unwrap();
+                let size = ((440.0 * scale) as u32, (64.0 * scale) as u32);
+                for timing in ["Words", "Lines", "Unknown"] {
+                    let label = tr_in(language, timing);
+                    let tint = crate::theme::ICE;
+                    let mut actual = vec![0; (size.0 * size.1 * 4) as usize];
+                    result_row(
+                        &mut Canvas::new(&mut actual, size, &mut painter),
+                        "Recording",
+                        "Artist and album",
+                        &[
+                            ("AMLL TTML DB", crate::theme::LAVENDER),
+                            ("3:20", MUTED),
+                            (label, tint),
+                        ],
+                        ButtonStyle::default(),
+                    );
+                    // An independent, unellipsized glyph raster must occur in
+                    // the metadata line, regardless of the chip's placement.
+                    let text_size = ((120.0 * scale) as u32, (22.0 * scale) as u32);
+                    let mut text = vec![0; (text_size.0 * text_size.1 * 4) as usize];
+                    let mut c = Canvas::new(&mut text, text_size, &mut painter);
+                    // Keep edge antialiasing out of the reference background.
+                    let background_rect = Rect::new(-1.0, -1.0, c.clip.w + 2.0, c.clip.h + 2.0);
+                    c.rect(background_rect, 0.0, BACKGROUND, 1.0);
+                    c.rect(background_rect, 0.0, tint, 0.1);
+                    let background = text.clone();
+                    Canvas::new(&mut text, text_size, &mut painter).text(
+                        label,
+                        Rect::new(0.0, 0.0, 120.0, 22.0),
+                        11.0,
+                        false,
+                        tint,
+                    );
+                    let ink = text
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .enumerate()
+                        .filter(|(index, pixel)| pixel[..3] != background[index * 4..index * 4 + 3])
+                        .map(|(index, pixel)| {
+                            (
+                                index as u32 % text_size.0,
+                                index as u32 / text_size.0,
+                                *pixel,
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    assert!(!ink.is_empty());
+                    let width = ink.iter().map(|(x, _, _)| *x).max().unwrap() + 1;
+                    let y = (36.0 * scale).round() as u32;
+                    assert!(
+                        (0..size.0 - width).any(|left| ink.iter().all(|(x, top, pixel)| {
+                            let index = (((y + top) * size.0 + left + x) * 4) as usize;
+                            actual[index..index + 3] == pixel[..3]
+                        })),
+                        "{label} must be complete at {scale}x ({language:?})"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn surface_reuses_storage_and_zeroes_resized_pixels() {
+        let mut surface = WindowSurface::new().unwrap();
+        assert!(surface.resize(64, 32));
+        assert_eq!(surface.pixels_mut().len(), 8192);
+        surface.pixels_mut()[0] = 123;
+        let address = surface.pixels_mut().as_ptr();
+        assert!(surface.resize(64, 32));
+        assert_eq!(surface.pixels_mut().as_ptr(), address);
+        assert_eq!(surface.pixels_mut()[0], 123);
+        assert!(surface.resize(32, 16));
+        assert!(surface.pixels_mut().iter().all(|byte| *byte == 0));
+        assert!(!surface.resize(u32::MAX, 32));
+        assert_eq!(surface.pixels_mut().len(), 2048);
+    }
+
+    #[test]
+    fn surface_presents_only_the_dirty_rectangle_from_top_down_pixels() {
+        let mut source = WindowSurface::new().unwrap();
+        let mut destination = WindowSurface::new().unwrap();
+        assert!(source.resize(4, 4));
+        assert!(destination.resize(4, 4));
+        source.pixels_mut().fill(255);
+        source.pixels_mut()[20..24].copy_from_slice(&[10, 20, 30, 0]);
+        unsafe {
+            source.present(
+                destination.dc,
+                RECT {
+                    left: 1,
+                    top: 1,
+                    right: 3,
+                    bottom: 2,
+                },
+            );
+        }
+        let pixels = destination.pixels_mut();
+        assert_eq!(&pixels[20..24], &[10, 20, 30, 0]);
+        assert_eq!(&pixels[24..28], &[255; 4]);
+        assert!(pixels[..20].iter().all(|byte| *byte == 0));
+        assert!(pixels[28..].iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn frame_pump_accepts_only_its_message_and_limits_draw_frequency() {
+        use std::time::{Duration, Instant};
+        use windows_sys::Win32::UI::WindowsAndMessaging::{WM_APP, WM_TIMER};
+        let mut pump = FramePump::new(WM_APP + 9);
+        assert!(pump.is_frame(WM_APP + 9, 0));
+        assert!(!pump.is_frame(WM_APP + 10, 0));
+        assert!(!pump.is_frame(WM_TIMER, 0));
+        let now = Instant::now();
+        unsafe {
+            assert!(pump.should_draw(now));
+            assert!(!pump.should_draw(now + Duration::from_millis(13)));
+            assert!(pump.should_draw(now + Duration::from_millis(15)));
+        }
+    }
+
+    #[test]
+    fn frame_pump_coalesces_posts_and_rejects_stale_wakeups_after_stop() {
+        use std::ptr::{null, null_mut};
+        use windows_sys::Win32::UI::WindowsAndMessaging::*;
+        unsafe {
+            let class: Vec<u16> = "STATIC".encode_utf16().chain(Some(0)).collect();
+            let hwnd = CreateWindowExW(
+                0,
+                class.as_ptr(),
+                null(),
+                WS_POPUP,
+                0,
+                0,
+                1,
+                1,
+                null_mut(),
+                null_mut(),
+                null_mut(),
+                null(),
+            );
+            assert!(!hwnd.is_null());
+            let mut pump = FramePump::new(WM_APP + 9);
+            pump.start(hwnd);
+            assert!(pump.is_active());
+            let token = pump.wakeup.generation;
+            pump.stop();
+            assert!(!pump.is_active());
+            assert!(!pump.is_frame(WM_APP + 9, token));
+            // Drain any real timer post, then exercise the same callback twice.
+            let mut message = MSG::default();
+            while PeekMessageW(&mut message, hwnd, WM_APP + 9, WM_APP + 9, PM_REMOVE) != 0 {}
+            let user = (&*pump.wakeup as *const FrameWakeup) as usize;
+            frame_callback(0, 0, user, 0, 0);
+            frame_callback(0, 0, user, 0, 0);
+            assert_ne!(
+                PeekMessageW(&mut message, hwnd, WM_APP + 9, WM_APP + 9, PM_REMOVE),
+                0
+            );
+            assert_eq!(
+                PeekMessageW(&mut message, hwnd, WM_APP + 9, WM_APP + 9, PM_REMOVE),
+                0
+            );
+            assert!(pump.should_draw(Instant::now()));
+            frame_callback(0, 0, user, 0, 0);
+            assert_ne!(
+                PeekMessageW(&mut message, hwnd, WM_APP + 9, WM_APP + 9, PM_REMOVE),
+                0
+            );
+            pump.stop();
+            // Exercise the real window-timer teardown path without requiring
+            // multimedia-timer allocation to fail on this machine.
+            let fallback = SetTimer(hwnd, 0x20000, 16, None);
+            assert_ne!(fallback, 0);
+            pump.source = Some(FrameSource::Window(fallback));
+            assert!(pump.is_frame(WM_TIMER, fallback));
+            assert!(!pump.is_frame(WM_TIMER, fallback + 1));
+            pump.stop();
+            assert_eq!(KillTimer(hwnd, fallback), 0);
+            pump.start(hwnd);
+            assert_ne!(pump.wakeup.generation, token);
+            drop(pump);
+            DestroyWindow(hwnd);
+        }
+    }
 
     #[test]
     fn smooth_scroll_has_intermediate_frames_and_finishes_exactly() {

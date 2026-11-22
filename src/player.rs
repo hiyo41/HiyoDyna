@@ -689,7 +689,7 @@ impl Player {
                 if !enabled {
                     DIM
                 } else if i == 1 {
-                    [8, 8, 8]
+                    crate::theme::INVERSE
                 } else {
                     WHITE
                 },
@@ -1024,7 +1024,7 @@ impl Player {
                     (self.snapshot.sources.len() as f32 * 36.0 + 8.0).min(height - 62.0),
                 ),
                 14.0,
-                [40, 38, 35],
+                crate::theme::SURFACE_RAISED,
                 1.0,
             );
             for (i, source) in self
@@ -2395,6 +2395,7 @@ mod tests {
             title: "Header".into(),
             artist: "Artist".into(),
             source: "Spotify.exe".into(),
+            // Saturated red artwork distinguishes cover pixels from UI text in alignment tests.
             artwork: Some(std::sync::Arc::new(image::RgbaImage::from_pixel(
                 32,
                 32,
@@ -2406,6 +2407,17 @@ mod tests {
             ..Default::default()
         };
         player
+    }
+
+    #[test]
+    fn source_picker_uses_the_shared_raised_surface() {
+        let mut player = alignment_player();
+        player.source_picker = true;
+        player.snapshot.sources = vec!["Spotify.exe".into()];
+        let pixels = draw_test_player(&mut player, 500.0);
+        let sample = (64 * 420 + 22) * 4;
+        assert_eq!(&pixels[sample..sample + 3], &crate::theme::SURFACE_RAISED);
+        assert_eq!(pixels[sample + 3], 255);
     }
 
     #[test]

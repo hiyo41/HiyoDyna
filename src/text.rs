@@ -17,6 +17,7 @@ use crate::clock::{ClockFormat, ClockSnapshot};
 use crate::geometry::rounded_rect_distance;
 use crate::i18n::{self, Language};
 use crate::render::blend_pixel;
+use crate::theme;
 
 const TEXT_SUPERSAMPLE: usize = 3;
 const SUPERSAMPLE_SCALE: f32 = TEXT_SUPERSAMPLE as f32;
@@ -40,9 +41,6 @@ const DOT_GAP_PX: f32 = 6.0;
 const DATE_TRACKING_EM: f32 = 0.1;
 const SCRATCH_ORIGIN_PX: f32 = 8.0;
 const SCRATCH_DESIGN: (f32, f32) = (280.0, 90.0);
-const TEXT_COLOR: [u8; 3] = [250, 248, 247];
-const SECONDARY_COLOR: [u8; 3] = [184, 172, 169];
-const DATE_COLOR: [u8; 3] = [169, 157, 154];
 const EMBEDDED_FONTS: [(&str, &[u8]); 3] = [
     (
         "Inter-Medium.ttf",
@@ -446,6 +444,7 @@ impl TextLayer {
             }
 
             SetBkMode(dc, TRANSPARENT as i32);
+            // GDI renders a full-white coverage mask; UI colors are applied during blending.
             SetTextColor(dc, 0x00FF_FFFF);
 
             let (fonts, font_resources) = match create_fonts(dc, scale) {
@@ -589,7 +588,7 @@ impl TextLayer {
                 layout.time.x,
                 layout.time.y,
                 compact_alpha,
-                TEXT_COLOR,
+                theme::TEXT,
                 shape,
                 center,
             );
@@ -601,7 +600,7 @@ impl TextLayer {
                     rect.x + (rect.width - seconds.width as f32) * 0.5,
                     rect.y,
                     compact_alpha,
-                    SECONDARY_COLOR,
+                    theme::MUTED,
                     shape,
                     center,
                 );
@@ -636,7 +635,7 @@ impl TextLayer {
                     rect.x,
                     rect.y,
                     expanded_alpha,
-                    DATE_COLOR,
+                    theme::mix(theme::DIM, theme::MUTED, 0.75),
                     shape,
                     center,
                     content_scale,
@@ -649,7 +648,7 @@ impl TextLayer {
                 layout.time.x,
                 layout.time.y,
                 expanded_alpha,
-                TEXT_COLOR,
+                theme::TEXT,
                 shape,
                 center,
                 content_scale,
@@ -662,7 +661,7 @@ impl TextLayer {
                     rect.x + (rect.width - seconds.width as f32) * 0.5,
                     rect.y,
                     expanded_alpha,
-                    SECONDARY_COLOR,
+                    theme::MUTED,
                     shape,
                     center,
                     content_scale,
@@ -1372,7 +1371,7 @@ mod tests {
     use crate::clock::{ClockFormat, ClockSnapshot};
     use crate::i18n::Language;
 
-    const ICE: [u8; 3] = [255, 199, 143];
+    use crate::theme::ICE;
 
     fn snapshot() -> ClockSnapshot {
         snapshot_with_second(17)
@@ -1794,6 +1793,7 @@ mod tests {
 
     #[test]
     fn mask_blending_clips_to_the_rounded_shape() {
+        // A full-white mask fixture isolates geometric clipping from application colors.
         let size = (20, 20);
         let mut pixels = vec![0_u8; size.0 as usize * size.1 as usize * 4];
         let mask = Mask {
@@ -1834,10 +1834,34 @@ mod tests {
     }
 
     #[test]
+    fn clock_uses_shared_primary_secondary_and_date_colors() {
+        let mut layer = layer(1.0);
+        layer.update(&snapshot(), ClockFormat::TwentyFourHour);
+        let size = (512, 224);
+        let mut pixels = vec![0; (size.0 * size.1 * 4) as usize];
+        layer.draw(&mut pixels, params(size, EXPANDED, true));
+        for color in [
+            crate::theme::TEXT,
+            crate::theme::MUTED,
+            crate::theme::mix(crate::theme::DIM, crate::theme::MUTED, 0.75),
+        ] {
+            assert!(
+                pixels
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .any(|pixel| { pixel[..3] == color && pixel[3] == 255 }),
+                "the clock must render its shared text role: {color:?}"
+            );
+        }
+    }
+
+    #[test]
     fn draws_bright_clock_pixels_inside_the_expanded_panel() {
         let size = (512, 224);
         let mut pixels = vec![0_u8; size.0 as usize * size.1 as usize * 4];
         for pixel in pixels.chunks_mut(4) {
+            // A fixed opaque gray fixture makes blended clock ink easy to distinguish.
             pixel.copy_from_slice(&[20, 20, 20, 255]);
         }
         let mut layer = layer(1.0);
@@ -1854,6 +1878,7 @@ mod tests {
         let size = (512, 224);
         let mut pixels = vec![0_u8; size.0 as usize * size.1 as usize * 4];
         for pixel in pixels.chunks_mut(4) {
+            // A fixed opaque gray fixture makes blended clock ink easy to distinguish.
             pixel.copy_from_slice(&[20, 20, 20, 255]);
         }
         let mut layer = layer(1.0);
