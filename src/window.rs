@@ -776,9 +776,17 @@ fn run_loop(hwnd: HWND) -> Result<ExitAction, String> {
                         animation.current.width * scale,
                     )?;
                     let draw_start = Instant::now();
-                    surface.draw(animation.current, scale, &settings, &clock, animation.hover);
-                    let present_start = Instant::now();
-                    surface.present(hwnd, position)?;
+                    // A Settings/Find lyrics scroll has the floor for its short
+                    // motion. Advance the island state but defer drawing so the
+                    // two surfaces do not compete for the same frame budget.
+                    let present_start = if crate::native_ui::scroll_animating() && moving {
+                        draw_start
+                    } else {
+                        surface.draw(animation.current, scale, &settings, &clock, animation.hover);
+                        let present_start = Instant::now();
+                        surface.present(hwnd, position)?;
+                        present_start
+                    };
                     if trace_frames {
                         trace_max_draw_ms = trace_max_draw_ms
                             .max(present_start.duration_since(draw_start).as_secs_f64() * 1000.0);

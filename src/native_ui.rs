@@ -296,9 +296,12 @@ impl FramePump {
 
     pub(crate) unsafe fn should_draw(&mut self, now: Instant) -> bool {
         self.wakeup.pending.store(false, Ordering::Release);
+        // The 16 ms timer can post a catch-up message while a frame is still
+        // painting. Keep one display interval between frames instead of letting
+        // that catch-up double the scroll work.
         if self
             .last_draw
-            .is_some_and(|last| now.saturating_duration_since(last) < Duration::from_millis(8))
+            .is_some_and(|last| now.saturating_duration_since(last) < Duration::from_millis(14))
         {
             return false;
         }
@@ -315,18 +318,39 @@ impl Drop for FramePump {
     }
 }
 
-pub(crate) fn trace_start() -> Option<Instant> {
+fn trace_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    ENABLED
-        .get_or_init(|| std::env::var_os("HIYODYNA_TRACE_UI").is_some())
-        .then(Instant::now)
+    *ENABLED.get_or_init(|| std::env::var_os("HIYODYNA_TRACE_UI").is_some())
+}
+
+fn trace_epoch() -> Instant {
+    static EPOCH: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    *EPOCH.get_or_init(Instant::now)
+}
+
+/// A dialog scroll owns the UI thread for its short motion. The island skips
+/// drawing while this is set, so both surfaces share the frame budget instead
+/// of competing for it.
+static SCROLL_ANIMATING: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn set_scroll_animating(active: bool) {
+    SCROLL_ANIMATING.store(active, Ordering::Relaxed);
+}
+
+pub(crate) fn scroll_animating() -> bool {
+    SCROLL_ANIMATING.load(Ordering::Relaxed)
+}
+
+pub(crate) fn trace_start() -> Option<Instant> {
+    trace_enabled().then(Instant::now)
 }
 
 pub(crate) fn trace_ui(window: &str, phase: &str, started: Option<Instant>) {
     if let Some(started) = started {
         eprintln!(
-            "HIYODYNA_TRACE_UI {window} {phase}={:.3}ms",
-            started.elapsed().as_secs_f64() * 1000.0
+            "HIYODYNA_TRACE_UI {window} {phase}={:.3}ms t={:.3}ms",
+            started.elapsed().as_secs_f64() * 1000.0,
+            trace_epoch().elapsed().as_secs_f64() * 1000.0
         );
     }
 }
@@ -1931,8 +1955,8 @@ mod tests {
         let now = Instant::now();
         unsafe {
             assert!(pump.should_draw(now));
-            assert!(!pump.should_draw(now + Duration::from_millis(7)));
-            assert!(pump.should_draw(now + Duration::from_millis(9)));
+            assert!(!pump.should_draw(now + Duration::from_millis(13)));
+            assert!(pump.should_draw(now + Duration::from_millis(15)));
         }
     }
 

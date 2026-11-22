@@ -28,7 +28,8 @@ const REMEMBER_FOCUS: u32 = WM_APP + 43;
 const HEADER_HEIGHT: f32 = 64.0;
 const FOOTER_HEIGHT: f32 = 64.0;
 const NAV_FIRST: usize = 0x7000;
-const WINDOW_STYLE: u32 = WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN;
+// No WS_CAPTION: DWM otherwise keeps a native title bar over our custom header.
+const WINDOW_STYLE: u32 = WS_POPUP | WS_THICKFRAME | WS_SYSMENU | WS_CLIPCHILDREN;
 const UPDATE_POLL: usize = 0x5544;
 const SCROLL_FRAME: u32 = WM_APP + 44;
 const ABOUT_TEXT: i32 = 0x7010;
@@ -1870,18 +1871,25 @@ unsafe fn advance_scroll(hwnd: HWND, state: &RefCell<State>, now: Instant) {
         state.scroll = state.scroll_motion.offset();
         (changed, state.scroll_motion.moving())
     };
+    crate::native_ui::set_scroll_animating(moving);
     unsafe {
         if changed {
             position_controls(hwnd, state);
-            let state = state.borrow();
-            let viewport = SettingsLayout::new(state.width, state.height).content;
-            let dirty = RECT {
-                left: (viewport.x * state.scale).floor() as i32,
-                top: (viewport.y * state.scale).ceil() as i32,
-                right: ((viewport.x + viewport.w + 14.0) * state.scale).ceil() as i32,
-                bottom: ((viewport.y + viewport.h) * state.scale).floor() as i32,
+            let dirty = {
+                let state = state.borrow();
+                let viewport = SettingsLayout::new(state.width, state.height).content;
+                RECT {
+                    left: (viewport.x * state.scale).floor() as i32,
+                    top: (viewport.y * state.scale).ceil() as i32,
+                    right: ((viewport.x + viewport.w + 14.0) * state.scale).ceil() as i32,
+                    bottom: ((viewport.y + viewport.h) * state.scale).floor() as i32,
+                }
             };
             InvalidateRect(hwnd, &dirty, 0);
+            // Posted frame messages outrank WM_PAINT, so a scrolling animation
+            // otherwise presents only every second or third tick. Paint in the
+            // frame instead of waiting for an idle queue.
+            UpdateWindow(hwnd);
         }
         if !moving {
             state.borrow_mut().frame_pump.stop();
@@ -1985,6 +1993,7 @@ unsafe fn reflow(hwnd: HWND, state: &RefCell<State>) -> Result<(), String> {
         {
             let mut state = state.borrow_mut();
             state.frame_pump.stop();
+            crate::native_ui::set_scroll_animating(false);
             state
                 .surface
                 .resize(rect.right.max(0) as u32, rect.bottom.max(0) as u32);
@@ -2218,6 +2227,7 @@ unsafe extern "system" fn proc(
     unsafe {
         if message == WM_NCDESTROY {
             KillTimer(hwnd, UPDATE_POLL);
+            crate::native_ui::set_scroll_animating(false);
             let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut Popup;
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
             WINDOW.with(|window| {
@@ -2411,6 +2421,7 @@ unsafe extern "system" fn proc(
                             state.scroll_motion.jump(scroll);
                         }
                         state.borrow_mut().frame_pump.stop();
+                        crate::native_ui::set_scroll_animating(false);
                         SetWindowTextW(
                             GetDlgItem(hwnd, 1),
                             wide(tr(if about { "Back to settings" } else { "Close" })).as_ptr(),
@@ -3377,12 +3388,12 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn scroll_frames_queue_parent_paint_only_when_the_displayed_pixel_changes() {
+    fn scroll_frames_present_only_when_the_displayed_pixel_changes() {
         let popup = HiddenPopup::new(1.25);
         popup.paint();
         unsafe {
             // Win32 discards partial invalidation on hidden parents. Use an
-            // offscreen, nonactivating window to observe the queued dirty region.
+            // offscreen, nonactivating window to observe real paint delivery.
             SetWindowPos(
                 popup.hwnd,
                 null_mut(),
@@ -3392,25 +3403,23 @@ pub(crate) mod tests {
                 0,
                 SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
             );
+            SetWindowLongPtrW(popup.hwnd, GWLP_WNDPROC, proc as *const () as isize);
             ShowWindow(popup.hwnd, SW_SHOWNOACTIVATE);
             ValidateRect(popup.hwnd, null());
             for offset in [0.1, 0.2, 0.3] {
                 popup.popup.state.borrow_mut().scroll_motion.jump(offset);
                 advance_scroll(popup.hwnd, &popup.popup.state, Instant::now());
                 assert_eq!(GetUpdateRect(popup.hwnd, null_mut(), 0), 0);
+                assert_eq!(popup.popup.state.borrow().surface.presents, 1);
             }
-            popup.popup.state.borrow_mut().scroll_motion.jump(1.0);
-            advance_scroll(popup.hwnd, &popup.popup.state, Instant::now());
-            assert_ne!(
-                GetUpdateRect(popup.hwnd, null_mut(), 0),
-                0,
-                "moving content needs a queued parent paint, not just child moves"
-            );
-            assert_eq!(
-                popup.popup.state.borrow().surface.presents,
-                1,
-                "scroll frames must not present synchronously"
-            );
+            for (offset, presents) in [(1.0, 2), (2.0, 3)] {
+                popup.popup.state.borrow_mut().scroll_motion.jump(offset);
+                advance_scroll(popup.hwnd, &popup.popup.state, Instant::now());
+                // Posted frame messages outrank WM_PAINT, so a scroll frame
+                // must present before returning rather than queueing a paint.
+                assert_eq!(GetUpdateRect(popup.hwnd, null_mut(), 0), 0);
+                assert_eq!(popup.popup.state.borrow().surface.presents, presents);
+            }
         }
     }
 

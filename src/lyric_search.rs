@@ -163,7 +163,8 @@ mod native {
     const ROW_HEIGHT: f32 = 64.0;
     const POLL: usize = 1;
     const SCROLL_FRAME: u32 = WM_APP + 45;
-    const STYLE: u32 = WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN;
+    // No WS_CAPTION: DWM otherwise keeps a native title bar over our custom header.
+    const STYLE: u32 = WS_POPUP | WS_THICKFRAME | WS_SYSMENU | WS_CLIPCHILDREN;
     // SS_OWNERDRAW preserves a real static control and its accessible status text.
     const STATUS_STYLE: u32 = 0x0d;
 
@@ -565,7 +566,7 @@ mod native {
                     viewport,
                     null(),
                     null_mut(),
-                    RDW_INVALIDATE | RDW_FRAME | RDW_NOCHILDREN,
+                    RDW_INVALIDATE | RDW_FRAME | RDW_UPDATENOW | RDW_NOCHILDREN,
                 );
             }
             access(hwnd, |state| {
@@ -581,6 +582,7 @@ mod native {
                 };
                 if !reuse {
                     InvalidateRect(list, &visible, 0);
+                    UpdateWindow(list);
                 } else {
                     // Native LB_SETTOPINDEX can dirty the entire list. Preserve
                     // the already drawn viewport and repaint only new pixels.
@@ -605,10 +607,12 @@ mod native {
                     ReleaseDC(list, dc);
                     if !restored {
                         InvalidateRect(list, &visible, 0);
+                        UpdateWindow(list);
                         return;
                     }
                     if let Some(dirty) = exposed_scroll_strip(visible, delta) {
                         InvalidateRect(list, &dirty, 0);
+                        UpdateWindow(list);
                     }
                 }
             }
@@ -636,6 +640,7 @@ mod native {
     }
 
     unsafe fn stop_results_timer(hwnd: HWND) {
+        native_ui::set_scroll_animating(false);
         unsafe {
             access(hwnd, |state| {
                 if state.loading_since.is_none() {
@@ -685,12 +690,16 @@ mod native {
             .unwrap_or(false);
             if loading {
                 invalidate_loading(hwnd);
+                // The loading band is a moving indicator; paint it in the frame
+                // instead of leaving it to an idle message queue.
+                UpdateWindow(hwnd);
             }
             let (changed, moving) = access(hwnd, |state| {
                 let changed = state.results_scroll.tick(now);
                 (changed, state.results_scroll.moving())
             })
             .unwrap_or((false, false));
+            native_ui::set_scroll_animating(moving);
             // Wheel retargeting can already advance and settle SmoothScroll.
             // Apply its final offset before stopping, even if this tick is idle.
             if changed || !moving {
@@ -1362,6 +1371,14 @@ mod native {
                                 Some(count),
                             );
                         }
+                        // Results replace every row at once; present the list,
+                        // status and action state as one complete frame.
+                        RedrawWindow(
+                            hwnd,
+                            null(),
+                            null_mut(),
+                            RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN,
+                        );
                     }
                     Event::Error(error) => {
                         let available = access(hwnd, |state| {
@@ -2004,6 +2021,7 @@ mod native {
                 }
                 WM_NCDESTROY => {
                     KillTimer(hwnd, POLL);
+                    native_ui::set_scroll_animating(false);
                     let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut RefCell<State>;
                     SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
                     WINDOW.with(|window| {
