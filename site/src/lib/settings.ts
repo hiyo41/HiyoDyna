@@ -1,6 +1,7 @@
 export type Motion = 'slow' | 'normal' | 'fast';
 export type Bounce = 'low' | 'medium' | 'high';
 export type Accent = 'ice' | 'amber' | 'mint';
+export type Dock = 'left' | 'center' | 'right';
 
 export interface IslandSettings {
   motion: Motion;
@@ -10,6 +11,8 @@ export interface IslandSettings {
   showSeconds: boolean;
   gap: 0 | 8 | 16;
   shadow: boolean;
+  dock: Dock;
+  compactLyrics: boolean;
 }
 
 export const DEFAULT_SETTINGS: IslandSettings = {
@@ -20,6 +23,8 @@ export const DEFAULT_SETTINGS: IslandSettings = {
   showSeconds: true,
   gap: 0,
   shadow: true,
+  dock: 'center',
+  compactLyrics: true,
 };
 
 export const ACCENTS: Record<Accent, string> = {

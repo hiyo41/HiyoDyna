@@ -11,6 +11,8 @@ describe('settings', () => {
       showSeconds: true,
       gap: 0,
       shadow: true,
+      dock: 'center',
+      compactLyrics: true,
     });
   });
 

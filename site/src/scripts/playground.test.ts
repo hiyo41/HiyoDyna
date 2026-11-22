@@ -20,6 +20,8 @@ describe('applySetting', () => {
       showSeconds: false,
       gap: 16,
       shadow: false,
+      dock: 'center',
+      compactLyrics: true,
     });
   });
 

@@ -1,0 +1,252 @@
+---
+---
+
+<section class="section" id="lyrics">
+  <div class="wrap">
+    <div class="section-head">
+      <h2>Lyrics that keep time.</h2>
+      <p class="lede">
+        Play music in Spotify or any app that publishes a Windows media session. HiyoDyna
+        follows along with synchronized lyrics, in the expanded player and on the collapsed
+        capsule.
+      </p>
+    </div>
+
+    <div class="lyrics">
+      <ul class="lyrics__facts">
+        <li>
+          <strong>Providers</strong>
+          AMLL TTML DB, LRCLIB, and NetEase. No account or API key required.
+        </li>
+        <li>
+          <strong>Timing</strong>
+          Word timing first, then line timing. Untimed text is ignored.
+        </li>
+        <li>
+          <strong>Find lyrics</strong>
+          Search by title and artist, then apply a recording in one click.
+        </li>
+        <li>
+          <strong>Control</strong>
+          Auto, Lines, or Words mode and a timing offset live in Settings.
+        </li>
+        <li>
+          <strong>Cache</strong>
+          Bounded to 128 entries under <code>%LOCALAPPDATA%\HiyoDyna\lyrics</code>.
+        </li>
+      </ul>
+
+      <div class="lyrics__mock" aria-hidden="true">
+        <p class="lyrics__mock-label">Illustration</p>
+        <div class="lyrics__player">
+          <div class="lyrics__player-head">
+            <span class="lyrics__source">Spotify</span>
+            <span class="lyrics__track">Night Train · Oscar Peterson</span>
+          </div>
+          <div class="lyrics__artwork"></div>
+          <div class="lyrics__progress">
+            <span>1:24</span>
+            <div class="lyrics__bar"><span class="lyrics__bar-fill"></span></div>
+            <span>3:41</span>
+          </div>
+          <div class="lyrics__controls">
+            <span>‹‹</span><span>❚❚</span><span>››</span>
+          </div>
+          <div class="lyrics__lines">
+            <p class="lyrics__line lyrics__line--muted">The wheels are turning</p>
+            <p class="lyrics__line lyrics__line--active">And the night is burning</p>
+            <p class="lyrics__line lyrics__line--muted">Through the city lights</p>
+          </div>
+        </div>
+        <div class="lyrics__capsule">
+          <span class="lyrics__capsule-dot"></span>
+          <span class="lyrics__capsule-text">And the night is burning</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<style>
+  .lyrics {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.05fr);
+    gap: clamp(32px, 6vw, 80px);
+    align-items: start;
+  }
+
+  .lyrics__facts {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    border-top: 1px solid var(--hairline);
+  }
+
+  .lyrics__facts li {
+    display: grid;
+    grid-template-columns: minmax(0, 0.85fr) minmax(0, 1.15fr);
+    gap: 12px clamp(16px, 3vw, 40px);
+    padding-block: 18px;
+    border-bottom: 1px solid var(--hairline);
+    font-size: 14px;
+    line-height: 1.6;
+    color: var(--text-secondary);
+  }
+
+  .lyrics__facts strong {
+    font-family: var(--font-display);
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    color: var(--text);
+  }
+
+  .lyrics__mock {
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+    align-items: center;
+  }
+
+  .lyrics__mock-label {
+    font-size: 11px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+  }
+
+  .lyrics__player {
+    width: 100%;
+    max-width: 360px;
+    padding: 18px;
+    border: 1px solid var(--hairline);
+    border-radius: 14px;
+    background: var(--surface);
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  .lyrics__player-head {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .lyrics__source {
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--accent);
+  }
+
+  .lyrics__track {
+    font-family: var(--font-display);
+    font-size: 15px;
+    letter-spacing: -0.015em;
+    color: var(--text);
+  }
+
+  .lyrics__artwork {
+    width: 64px;
+    height: 64px;
+    border-radius: 8px;
+    background:
+      radial-gradient(circle at 30% 30%, color-mix(in srgb, var(--accent) 35%, transparent), transparent 60%),
+      #1a1c1d;
+  }
+
+  .lyrics__progress {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+
+  .lyrics__bar {
+    flex: 1;
+    height: 3px;
+    border-radius: 2px;
+    background: rgb(255 255 255 / 10%);
+    overflow: hidden;
+  }
+
+  .lyrics__bar-fill {
+    display: block;
+    width: 36%;
+    height: 100%;
+    background: var(--accent);
+  }
+
+  .lyrics__controls {
+    display: flex;
+    justify-content: center;
+    gap: 24px;
+    font-size: 16px;
+    color: var(--text-secondary);
+  }
+
+  .lyrics__lines {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding-top: 6px;
+    border-top: 1px solid var(--hairline);
+  }
+
+  .lyrics__line {
+    margin: 0;
+    font-size: 14px;
+    line-height: 1.4;
+  }
+
+  .lyrics__line--active {
+    color: var(--text);
+    font-family: var(--font-display);
+    letter-spacing: -0.01em;
+  }
+
+  .lyrics__line--muted {
+    color: var(--text-muted);
+  }
+
+  .lyrics__capsule {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 16px;
+    border: 1px solid var(--hairline);
+    border-radius: 999px;
+    background: var(--capsule-top);
+    max-width: 100%;
+  }
+
+  .lyrics__capsule-dot {
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 8px color-mix(in srgb, var(--accent) 55%, transparent);
+    flex-shrink: 0;
+  }
+
+  .lyrics__capsule-text {
+    font-size: 13px;
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  @media (max-width: 900px) {
+    .lyrics {
+      grid-template-columns: 1fr;
+    }
+
+    .lyrics__facts li {
+      grid-template-columns: 1fr;
+      gap: 4px;
+    }
+  }
+</style>

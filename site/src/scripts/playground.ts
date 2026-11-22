@@ -3,6 +3,7 @@ import {
   resetSettings,
   type Accent,
   type Bounce,
+  type Dock,
   type IslandSettings,
   type Motion,
 } from '../lib/settings';
@@ -11,6 +12,7 @@ import { getIsland, initIslands } from './island';
 const MOTIONS = new Set<Motion>(['slow', 'normal', 'fast']);
 const BOUNCES = new Set<Bounce>(['low', 'medium', 'high']);
 const ACCENTS = new Set<Accent>(['ice', 'amber', 'mint']);
+const DOCKS = new Set<Dock>(['left', 'center', 'right']);
 
 export function applySetting(settings: IslandSettings, name: string, value: string): IslandSettings {
   switch (name) {
@@ -32,6 +34,10 @@ export function applySetting(settings: IslandSettings, name: string, value: stri
       const gap = Number(value);
       return gap === 0 || gap === 8 || gap === 16 ? { ...settings, gap } : settings;
     }
+    case 'dock':
+      return DOCKS.has(value as Dock) ? { ...settings, dock: value as Dock } : settings;
+    case 'compactLyrics':
+      return value === 'true' || value === 'false' ? { ...settings, compactLyrics: value === 'true' } : settings;
     default:
       return settings;
   }

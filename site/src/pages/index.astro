@@ -3,6 +3,7 @@ import Base from '../layouts/Base.astro';
 import Island from '../components/Island.astro';
 import SettingsPanel from '../components/SettingsPanel.astro';
 import FeatureList from '../components/FeatureList.astro';
+import Lyrics from '../components/Lyrics.astro';
 import Faq from '../components/Faq.astro';
 import DownloadButton from '../components/DownloadButton.astro';
 import { DEFAULT_SETTINGS } from '../lib/settings';
@@ -23,6 +24,7 @@ const source = 'https://github.com/hiyo41/HiyoDyna';
       </a>
       <nav class="site-header__nav" aria-label="Sections">
         <a href="#features">Features</a>
+        <a href="#lyrics">Lyrics</a>
         <a href="#settings">Settings</a>
         <a href="#install">Install</a>
         <a href="#faq">FAQ</a>
@@ -38,14 +40,19 @@ const source = 'https://github.com/hiyo41/HiyoDyna';
 
       <div class="wrap hero__inner">
         <div class="hero__island">
-          <Island id="hero" hint="Hover or tap the island" />
+          <Island
+            id="hero"
+            hint="Hover or tap the island"
+            settings={{ ...DEFAULT_SETTINGS, compactLyrics: false }}
+          />
         </div>
 
         <div class="hero__copy">
           <h1>A Dynamic Island-style clock for Windows.</h1>
           <p class="lede">
-            A small capsule that sits at the top of your screen. Hover to see the date, the time,
-            and the seconds. Written in Rust, drawn with Win32, and under 2 MB.
+            A small capsule at the top of your screen. Hover for the date and the seconds; scroll
+            for media controls and synchronized lyrics. Written in Rust, drawn with Win32, and
+            under 2 MB.
           </p>
           <div class="button-row hero__actions">
             <DownloadButton />
@@ -72,8 +79,8 @@ const source = 'https://github.com/hiyo41/HiyoDyna';
           <span class="fact__label">No browser engine</span>
         </div>
         <div class="fact">
-          <span class="fact__value">No webview</span>
-          <span class="fact__label">No Electron runtime</span>
+          <span class="fact__value">Synced lyrics</span>
+          <span class="fact__label">Spotify and media sessions</span>
         </div>
         <div class="fact">
           <span class="fact__value">Software-rendered</span>
@@ -94,6 +101,8 @@ const source = 'https://github.com/hiyo41/HiyoDyna';
         <FeatureList />
       </div>
     </section>
+
+    <Lyrics />
 
     <section class="section settings-section" id="settings">
       <div class="wrap">
@@ -195,10 +204,21 @@ const source = 'https://github.com/hiyo41/HiyoDyna';
               release, Stable uses the newest pre-release. Portable builds start on Stable; setup
               installs start on Build. Both verify SHA-256 before applying.
             </p>
+            <h3>Source install</h3>
+            <p>
+              Developers can run <code>scripts/setup.ps1</code> to build locally and install per-user
+              under <code>%LOCALAPPDATA%\Programs\HiyoDyna</code>, with Desktop and Start Menu
+              shortcuts, an uninstall entry, and optional Start with Windows. The release download
+              stays the portable executable.
+            </p>
             <h3>Uninstall</h3>
             <p>
-              Exit the app, delete <code>HiyoDyna.exe</code>, and remove{' '}
-              <code>%APPDATA%\HiyoDyna</code> if you want a clean slate.
+              Portable: turn off Start with Windows, exit the app, delete{' '}
+              <code>HiyoDyna.exe</code>, and remove <code>%APPDATA%\HiyoDyna</code> for settings.
+            </p>
+            <p>
+              Source install: run the uninstall entry or <code>uninstall.ps1</code>; use{' '}
+              <code>-KeepSettings</code> to keep your settings.
             </p>
             <a class="text-link" href={`${source}#install-from-source`}>Install from source</a>
           </aside>

@@ -27,6 +27,8 @@ const accent = ACCENTS[settings.accent];
       class="island"
       data-island={id}
       data-expanded="false"
+      data-dock={settings.dock}
+      data-compact-lyrics={settings.compactLyrics ? 'true' : 'false'}
       data-settings={JSON.stringify(settings)}
       style={`--island-accent:${accent};--p:0;--compact-opacity:1;--expanded-opacity:0`}
     >
@@ -61,9 +63,12 @@ const accent = ACCENTS[settings.accent];
 
         <div class="island__text island__text--compact" aria-hidden="false">
           <span class="island__dot" aria-hidden="true"></span>
-          <span class="island__time island__time--compact" data-time-compact>14:03</span>
-          <span class="island__meridiem" data-meridiem-compact></span>
-          <span class="island__seconds" data-seconds-compact>31</span>
+          <span class="island__clock-compact">
+            <span class="island__time island__time--compact" data-time-compact>14:03</span>
+            <span class="island__meridiem" data-meridiem-compact></span>
+            <span class="island__seconds" data-seconds-compact>31</span>
+          </span>
+          <span class="island__lyric-compact" data-lyric-compact>Compact lyrics preview</span>
         </div>
 
         <div class="island__text island__text--expanded" aria-hidden="true">
@@ -115,6 +120,37 @@ const accent = ACCENTS[settings.accent];
     height: 190px;
     transform: translateX(-50%) scale(var(--island-scale, 1));
     transform-origin: top center;
+  }
+
+  .island[data-dock='left'] {
+    left: 0;
+    transform: scale(var(--island-scale, 1));
+    transform-origin: top left;
+  }
+
+  .island[data-dock='right'] {
+    left: 100%;
+    transform: translateX(-100%) scale(var(--island-scale, 1));
+    transform-origin: top right;
+  }
+
+  .island__lyric-compact {
+    display: none;
+    font-size: 13px;
+    color: #faf8f7;
+    letter-spacing: -0.01em;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 150px;
+  }
+
+  .island[data-compact-lyrics='true'] .island__clock-compact {
+    display: none;
+  }
+
+  .island[data-compact-lyrics='true'] .island__lyric-compact {
+    display: inline-block;
   }
 
   .island__button {

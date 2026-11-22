@@ -209,6 +209,8 @@ class Island implements IslandController {
     this.root.dataset.shadow = this.settings.shadow ? 'soft' : 'off';
     this.root.dataset.seconds = this.settings.showSeconds ? 'on' : 'off';
     this.root.dataset.hour12 = this.settings.hour12 ? 'true' : 'false';
+    this.root.dataset.dock = this.settings.dock;
+    this.root.dataset.compactLyrics = this.settings.compactLyrics ? 'true' : 'false';
   }
 
   private updateClock = (): void => {

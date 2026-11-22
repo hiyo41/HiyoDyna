@@ -18,7 +18,12 @@ const faqs = [
   {
     question: 'Which monitor does it use?',
     answer:
-      'It pins to the primary display, centered at the top edge. Position presets can add an 8 or 16 px gap below the edge.',
+      'It pins to the primary display at the top edge. Docking can be left, center, or right, with an optional 8 or 16 px gap below the edge.',
+  },
+  {
+    question: 'Which apps work for lyrics?',
+    answer:
+      'Any app that publishes a Windows media session. Spotify desktop is preferred automatically when its session is available; no login is required.',
   },
   {
     question: 'How do updates work?',
@@ -28,7 +33,7 @@ const faqs = [
   {
     question: 'How do I uninstall it?',
     answer:
-      'Turn off Start with Windows in the tray, exit the app, and delete HiyoDyna.exe. Delete %APPDATA%\\HiyoDyna too if you want to remove your settings.',
+      'For the portable build, turn off Start with Windows, exit the app, delete HiyoDyna.exe, and remove %APPDATA%\\HiyoDyna for settings. For a source install, run the uninstall entry or uninstall.ps1; use -KeepSettings to keep your settings.',
   },
   {
     question: 'Do I need Rust?',

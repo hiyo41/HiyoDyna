@@ -2,31 +2,35 @@
 const features = [
   {
     title: 'Hover to expand',
-    body: 'The capsule opens with a short spring and collapses 160 ms after the pointer leaves.',
+    body: 'The capsule opens with a short spring and collapses 160 ms after the pointer leaves. Dragging keeps it open.',
   },
   {
     title: 'A real clock',
     body: '24-hour or 12-hour time, optional seconds, and the weekday and date in the expanded panel.',
   },
   {
-    title: 'Three accents',
-    body: 'Ice, Amber, or Mint. The indicator, divider, and hover glow follow the same color.',
+    title: 'Media controls',
+    body: 'Transport, seeking, and a source picker from any Windows media session. Spotify is preferred when available.',
   },
   {
-    title: 'The tray is the settings',
-    body: 'Motion, bounce, shadow, position, clock, seconds, and the update channel. No settings window to learn.',
+    title: 'Synchronized lyrics',
+    body: 'Word timing first, then line timing, from AMLL TTML DB, LRCLIB, and NetEase. No account or API key.',
+  },
+  {
+    title: 'Compact lyrics',
+    body: 'The capsule shows the current line, previews the next, and pulses before it starts. Falls back to the clock.',
+  },
+  {
+    title: 'Theme and accents',
+    body: 'Black, gray, and white surfaces with Ice, Amber, or Mint pastel accents across the island and windows.',
+  },
+  {
+    title: 'Native windows',
+    body: 'Resizable Settings with category navigation and a Find lyrics search. Changes apply immediately.',
   },
   {
     title: 'Stays out of the way',
-    body: 'Flush to the top edge, absent from the taskbar, and it does not activate when clicked.',
-  },
-  {
-    title: 'Native by construction',
-    body: 'Rust, Win32, and GDI software rendering. There is no browser engine in the process, and no runtime to install.',
-  },
-  {
-    title: 'Start with Windows, if you want',
-    body: 'One tray toggle adds HiyoDyna to startup. The portable executable needs no installer or admin prompt.',
+    body: 'Flush to the top edge, absent from the taskbar, click-through on Ctrl+Alt+D, and it retracts over fullscreen.',
   },
   {
     title: 'Updates that verify',
@@ -42,7 +46,7 @@ const features = [
         <div class="feature__body">
           <h3>{feature.title}</h3>
           <p>{feature.body}</p>
-          {feature.title === 'Three accents' && (
+          {feature.title === 'Theme and accents' && (
             <span class="feature__accents" aria-hidden="true">
               <span style="--dot:#8FC7FF"></span>
               <span style="--dot:#FFC478"></span>

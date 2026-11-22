@@ -30,6 +30,12 @@ const gaps = [
   { value: '8', label: '8 px' },
   { value: '16', label: '16 px' },
 ] as const;
+
+const docks = [
+  { value: 'left', label: 'Left' },
+  { value: 'center', label: 'Center' },
+  { value: 'right', label: 'Right' },
+] as const;
 ---
 
 <div class="settings-panel">
@@ -114,6 +120,11 @@ const gaps = [
           <span class="switch__track" aria-hidden="true"><span class="switch__knob"></span></span>
           <span>Soft shadow</span>
         </label>
+        <label class="switch">
+          <input type="checkbox" name="compactLyrics" value="true" checked={settings.compactLyrics} />
+          <span class="switch__track" aria-hidden="true"><span class="switch__knob"></span></span>
+          <span>Compact lyrics</span>
+        </label>
       </div>
     </fieldset>
 
@@ -128,6 +139,25 @@ const gaps = [
                 name="gap"
                 value={value}
                 checked={String(settings.gap) === value}
+              />
+              <span>{label}</span>
+            </label>
+          ))
+        }
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Dock</legend>
+      <div class="segmented">
+        {
+          docks.map(({ value, label }) => (
+            <label>
+              <input
+                type="radio"
+                name="dock"
+                value={value}
+                checked={settings.dock === value}
               />
               <span>{label}</span>
             </label>

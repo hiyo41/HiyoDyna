@@ -1,6 +1,6 @@
 # HiyoDyna website design system
 
-The site is built around one picture: the HiyoDyna capsule at the top of a dark desktop, alive. Everything else is quiet editorial support. Source values come from the app (`src/animation.rs`, `src/geometry.rs`, `src/render.rs`, `src/settings.rs`, `src/text.rs`).
+The site is built around one picture: the HiyoDyna capsule at the top of a dark desktop, alive. Everything else is quiet editorial support. Source values come from the app (`src/animation.rs`, `src/geometry.rs`, `src/render.rs`, `src/settings.rs`, `src/text.rs`, `src/theme.rs`). The app also ships a Lyrics section on the site that illustrates the player and compact lyrics.
 
 ## Direction
 
@@ -54,14 +54,15 @@ Body and secondary text pass AA on ink. Accent is used for indicators and small 
 
 - 1120px page width, 20–32px gutter, `clamp()` section rhythm.
 - Hero: island at the top, then headline, lede, actions.
-- Below: facts strip, features, playground, native, install, FAQ, footer.
+- Below: facts strip, features, lyrics, playground, native, install, FAQ, footer.
 - Mobile: single column, 320px minimum, no horizontal scroll.
 
 ## Components
 
 - **Island:** SVG capsule + HTML text overlay; two cross-fading visual layers; a transparent `<button>` overlay carries the stable name and `aria-expanded`; the active clock layer is exposed as content; hint below.
 - **Buttons:** solid ivory primary, hairline ghost secondary, 10px radius, 50px minimum height.
-- **Settings:** native radios/checkboxes, segmented controls, switches, Reset, Preview.
+- **Settings:** native radios/checkboxes, segmented controls, switches, Reset, Preview. Adds Dock and Compact lyrics controls.
+- **Lyrics:** static editorial mock of the player and compact capsule; labelled as an illustration, no images or animation.
 - **FAQ:** native `<details>` with a drawn plus/minus.
 - **Download:** static Releases fallback; GitHub API upgrades the label and asset.
 
