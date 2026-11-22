@@ -379,6 +379,7 @@ fn button_raster(state: &mut State, item: &DRAWITEMSTRUCT, enabled: bool) -> std
             &key.label,
             crate::native_ui::ButtonStyle {
                 accent: key.accent,
+                background: crate::native_ui::BACKGROUND,
                 selected: key.selected,
                 enabled: key.enabled,
                 focused: key.item_state & ODS_FOCUS != 0,

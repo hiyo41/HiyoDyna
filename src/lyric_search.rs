@@ -181,6 +181,11 @@ mod native {
         painter: Painter,
         surface: native_ui::WindowSurface,
         frame_pump: native_ui::FramePump,
+        loading_since: Option<Instant>,
+        loading_elapsed: f32,
+        results_placement: Option<ResultsPlacement>,
+        results_surface: Option<native_ui::WindowSurface>,
+        results_name: Option<ResultsName>,
         background: Option<((u32, u32), Vec<u8>)>,
         track: (String, String, String),
         status: String,
@@ -212,6 +217,15 @@ mod native {
     struct RowRaster {
         key: RowKey,
         pixels: Arc<[u8]>,
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    struct ResultsPlacement {
+        offset: i32,
+        row: i32,
+        width: i32,
+        height: i32,
+        max: i32,
     }
 
     fn result_raster(
@@ -274,6 +288,99 @@ mod native {
         unsafe {
             let viewport = GetDlgItem(hwnd, RESULTS_VIEWPORT);
             GetDlgItem(if viewport.is_null() { hwnd } else { viewport }, RESULTS)
+        }
+    }
+
+    struct ResultsName {
+        list: HWND,
+        service: Option<windows::Win32::UI::Accessibility::IAccPropServices>,
+        initialized: bool,
+    }
+
+    impl ResultsName {
+        unsafe fn new(list: HWND) -> windows::core::Result<Self> {
+            use windows::Win32::System::Com::{
+                CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
+            };
+            use windows::Win32::UI::Accessibility::CAccPropServices;
+            unsafe {
+                let mut annotation = Self {
+                    list,
+                    service: None,
+                    initialized: CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok(),
+                };
+                annotation.service = Some(CoCreateInstance(
+                    &CAccPropServices,
+                    None,
+                    CLSCTX_INPROC_SERVER,
+                )?);
+                Ok(annotation)
+            }
+        }
+
+        unsafe fn update(&self, label: &str) -> windows::core::Result<()> {
+            use windows::Win32::UI::Accessibility::{Name_Property_GUID, PROPID_ACC_NAME};
+            unsafe {
+                let name = wide(label);
+                for property in [PROPID_ACC_NAME, Name_Property_GUID] {
+                    self.service.as_ref().unwrap().SetHwndPropStr(
+                        windows::Win32::Foundation::HWND(self.list),
+                        OBJID_CLIENT as u32,
+                        0,
+                        property,
+                        windows::core::PCWSTR(name.as_ptr()),
+                    )?;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    impl Drop for ResultsName {
+        fn drop(&mut self) {
+            use windows::Win32::UI::Accessibility::{Name_Property_GUID, PROPID_ACC_NAME};
+            unsafe {
+                if let Some(service) = self.service.take() {
+                    if IsWindow(self.list) != 0 {
+                        let _ = service.ClearHwndProps(
+                            windows::Win32::Foundation::HWND(self.list),
+                            OBJID_CLIENT as u32,
+                            0,
+                            &[PROPID_ACC_NAME, Name_Property_GUID],
+                        );
+                    }
+                    drop(service);
+                }
+                if self.initialized {
+                    windows::Win32::System::Com::CoUninitialize();
+                }
+            }
+        }
+    }
+
+    unsafe fn name_results(hwnd: HWND, label: &str) -> bool {
+        unsafe {
+            let list = results(hwnd);
+            SetWindowTextW(list, wide(label).as_ptr());
+            // Annotate the native provider, keeping its COM apartment alive
+            // until the search window closes; WM_GETTEXT alone is not a UIA name.
+            let Some(existing) = access(hwnd, |state| state.results_name.take()) else {
+                return false;
+            };
+            let annotation = match existing.map_or_else(|| ResultsName::new(list), Ok) {
+                Ok(annotation) => annotation,
+                Err(error) => {
+                    eprintln!("Lyrics result accessible name: {error}");
+                    return false;
+                }
+            };
+            let result = annotation.update(label);
+            access(hwnd, |state| state.results_name = Some(annotation));
+            if let Err(error) = result {
+                eprintln!("Lyrics result accessible name: {error}");
+                return false;
+            }
+            true
         }
     }
 
@@ -355,14 +462,19 @@ mod native {
             if viewport.is_null() {
                 return;
             }
-            let Some(offset) = access(hwnd, |state| {
+            let Some((offset, previous)) = access(hwnd, |state| {
                 state.results_scroll.clamp(max);
                 if !state.results_scroll.moving() {
-                    state.frame_pump.stop();
+                    if state.loading_since.is_none() {
+                        state.frame_pump.stop();
+                    }
                     state.results_timer = false;
                 }
                 state.results_syncing = true;
-                state.results_scroll.offset().round() as i32
+                (
+                    state.results_scroll.offset().round() as i32,
+                    state.results_placement,
+                )
             }) else {
                 return;
             };
@@ -370,22 +482,68 @@ mod native {
             GetClientRect(viewport, &mut rect);
             let list = results(hwnd);
             let remainder = offset % row;
+            let placement = ResultsPlacement {
+                offset,
+                row,
+                width: rect.right.max(0),
+                height,
+                max: max as i32,
+            };
+            let geometry_changed = previous.is_none_or(|old| {
+                old.width != placement.width || old.height != height || old.row != row
+            });
+            let moved = previous.is_none_or(|old| old.offset != offset) || geometry_changed;
+            let top = SendMessageW(list, LB_GETTOPINDEX, 0, 0);
+            if previous == Some(placement) && top == (offset / row) as isize {
+                access(hwnd, |state| state.results_syncing = false);
+                native_ui::trace_ui("lyric_search", "reposition", started);
+                return;
+            }
+            let pending = GetUpdateRect(list, null_mut(), 0) != 0;
+            let delta = offset - previous.map_or(offset, |old| old.offset);
+            let mut reuse = moved && !geometry_changed && !pending && delta.abs() < height;
+            if reuse {
+                let dc = GetDC(list);
+                reuse = access(hwnd, |state| {
+                    let Some(surface) = state.results_surface.as_mut() else {
+                        return false;
+                    };
+                    if surface.resize(placement.width as u32, height as u32) {
+                        let top = previous.unwrap().offset % row;
+                        surface.copy_from(
+                            dc,
+                            RECT {
+                                left: 0,
+                                top,
+                                right: placement.width,
+                                bottom: top + height,
+                            },
+                        )
+                    } else {
+                        false
+                    }
+                })
+                .unwrap_or(false);
+                ReleaseDC(list, dc);
+            }
             // Keep the native scrollbar for its standard accessibility provider,
             // but clip its nonclient strip beyond the viewport's right edge.
             // LBS_DISABLENOSCROLL keeps this width stable for short/empty lists.
             let scrollbar_width = GetSystemMetricsForDpi(SM_CXVSCROLL, GetDpiForWindow(list));
             // The bottom edge stays at the viewport bottom. In particular,
             // native auto-scroll does not count an extra hidden complete row.
-            SetWindowPos(
-                list,
-                null_mut(),
-                0,
-                -remainder,
-                rect.right.max(0) + scrollbar_width,
-                height + remainder,
-                SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOCOPYBITS | SWP_NOREDRAW,
-            );
-            if SendMessageW(list, LB_GETTOPINDEX, 0, 0) != (offset / row) as isize {
+            if geometry_changed || previous.is_none_or(|old| old.offset % row != remainder) {
+                SetWindowPos(
+                    list,
+                    null_mut(),
+                    0,
+                    -remainder,
+                    rect.right.max(0) + scrollbar_width,
+                    height + remainder,
+                    SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW,
+                );
+            }
+            if top != (offset / row) as isize {
                 SendMessageW(list, LB_SETTOPINDEX, (offset / row) as usize, 0);
             }
             let info = SCROLLINFO {
@@ -397,17 +555,90 @@ mod native {
                 nPos: offset,
                 ..Default::default()
             };
-            SetScrollInfo(viewport, SB_VERT, &info, 1);
-            access(hwnd, |state| state.results_syncing = false);
-            InvalidateRect(list, null(), 0);
+            if previous.is_none_or(|old| {
+                old.max != placement.max || old.height != height || old.offset != offset
+            }) {
+                SetScrollInfo(viewport, SB_VERT, &info, 0);
+                RedrawWindow(
+                    viewport,
+                    null(),
+                    null_mut(),
+                    RDW_INVALIDATE | RDW_FRAME | RDW_NOCHILDREN,
+                );
+            }
+            access(hwnd, |state| {
+                state.results_syncing = false;
+                state.results_placement = Some(placement);
+            });
+            if moved {
+                let visible = RECT {
+                    left: 0,
+                    top: remainder,
+                    right: placement.width,
+                    bottom: height + remainder,
+                };
+                if !reuse {
+                    InvalidateRect(list, &visible, 0);
+                } else {
+                    // Native LB_SETTOPINDEX can dirty the entire list. Preserve
+                    // the already drawn viewport and repaint only new pixels.
+                    ValidateRect(list, null());
+                    let dc = GetDC(list);
+                    let restored = access(hwnd, |state| {
+                        state.results_surface.as_ref().is_some_and(|surface| {
+                            surface.copy_to(
+                                dc,
+                                RECT {
+                                    left: 0,
+                                    top: delta.max(0),
+                                    right: placement.width,
+                                    bottom: height + delta.min(0),
+                                },
+                                0,
+                                remainder + (-delta).max(0),
+                            )
+                        })
+                    })
+                    .unwrap_or(false);
+                    ReleaseDC(list, dc);
+                    if !restored {
+                        InvalidateRect(list, &visible, 0);
+                        return;
+                    }
+                    if let Some(dirty) = exposed_scroll_strip(visible, delta) {
+                        InvalidateRect(list, &dirty, 0);
+                    }
+                }
+            }
         }
         native_ui::trace_ui("lyric_search", "reposition", started);
+    }
+
+    fn exposed_scroll_strip(visible: RECT, delta: i32) -> Option<RECT> {
+        let height = (visible.bottom - visible.top).max(0);
+        if delta == 0 || height == 0 {
+            None
+        } else if delta >= height || delta <= -height {
+            Some(visible)
+        } else if delta > 0 {
+            Some(RECT {
+                top: visible.bottom - delta,
+                ..visible
+            })
+        } else {
+            Some(RECT {
+                bottom: visible.top - delta,
+                ..visible
+            })
+        }
     }
 
     unsafe fn stop_results_timer(hwnd: HWND) {
         unsafe {
             access(hwnd, |state| {
-                state.frame_pump.stop();
+                if state.loading_since.is_none() {
+                    state.frame_pump.stop();
+                }
                 state.results_timer = false;
             });
         }
@@ -441,6 +672,18 @@ mod native {
 
     unsafe fn tick_results(hwnd: HWND, now: Instant) {
         unsafe {
+            let loading = access(hwnd, |state| {
+                if let Some(started) = state.loading_since {
+                    state.loading_elapsed = now.saturating_duration_since(started).as_secs_f32();
+                    true
+                } else {
+                    false
+                }
+            })
+            .unwrap_or(false);
+            if loading {
+                invalidate_loading(hwnd);
+            }
             let (changed, moving) = access(hwnd, |state| {
                 let changed = state.results_scroll.tick(now);
                 (changed, state.results_scroll.moving())
@@ -504,6 +747,50 @@ mod native {
         }
     }
 
+    // Retain the native pixel scrollbar's hit testing and range, but suppress
+    // its light system rendering. The list's native row scrollbar remains
+    // clipped, retaining its UIA provider and row-to-pixel mapping.
+    unsafe fn paint_viewport_scrollbar(hwnd: HWND, dc: HDC) {
+        unsafe {
+            let mut bar = SCROLLBARINFO {
+                cbSize: std::mem::size_of::<SCROLLBARINFO>() as u32,
+                ..Default::default()
+            };
+            if GetScrollBarInfo(hwnd, OBJID_VSCROLL, &mut bar) == 0 {
+                return;
+            }
+            let mut outer = RECT::default();
+            GetWindowRect(hwnd, &mut outer);
+            OffsetRect(&mut bar.rcScrollBar, -outer.left, -outer.top);
+            let brush = CreateSolidBrush(crate::theme::colorref(BACKGROUND));
+            FillRect(dc, &bar.rcScrollBar, brush);
+            DeleteObject(brush);
+            let owner = GetParent(hwnd);
+            let scrollable =
+                access(owner, |s| s.results_placement.is_some_and(|p| p.max > 0)).unwrap_or(false);
+            if scrollable && bar.xyThumbBottom > bar.xyThumbTop {
+                let scale = access(owner, |s| s.painter.scale).unwrap_or(1.0);
+                let inset = ((5.0 * scale).round() as i32)
+                    .min((bar.rcScrollBar.right - bar.rcScrollBar.left) / 3);
+                let brush = CreateSolidBrush(crate::theme::colorref(crate::theme::BORDER_STRONG));
+                let old_brush = SelectObject(dc, brush);
+                let old_pen = SelectObject(dc, GetStockObject(NULL_PEN));
+                RoundRect(
+                    dc,
+                    bar.rcScrollBar.left + inset,
+                    bar.rcScrollBar.top + bar.xyThumbTop,
+                    bar.rcScrollBar.right - inset,
+                    bar.rcScrollBar.top + bar.xyThumbBottom,
+                    (6.0 * scale).round() as i32,
+                    (6.0 * scale).round() as i32,
+                );
+                SelectObject(dc, old_pen);
+                SelectObject(dc, old_brush);
+                DeleteObject(brush);
+            }
+        }
+    }
+
     unsafe extern "system" fn viewport_proc(
         hwnd: HWND,
         message: u32,
@@ -517,6 +804,33 @@ mod native {
                     SendMessageW(owner, message, wparam, lparam)
                 }
                 WM_ERASEBKGND => 1,
+                WM_NCPAINT => {
+                    let dc = GetWindowDC(hwnd);
+                    paint_viewport_scrollbar(hwnd, dc);
+                    ReleaseDC(hwnd, dc);
+                    0
+                }
+                WM_NCACTIVATE => 1,
+                WM_PRINT => {
+                    // Memory-DC child printing does not inherit HWND clipping.
+                    // Keep the translated list and its native scrollbar inside
+                    // the viewport client, just as ordinary window painting does.
+                    let dc = wparam as HDC;
+                    let saved = SaveDC(dc);
+                    if saved == 0 {
+                        return 0;
+                    }
+                    let mut client = RECT::default();
+                    GetClientRect(hwnd, &mut client);
+                    IntersectClipRect(dc, client.left, client.top, client.right, client.bottom);
+                    let result =
+                        DefWindowProcW(hwnd, message, wparam, lparam & !(PRF_NONCLIENT as isize));
+                    RestoreDC(dc, saved);
+                    if lparam & PRF_NONCLIENT as isize != 0 {
+                        paint_viewport_scrollbar(hwnd, dc);
+                    }
+                    result
+                }
                 WM_MOUSEWHEEL => {
                     wheel_results(owner, wparam, Instant::now());
                     0
@@ -567,6 +881,17 @@ mod native {
         unsafe {
             let owner = owner as HWND;
             match message {
+                WM_PRINT => {
+                    // This native scrollbar is clipped out of the live viewport.
+                    // Printing its nonclient area resets the inherited DC clip
+                    // and leaks the upper arrow during fractional scrolling.
+                    return DefSubclassProc(
+                        hwnd,
+                        message,
+                        wparam,
+                        lparam & !(PRF_NONCLIENT as isize),
+                    );
+                }
                 WM_MOUSEWHEEL => {
                     wheel_results(owner, wparam, Instant::now());
                     return 0;
@@ -699,9 +1024,99 @@ mod native {
                 state.status = label.clone();
                 state.status_source = source.into();
                 state.status_count = count;
+                let busy = source.starts_with("Searching") || source.starts_with("Fetching");
+                if busy {
+                    if state.loading_since.is_none() {
+                        state.loading_since = Some(Instant::now());
+                        state.loading_elapsed = 0.0;
+                    }
+                    state.frame_pump.start(hwnd);
+                } else {
+                    state.loading_since = None;
+                    if !state.results_scroll.moving() {
+                        state.frame_pump.stop();
+                    }
+                }
             });
+            invalidate_loading(hwnd);
             SetWindowTextW(GetDlgItem(hwnd, STATUS), wide(&label).as_ptr());
             InvalidateRect(GetDlgItem(hwnd, STATUS), null(), 0);
+        }
+    }
+
+    fn status_tint(source: &str, count: Option<usize>) -> [u8; 3] {
+        use crate::theme;
+        if source.starts_with("Searching") || source.starts_with("Fetching") {
+            theme::ICE
+        } else if source.contains("failed")
+            || source.starts_with("Could not")
+            || source.starts_with("Enter a song")
+        {
+            theme::DANGER
+        } else if source == "Instrumental" {
+            theme::LAVENDER
+        } else if source.starts_with("No active") || source.starts_with("Play a media") {
+            theme::DIM
+        } else if source.starts_with("No synchronized") || source.contains("providers could not") {
+            theme::AMBER
+        } else if count.is_some_and(|n| n > 0) || source.starts_with("Choose Use") {
+            theme::SUCCESS
+        } else {
+            theme::MUTED
+        }
+    }
+
+    fn loading_band(layout: &SearchLayout) -> Rect {
+        Rect::new(
+            layout.search_card.x + 12.0,
+            layout.search_card.y + layout.search_card.h - 3.0,
+            (layout.search_card.w - 24.0).max(0.0),
+            2.0,
+        )
+    }
+
+    unsafe fn invalidate_loading(hwnd: HWND) {
+        unsafe {
+            let mut client = RECT::default();
+            GetClientRect(hwnd, &mut client);
+            let s = access(hwnd, |state| state.painter.scale).unwrap_or(1.0);
+            let band = loading_band(&SearchLayout::new(
+                client.right as f32 / s,
+                client.bottom as f32 / s,
+            ));
+            let dirty = RECT {
+                left: (band.x * s).floor() as i32,
+                top: (band.y * s).floor() as i32,
+                right: ((band.x + band.w) * s).ceil() as i32,
+                bottom: ((band.y + band.h) * s).ceil() as i32,
+            };
+            InvalidateRect(hwnd, &dirty, 0);
+        }
+    }
+
+    fn draw_loading(c: &mut Canvas<'_>, elapsed: f32, accent: [u8; 3]) {
+        let band = loading_band(&SearchLayout::new(
+            c.size.0 as f32 / c.painter.scale,
+            c.size.1 as f32 / c.painter.scale,
+        ));
+        if band.w <= 0.0 {
+            return;
+        }
+        let width = band.w * 0.25;
+        let offset = (elapsed * 160.0) % band.w;
+        c.rect(
+            Rect::new(band.x + offset, band.y, width.min(band.w - offset), band.h),
+            0.0,
+            accent,
+            1.0,
+        );
+        if offset + width > band.w {
+            c.rect(
+                Rect::new(band.x, band.y, offset + width - band.w, band.h),
+                0.0,
+                accent,
+                1.0,
+            );
         }
     }
 
@@ -926,6 +1341,9 @@ mod native {
                             SendMessageW(list, LB_ADDSTRING, 0, row.as_ptr() as isize);
                         }
                         SendMessageW(list, WM_SETREDRAW, 1, 0);
+                        // Result replacement changes every row even when the
+                        // viewport's rounded position and size stay unchanged.
+                        InvalidateRect(list, null(), 0);
                         position_results(hwnd);
                         if count == 0 {
                             text(
@@ -1185,22 +1603,66 @@ mod native {
 
     unsafe fn resize_surface(hwnd: HWND) {
         unsafe {
+            compose_background(hwnd);
+        }
+    }
+
+    unsafe fn compose_background(hwnd: HWND) {
+        let started = native_ui::trace_start();
+        unsafe {
             let mut rect = RECT::default();
             GetClientRect(hwnd, &mut rect);
+            let size = (rect.right.max(0) as u32, rect.bottom.max(0) as u32);
             access(hwnd, |state| {
-                state
-                    .surface
-                    .resize(rect.right.max(0) as u32, rect.bottom.max(0) as u32);
+                let pixels = match state.background.take() {
+                    Some((cached, pixels)) if cached == size => pixels,
+                    _ => {
+                        let mut pixels = vec![0; (size.0 * size.1 * 4) as usize];
+                        draw_background(
+                            &mut Canvas::new(&mut pixels, size, &mut state.painter),
+                            &state.track,
+                        );
+                        pixels
+                    }
+                };
+                if state.surface.resize(size.0, size.1) {
+                    // Restore the entire opaque client, even for a strip paint.
+                    // Presentation still copies only the native dirty region.
+                    state.surface.pixels_mut().copy_from_slice(&pixels);
+                    if state.loading_since.is_some() {
+                        draw_loading(
+                            &mut Canvas::new(state.surface.pixels_mut(), size, &mut state.painter),
+                            state.loading_elapsed,
+                            state.accent,
+                        );
+                    }
+                }
+                state.background = Some((size, pixels));
             });
+        }
+        native_ui::trace_ui("lyric_search", "compose", started);
+    }
+
+    unsafe fn paint_background(hwnd: HWND, dc: HDC, dirty: RECT) {
+        unsafe {
+            compose_background(hwnd);
+            let started = native_ui::trace_start();
+            access(hwnd, |state| state.surface.present(dc, dirty));
+            native_ui::trace_ui("lyric_search", "present", started);
         }
     }
 
     unsafe fn layout(hwnd: HWND) {
         unsafe {
+            layout_scaled(hwnd, scale(hwnd));
+        }
+    }
+
+    unsafe fn layout_scaled(hwnd: HWND, s: f64) {
+        unsafe {
             resize_surface(hwnd);
             let mut rect = RECT::default();
             GetClientRect(hwnd, &mut rect);
-            let s = scale(hwnd);
             let width = (f64::from(rect.right) / s) as f32;
             let height = (f64::from(rect.bottom) / s) as f32;
             for (id, bounds) in SearchLayout::new(width, height).controls() {
@@ -1220,8 +1682,14 @@ mod native {
 
     unsafe fn set_font(hwnd: HWND) {
         unsafe {
+            set_font_scaled(hwnd, scale(hwnd));
+        }
+    }
+
+    unsafe fn set_font_scaled(hwnd: HWND, dpi_scale: f64) {
+        unsafe {
             let font = CreateFontW(
-                (-13.0 * scale(hwnd)) as i32,
+                (-13.0 * dpi_scale) as i32,
                 0,
                 0,
                 0,
@@ -1268,9 +1736,9 @@ mod native {
                 results(hwnd),
                 LB_SETITEMHEIGHT,
                 0,
-                (f64::from(ROW_HEIGHT) * scale(hwnd)).round() as isize,
+                (f64::from(ROW_HEIGHT) * dpi_scale).round() as isize,
             );
-            let s = scale(hwnd) as f32;
+            let s = dpi_scale as f32;
             access(hwnd, |state| {
                 if let Ok(painter) = Painter::new(s) {
                     state.painter = painter;
@@ -1340,36 +1808,16 @@ mod native {
                     .unwrap_or(null_mut()) as isize
                 }
                 WM_PAINT => {
-                    let started = native_ui::trace_start();
                     let mut ps = PAINTSTRUCT::default();
                     let dc = BeginPaint(hwnd, &mut ps);
+                    paint_background(hwnd, dc, ps.rcPaint);
+                    EndPaint(hwnd, &ps);
+                    0
+                }
+                WM_PRINTCLIENT => {
                     let mut rect = RECT::default();
                     GetClientRect(hwnd, &mut rect);
-                    let size = (rect.right.max(0) as u32, rect.bottom.max(0) as u32);
-                    let pixels = access(hwnd, |state| match state.background.take() {
-                        Some((cached, pixels)) if cached == size => pixels,
-                        _ => {
-                            let mut pixels = vec![0; (size.0 * size.1 * 4) as usize];
-                            draw_background(
-                                &mut Canvas::new(&mut pixels, size, &mut state.painter),
-                                &state.track,
-                            );
-                            pixels
-                        }
-                    });
-                    if let Some(pixels) = pixels {
-                        native_ui::trace_ui("lyric_search", "draw", started);
-                        let present_started = native_ui::trace_start();
-                        access(hwnd, |state| {
-                            if state.surface.resize(size.0, size.1) {
-                                state.surface.pixels_mut().copy_from_slice(&pixels);
-                                state.surface.present(dc, ps.rcPaint);
-                            }
-                            state.background = Some((size, pixels));
-                        });
-                        native_ui::trace_ui("lyric_search", "present", present_started);
-                    }
-                    EndPaint(hwnd, &ps);
+                    paint_background(hwnd, wparam as HDC, rect);
                     0
                 }
                 WM_DRAWITEM => {
@@ -1396,19 +1844,7 @@ mod native {
                         let mut c = Canvas::new(&mut pixels, size, &mut state.painter);
                         if item.CtlID == STATUS as u32 {
                             c.rect(c.clip, 0.0, BACKGROUND, 1.0);
-                            let tone = if state.status_source.contains("failed")
-                                || state.status_source.starts_with("Could not")
-                                || state.status_source.starts_with("Enter a song")
-                            {
-                                [154, 164, 244]
-                            } else if state.status_source.starts_with("Searching")
-                                || state.status_source.starts_with("Fetching")
-                                || state.status_source.contains("providers could not")
-                            {
-                                [125, 196, 230]
-                            } else {
-                                MUTED
-                            };
+                            let tone = status_tint(&state.status_source, state.status_count);
                             c.rect(Rect::new(0.0, 11.0, 5.0, 5.0), 2.5, tone, 1.0);
                             let width = c.clip.w - 18.0;
                             c.ellipsis(
@@ -1428,6 +1864,11 @@ mod native {
                                 &mut c,
                                 tr(label),
                                 ButtonStyle {
+                                    background: if item.CtlID == SEARCH as u32 {
+                                        SURFACE
+                                    } else {
+                                        BACKGROUND
+                                    },
                                     selected: item.CtlID == SEARCH as u32
                                         || item.CtlID == APPLY as u32,
                                     pressed: item.itemState & ODS_SELECTED != 0,
@@ -1543,6 +1984,11 @@ mod native {
                     DestroyWindow(hwnd);
                     0
                 }
+                WM_DESTROY => {
+                    // Clear annotations before the native child HWND is destroyed.
+                    drop(access(hwnd, |state| state.results_name.take()));
+                    0
+                }
                 WM_NCDESTROY => {
                     KillTimer(hwnd, POLL);
                     let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut RefCell<State>;
@@ -1592,6 +2038,18 @@ mod native {
                 SetForegroundWindow(existing);
                 return;
             }
+            if let Some(hwnd) = create(owner, snapshot) {
+                ShowWindow(hwnd, SW_SHOW);
+                SetForegroundWindow(hwnd);
+                SetFocus(GetDlgItem(hwnd, TITLE));
+            }
+        }
+    }
+
+    // Construct before activation so native fixtures can render the real host
+    // offscreen without ever flashing a preview on the user's desktop.
+    unsafe fn create(owner: HWND, snapshot: &MediaSnapshot) -> Option<HWND> {
+        unsafe {
             let class_name = wide("HiyoDynaLyricSearch");
             let instance = GetModuleHandleW(null());
             let class = WNDCLASSW {
@@ -1622,11 +2080,11 @@ mod native {
                     "Search lyrics",
                     "Could not create the lyrics search window.",
                 );
-                return;
+                return None;
             }
             let Ok(painter) = Painter::new(scale(hwnd) as f32) else {
                 DestroyWindow(hwnd);
-                return;
+                return None;
             };
             let colorref = |color: [u8; 3]| {
                 u32::from(color[2]) | (u32::from(color[1]) << 8) | (u32::from(color[0]) << 16)
@@ -1642,10 +2100,15 @@ mod native {
                     Some(surface) => surface,
                     None => {
                         DestroyWindow(hwnd);
-                        return;
+                        return None;
                     }
                 },
                 frame_pump: native_ui::FramePump::new(SCROLL_FRAME),
+                loading_since: None,
+                loading_elapsed: 0.0,
+                results_placement: None,
+                results_surface: native_ui::WindowSurface::new(),
+                results_name: None,
                 background: None,
                 track: (
                     snapshot.title.clone(),
@@ -1674,7 +2137,7 @@ mod native {
                     "Search lyrics",
                     "Could not create the lyrics search controls.",
                 );
-                return;
+                return None;
             }
             for (id, class, label, style, extended) in [
                 (TITLE_LABEL, "STATIC", "&Title", 0, 0),
@@ -1738,7 +2201,7 @@ mod native {
                         "Search lyrics",
                         "Could not create the lyrics search controls.",
                     );
-                    return;
+                    return None;
                 }
                 if matches!(id, SEARCH | APPLY | CANCEL) {
                     windows_sys::Win32::UI::Shell::SetWindowSubclass(
@@ -1749,14 +2212,14 @@ mod native {
                     );
                 }
             }
-            if !install_results_viewport(hwnd) {
+            if !install_results_viewport(hwnd) || !name_results(hwnd, tr("Search results")) {
                 DestroyWindow(hwnd);
                 native_ui::notice(
                     owner,
                     "Search lyrics",
                     "Could not create the lyrics search controls.",
                 );
-                return;
+                return None;
             }
             SendMessageW(GetDlgItem(hwnd, TITLE), EM_SETLIMITTEXT, 512, 0);
             SendMessageW(GetDlgItem(hwnd, ARTIST), EM_SETLIMITTEXT, 512, 0);
@@ -1771,11 +2234,9 @@ mod native {
                     "Search lyrics",
                     "Could not start lyrics search updates.",
                 );
-                return;
+                return None;
             }
-            ShowWindow(hwnd, SW_SHOW);
-            SetForegroundWindow(hwnd);
-            SetFocus(GetDlgItem(hwnd, TITLE));
+            Some(hwnd)
         }
     }
 
@@ -1848,6 +2309,7 @@ mod native {
             // Native EDIT accessible names come from the preceding translated STATIC;
             // WM_SETTEXT on those edits would replace the user's current search query.
             let list = results(hwnd);
+            name_results(hwnd, tr("Search results"));
             let selected = SendMessageW(list, LB_GETCURSEL, 0, 0);
             let top = SendMessageW(list, LB_GETTOPINDEX, 0, 0);
             SendMessageW(list, WM_SETREDRAW, 0, 0);
@@ -1899,6 +2361,68 @@ mod native {
         use crate::preferences::tests::NativeTestKeyboard;
         use std::time::{Duration, Instant};
         use windows_sys::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled;
+
+        struct NativeRaster {
+            dc: HDC,
+            bitmap: HBITMAP,
+            previous: HGDIOBJ,
+            bits: *mut u8,
+            size: (u32, u32),
+        }
+
+        impl NativeRaster {
+            unsafe fn new(size: (u32, u32)) -> Self {
+                unsafe {
+                    let dc = CreateCompatibleDC(null_mut());
+                    let info = BITMAPINFO {
+                        bmiHeader: BITMAPINFOHEADER {
+                            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                            biWidth: size.0 as i32,
+                            biHeight: -(size.1 as i32),
+                            biPlanes: 1,
+                            biBitCount: 32,
+                            biCompression: BI_RGB,
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    };
+                    let mut bits = null_mut();
+                    let bitmap =
+                        CreateDIBSection(dc, &info, DIB_RGB_COLORS, &mut bits, null_mut(), 0);
+                    assert!(!dc.is_null() && !bitmap.is_null());
+                    let previous = SelectObject(dc, bitmap);
+                    let mut raster = Self {
+                        dc,
+                        bitmap,
+                        previous,
+                        bits: bits.cast(),
+                        size,
+                    };
+                    raster.pixels().fill(0);
+                    raster
+                }
+            }
+
+            fn pixels(&mut self) -> &mut [u8] {
+                unsafe {
+                    GdiFlush();
+                    std::slice::from_raw_parts_mut(
+                        self.bits,
+                        (self.size.0 * self.size.1 * 4) as usize,
+                    )
+                }
+            }
+        }
+
+        impl Drop for NativeRaster {
+            fn drop(&mut self) {
+                unsafe {
+                    SelectObject(self.dc, self.previous);
+                    DeleteObject(self.bitmap);
+                    DeleteDC(self.dc);
+                }
+            }
+        }
 
         #[test]
         #[ignore = "Checks the real search host and edit retention through Island expansion; run serially"]
@@ -2066,6 +2590,215 @@ mod native {
                 pixels
             };
             assert!(render("First artist") == render("Another artist"));
+        }
+
+        #[test]
+        fn timing_chips_paint_the_complete_localized_label_at_every_dpi() {
+            use crate::i18n::{Language, tr_in};
+            for language in [Language::English, Language::Vietnamese] {
+                for scale in [1.0, 1.25, 1.5, 2.0] {
+                    for timing in ["Words", "Lines", "Unknown"] {
+                        let label = tr_in(language, timing);
+                        let mut painter = Painter::new(scale).unwrap();
+                        let size = ((472.0 * scale) as u32, (64.0 * scale) as u32);
+                        let mut actual = vec![0; (size.0 * size.1 * 4) as usize];
+                        native_ui::result_row(
+                            &mut Canvas::new(&mut actual, size, &mut painter),
+                            "Title",
+                            "Artist",
+                            &[
+                                ("AMLL TTML DB", crate::theme::LAVENDER),
+                                ("3:20", crate::theme::MUTED),
+                                (label, crate::theme::ICE),
+                            ],
+                            ButtonStyle::default(),
+                        );
+                        // A generously sized chip is an independent full-text
+                        // reference. Count solid glyph pixels, not its padding.
+                        let mut expected = vec![0; (size.0 * size.1 * 4) as usize];
+                        let mut c = Canvas::new(&mut expected, size, &mut painter);
+                        c.rect(c.clip, 0.0, BACKGROUND, 1.0);
+                        native_ui::chip(
+                            &mut c,
+                            Rect::new(14.0, 36.0, 200.0, 22.0),
+                            label,
+                            crate::theme::ICE,
+                            1.0,
+                        );
+                        let glyphs = |pixels: &[u8]| {
+                            pixels
+                                .as_chunks::<4>()
+                                .0
+                                .iter()
+                                .filter(|p| p[..3] == crate::theme::ICE)
+                                .count()
+                        };
+                        assert_eq!(
+                            glyphs(&actual),
+                            glyphs(&expected),
+                            "{language:?} {timing} at {scale}x must not ellipsize"
+                        );
+                    }
+                }
+            }
+        }
+
+        // Memory-DC printing is independent of the desktop capture boundary.
+        // Standard EDIT text needs an initialized offscreen host for previews.
+        unsafe fn printed_window(hwnd: HWND) -> image::RgbaImage {
+            unsafe {
+                let mut outer = RECT::default();
+                GetWindowRect(hwnd, &mut outer);
+                let width = (outer.right - outer.left) as u32;
+                let height = (outer.bottom - outer.top) as u32;
+                let mut raster = NativeRaster::new((width, height));
+                SendMessageW(
+                    hwnd,
+                    WM_PRINT,
+                    raster.dc as usize,
+                    (PRF_CLIENT | PRF_NONCLIENT | PRF_CHILDREN | PRF_ERASEBKGND) as isize,
+                );
+                let mut pixels = raster.pixels().to_vec();
+                for pixel in pixels.as_chunks_mut::<4>().0 {
+                    pixel.swap(0, 2);
+                    pixel[3] = 255;
+                }
+                image::RgbaImage::from_raw(width, height, pixels).unwrap()
+            }
+        }
+
+        #[test]
+        fn search_button_print_keeps_card_background_outside_white_pill() {
+            unsafe {
+                let hwnd = create(null_mut(), &MediaSnapshot::default()).unwrap();
+                let _windows = TestWindows {
+                    owner: hwnd,
+                    searches: Vec::new(),
+                };
+                for scale in [1.0, 2.0] {
+                    set_font_scaled(hwnd, scale);
+                    layout_scaled(hwnd, scale);
+                    for (id, background) in
+                        [(SEARCH, SURFACE), (APPLY, BACKGROUND), (CANCEL, BACKGROUND)]
+                    {
+                        let button = GetDlgItem(hwnd, id);
+                        let mut rect = RECT::default();
+                        GetClientRect(button, &mut rect);
+                        let mut raster = NativeRaster::new((rect.right as u32, rect.bottom as u32));
+                        SendMessageW(
+                            button,
+                            WM_PRINTCLIENT,
+                            raster.dc as usize,
+                            PRF_CLIENT as isize,
+                        );
+                        let pixels = raster.pixels();
+                        for y in 0..rect.bottom {
+                            for x in 0..rect.right {
+                                if x == 0 || y == 0 || x == rect.right - 1 || y == rect.bottom - 1 {
+                                    let i = ((y * rect.right + x) * 4) as usize;
+                                    assert_eq!(
+                                        pixels[i..i + 3],
+                                        background,
+                                        "button {id} outer pixel ({x}, {y}) at {scale}x must match its parent"
+                                    );
+                                }
+                            }
+                        }
+                        if id == SEARCH {
+                            let i = ((rect.bottom / 2 * rect.right + (10.0 * scale) as i32) * 4)
+                                as usize;
+                            assert_eq!(
+                                pixels[i..i + 3],
+                                WHITE,
+                                "Search must retain its white pill"
+                            );
+                        }
+                    }
+                }
+                assert_eq!(IsWindowVisible(hwnd), 0);
+            }
+        }
+
+        #[test]
+        fn hidden_two_hundred_percent_minimum_print_keeps_footer_and_opaque_client() {
+            unsafe {
+                let hwnd = create(null_mut(), &MediaSnapshot::default()).unwrap();
+                let _windows = TestWindows {
+                    owner: hwnd,
+                    searches: Vec::new(),
+                };
+                SetWindowPos(
+                    hwnd,
+                    null_mut(),
+                    -16000,
+                    -16000,
+                    1040,
+                    840,
+                    SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+                set_font_scaled(hwnd, 2.0);
+                layout_scaled(hwnd, 2.0);
+                let mut client = RECT::default();
+                GetClientRect(hwnd, &mut client);
+                let mut outer = RECT::default();
+                GetWindowRect(hwnd, &mut outer);
+                let image = printed_window(hwnd);
+                assert_eq!(
+                    image.dimensions(),
+                    (
+                        (outer.right - outer.left) as u32,
+                        (outer.bottom - outer.top) as u32
+                    )
+                );
+                let rgb = |color: [u8; 3]| [color[2], color[1], color[0], 255];
+                assert_eq!(
+                    image.get_pixel(100, client.bottom as u32 - 2).0,
+                    rgb(BACKGROUND),
+                    "the entire hidden client must be cleared"
+                );
+                let layout =
+                    SearchLayout::new(client.right as f32 / 2.0, client.bottom as f32 / 2.0);
+                for id in [STATUS, APPLY, CANCEL] {
+                    let mut actual = RECT::default();
+                    GetWindowRect(GetDlgItem(hwnd, id), &mut actual);
+                    MapWindowPoints(null_mut(), hwnd, (&mut actual as *mut RECT).cast(), 2);
+                    assert!(
+                        actual.left >= 0
+                            && actual.top >= (layout.footer.y * 2.0) as i32
+                            && actual.right <= client.right
+                            && actual.bottom <= client.bottom,
+                        "footer control {id} must fit the actual clamped client"
+                    );
+                }
+                let cancel = layout
+                    .controls()
+                    .into_iter()
+                    .find(|(id, _)| *id == CANCEL)
+                    .unwrap()
+                    .1;
+                assert_eq!(
+                    image
+                        .get_pixel(
+                            ((cancel.x + 12.0) * 2.0) as u32,
+                            ((cancel.y + 18.0) * 2.0) as u32
+                        )
+                        .0,
+                    rgb(SURFACE),
+                    "Cancel must paint below the desktop edge"
+                );
+                assert!(SearchLayout::new(520.0, 420.0).results.h >= 160.0);
+                assert!(
+                    access(hwnd, |s| s
+                        .surface
+                        .pixels_mut()
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .all(|p| p[3] == 255))
+                    .unwrap(),
+                    "the persistent client surface must be fully opaque"
+                );
+            }
         }
 
         #[test]
@@ -2241,6 +2974,11 @@ mod native {
                     painter: Painter::new(scale(hwnd) as f32).unwrap(),
                     surface: native_ui::WindowSurface::new().unwrap(),
                     frame_pump: native_ui::FramePump::new(SCROLL_FRAME),
+                    loading_since: None,
+                    loading_elapsed: 0.0,
+                    results_placement: None,
+                    results_surface: native_ui::WindowSurface::new(),
+                    results_name: None,
                     background: None,
                     track: (String::new(), String::new(), String::new()),
                     status: String::new(),
@@ -2284,6 +3022,7 @@ mod native {
                 assert!(!list.is_null());
                 SendMessageW(list, LB_SETITEMHEIGHT, 0, ROW_HEIGHT as isize);
                 assert!(install_results_viewport(hwnd));
+                assert!(name_results(hwnd, tr("Search results")));
                 MoveWindow(GetDlgItem(hwnd, RESULTS_VIEWPORT), 0, 0, 560, 180, 0);
                 let job = access(hwnd, |state| state.session.begin()).unwrap();
                 job.deliver(Completion::Search(Ok((0..24)
@@ -2323,6 +3062,569 @@ mod native {
                     GetWindowLongPtrW(windows.owner, GWL_EXSTYLE) & WS_EX_COMPOSITED as isize,
                     0
                 );
+            }
+        }
+
+        #[test]
+        fn status_states_paint_distinct_theme_dots() {
+            use crate::theme;
+            unsafe {
+                let windows = hidden_results();
+                let dc = CreateCompatibleDC(null_mut());
+                let info = BITMAPINFO {
+                    bmiHeader: BITMAPINFOHEADER {
+                        biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                        biWidth: 440,
+                        biHeight: -24,
+                        biPlanes: 1,
+                        biBitCount: 32,
+                        biCompression: BI_RGB,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                };
+                let mut bits = null_mut();
+                let bitmap = CreateDIBSection(dc, &info, DIB_RGB_COLORS, &mut bits, null_mut(), 0);
+                let old = SelectObject(dc, bitmap);
+                for (source, count, color) in [
+                    (
+                        "Enter a title and artist, then choose Search.",
+                        None,
+                        theme::MUTED,
+                    ),
+                    ("Searching lyric providers...", None, theme::ICE),
+                    (
+                        "{count} result(s). Choose a match, then Use selected lyrics.",
+                        Some(3),
+                        theme::SUCCESS,
+                    ),
+                    (
+                        "No synchronized lyrics found. Try a different title or artist.",
+                        None,
+                        theme::AMBER,
+                    ),
+                    (
+                        "Lyrics request failed. Please try again.",
+                        None,
+                        theme::DANGER,
+                    ),
+                    ("Instrumental", None, theme::LAVENDER),
+                    (
+                        "No active media track. You can search; play a track before applying lyrics.",
+                        None,
+                        theme::DIM,
+                    ),
+                ] {
+                    status(windows.owner, source, count);
+                    let item = DRAWITEMSTRUCT {
+                        CtlID: STATUS as u32,
+                        hDC: dc,
+                        rcItem: RECT {
+                            left: 0,
+                            top: 0,
+                            right: 440,
+                            bottom: 24,
+                        },
+                        ..Default::default()
+                    };
+                    SendMessageW(
+                        windows.owner,
+                        WM_DRAWITEM,
+                        0,
+                        (&item as *const DRAWITEMSTRUCT) as isize,
+                    );
+                    assert_eq!(GetPixel(dc, 2, 13), theme::colorref(color), "{source}");
+                }
+                SelectObject(dc, old);
+                DeleteObject(bitmap);
+                DeleteDC(dc);
+            }
+        }
+
+        #[test]
+        fn loading_line_advances_and_pump_stops_when_search_settles() {
+            unsafe {
+                let windows = hidden_results();
+                let hwnd = windows.owner;
+                let now = Instant::now();
+                status(hwnd, "Searching lyric providers...", None);
+                assert!(access(hwnd, |s| s.frame_pump.is_active()).unwrap());
+                let raster = || {
+                    access(hwnd, |s| {
+                        let mut pixels = vec![0; 640 * 560 * 4];
+                        let mut painter = Painter::new(1.0).unwrap();
+                        draw_loading(
+                            &mut Canvas::new(&mut pixels, (640, 560), &mut painter),
+                            s.loading_elapsed,
+                            s.accent,
+                        );
+                        pixels
+                    })
+                    .unwrap()
+                };
+                let first = raster();
+                tick_results(hwnd, now + Duration::from_millis(300));
+                let second = raster();
+                assert!(first != second, "loading line must advance on elapsed time");
+                access(hwnd, |s| s.session.begin())
+                    .unwrap()
+                    .deliver(Completion::Search(Ok(Vec::new())));
+                poll(hwnd);
+                assert!(!access(hwnd, |s| s.frame_pump.is_active()).unwrap());
+                status(hwnd, "Fetching selected lyrics...", None);
+                assert!(access(hwnd, |s| s.frame_pump.is_active()).unwrap());
+                status(hwnd, "Lyrics request failed. Please try again.", None);
+                assert!(!access(hwnd, |s| s.frame_pump.is_active()).unwrap());
+            }
+        }
+
+        #[test]
+        fn results_have_a_localized_native_accessible_name() {
+            use crate::i18n::{Language, tr_in};
+            assert_eq!(tr_in(Language::English, "Search results"), "Search results");
+            assert_eq!(
+                tr_in(Language::Vietnamese, "Search results"),
+                "Kết quả tìm kiếm"
+            );
+            unsafe {
+                let windows = hidden_results();
+                let list = results(windows.owner);
+                let mut name = [0u16; 128];
+                let len = GetWindowTextW(list, name.as_mut_ptr(), name.len() as i32);
+                assert_eq!(
+                    String::from_utf16_lossy(&name[..len as usize]),
+                    tr("Search results")
+                );
+            }
+        }
+
+        #[test]
+        fn scroll_noop_and_row_changes_only_update_required_native_geometry() {
+            unsafe extern "system" fn count_moves(
+                hwnd: HWND,
+                message: u32,
+                w: WPARAM,
+                l: LPARAM,
+                _: usize,
+                data: usize,
+            ) -> LRESULT {
+                unsafe {
+                    let counts = &*(data as *const (Cell<usize>, Cell<usize>));
+                    if message == WM_WINDOWPOSCHANGING {
+                        counts.0.set(counts.0.get() + 1);
+                    }
+                    if message == LB_SETTOPINDEX {
+                        counts.1.set(counts.1.get() + 1);
+                    }
+                    DefSubclassProc(hwnd, message, w, l)
+                }
+            }
+            unsafe {
+                let windows = hidden_results();
+                let hwnd = windows.owner;
+                let list = results(hwnd);
+                let counts = (Cell::new(0usize), Cell::new(0usize));
+                SetWindowSubclass(list, Some(count_moves), 91, (&counts as *const _) as usize);
+                InvalidateRect(list, null(), 0);
+                SendMessageW(list, WM_PAINT, 0, 0);
+                ValidateRect(hwnd, null());
+                ValidateRect(GetDlgItem(hwnd, RESULTS_VIEWPORT), null());
+                ValidateRect(list, null());
+                assert_eq!(
+                    GetUpdateRect(list, null_mut(), 0),
+                    0,
+                    "fixture starts clean"
+                );
+                access(hwnd, |s| s.results_scroll.jump(0.4));
+                position_results(hwnd);
+                assert_eq!(
+                    counts.0.get(),
+                    0,
+                    "subpixel movement must not move the HWND"
+                );
+                assert_eq!(GetUpdateRect(list, null_mut(), 0), 0);
+                access(hwnd, |s| s.results_scroll.jump(5.0));
+                position_results(hwnd);
+                assert_eq!(counts.0.get(), 1, "a changed remainder moves the HWND once");
+                assert_eq!(counts.1.get(), 0, "same row must not send LB_SETTOPINDEX");
+                ValidateRect(list, null());
+                access(hwnd, |s| s.results_scroll.jump(68.0));
+                position_results(hwnd);
+                assert_eq!(counts.1.get(), 1);
+                assert_eq!(counts.0.get(), 2);
+                access(hwnd, |s| s.results_scroll.jump(132.0));
+                position_results(hwnd);
+                assert_eq!(
+                    counts.0.get(),
+                    2,
+                    "a whole-row delta retains the fractional HWND position"
+                );
+                assert_eq!(
+                    counts.1.get(),
+                    2,
+                    "row changes send exactly one LB_SETTOPINDEX"
+                );
+                windows_sys::Win32::UI::Shell::RemoveWindowSubclass(list, Some(count_moves), 91);
+            }
+        }
+
+        #[test]
+        fn scroll_strip_tracks_direction_remainders_and_large_jumps() {
+            for (top, delta, expected) in [
+                (0, 5, Some((175, 180))),
+                (5, -5, Some((5, 10))),
+                (4, 63, Some((121, 184))),
+                (60, -8, Some((60, 68))),
+                (0, 0, None),
+                (4, 180, Some((4, 184))),
+                (4, -240, Some((4, 184))),
+            ] {
+                let dirty = exposed_scroll_strip(
+                    RECT {
+                        left: 0,
+                        top,
+                        right: 560,
+                        bottom: top + 180,
+                    },
+                    delta,
+                );
+                assert_eq!(
+                    dirty.as_ref().map(|r| (r.top, r.bottom)),
+                    expected,
+                    "delta {delta}"
+                );
+                if let Some(dirty) = dirty {
+                    assert_eq!((dirty.left, dirty.right), (0, 560));
+                }
+            }
+            assert!(exposed_scroll_strip(RECT::default(), 5).is_none());
+        }
+
+        #[test]
+        fn native_two_hundred_percent_controls_fit_regions_and_client() {
+            unsafe {
+                let windows = hidden_results();
+                let hwnd = windows.owner;
+                SetWindowLongW(hwnd, GWL_STYLE, (WS_POPUP | WS_CLIPCHILDREN) as i32);
+                SetWindowPos(
+                    hwnd,
+                    null_mut(),
+                    0,
+                    0,
+                    1040,
+                    840,
+                    SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+                );
+                for (id, class) in [
+                    (TITLE_LABEL, "STATIC"),
+                    (TITLE, "EDIT"),
+                    (ARTIST_LABEL, "STATIC"),
+                    (ARTIST, "EDIT"),
+                    (SEARCH, "BUTTON"),
+                    (STATUS, "STATIC"),
+                    (APPLY, "BUTTON"),
+                    (CANCEL, "BUTTON"),
+                ] {
+                    assert!(
+                        !CreateWindowExW(
+                            0,
+                            wide(class).as_ptr(),
+                            null(),
+                            WS_CHILD | WS_VISIBLE,
+                            0,
+                            0,
+                            1,
+                            1,
+                            hwnd,
+                            id as usize as *mut _,
+                            GetModuleHandleW(null()),
+                            null()
+                        )
+                        .is_null()
+                    );
+                }
+                layout_scaled(hwnd, 2.0);
+                let layout = SearchLayout::new(520.0, 420.0);
+                for (id, assigned) in layout.controls() {
+                    let control =
+                        GetDlgItem(hwnd, if id == RESULTS { RESULTS_VIEWPORT } else { id });
+                    let mut actual = RECT::default();
+                    GetWindowRect(control, &mut actual);
+                    MapWindowPoints(null_mut(), hwnd, (&mut actual as *mut RECT).cast(), 2);
+                    assert_eq!(
+                        actual.left,
+                        (assigned.x * 2.0).round() as i32,
+                        "control {id}"
+                    );
+                    assert_eq!(
+                        actual.top,
+                        (assigned.y * 2.0).round() as i32,
+                        "control {id}"
+                    );
+                    assert_eq!(
+                        actual.right - actual.left,
+                        (assigned.w * 2.0).round() as i32
+                    );
+                    assert_eq!(
+                        actual.bottom - actual.top,
+                        (assigned.h * 2.0).round() as i32
+                    );
+                    let region = match id {
+                        RESULTS => layout.results,
+                        STATUS | APPLY | CANCEL => layout.footer,
+                        _ => layout.search_card,
+                    };
+                    assert!(
+                        actual.left >= (region.x * 2.0) as i32
+                            && actual.top >= (region.y * 2.0) as i32
+                    );
+                    assert!(
+                        actual.right <= ((region.x + region.w) * 2.0) as i32
+                            && actual.bottom <= ((region.y + region.h) * 2.0) as i32
+                    );
+                    assert!(
+                        actual.left >= 0
+                            && actual.top >= 0
+                            && actual.right <= 1040
+                            && actual.bottom <= 840
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn hidden_viewport_print_renders_native_selected_rows() {
+            unsafe {
+                let windows = hidden_results();
+                let viewport = GetDlgItem(windows.owner, RESULTS_VIEWPORT);
+                let mut outer = RECT::default();
+                GetWindowRect(viewport, &mut outer);
+                let mut raster = NativeRaster::new((
+                    (outer.right - outer.left) as u32,
+                    (outer.bottom - outer.top) as u32,
+                ));
+                SendMessageW(
+                    viewport,
+                    WM_PRINT,
+                    raster.dc as usize,
+                    (PRF_CLIENT | PRF_NONCLIENT | PRF_CHILDREN | PRF_ERASEBKGND) as isize,
+                );
+                assert_eq!(
+                    GetPixel(raster.dc, 280, 32),
+                    crate::theme::colorref(crate::theme::SURFACE_RAISED),
+                    "the native selected row must print into the memory DC"
+                );
+                assert!(
+                    raster
+                        .pixels()
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .any(|p| p[..3] == WHITE),
+                    "native owner-draw rows must print their titles"
+                );
+                assert_eq!(IsWindowVisible(windows.owner), 0);
+            }
+        }
+
+        #[test]
+        fn partial_background_paint_clears_the_entire_surface_opaquely() {
+            unsafe {
+                let windows = hidden_results();
+                let hwnd = windows.owner;
+                InvalidateRect(hwnd, null(), 0);
+                SendMessageW(hwnd, WM_PAINT, 0, 0);
+                access(hwnd, |s| s.surface.pixels_mut().fill(0));
+                let dirty = RECT {
+                    left: 30,
+                    top: 70,
+                    right: 40,
+                    bottom: 80,
+                };
+                InvalidateRect(hwnd, &dirty, 0);
+                SendMessageW(hwnd, WM_PAINT, 0, 0);
+                access(hwnd, |s| {
+                    let pixels = s.surface.pixels_mut();
+                    assert!(pixels.as_chunks::<4>().0.iter().all(|p| p[3] == 255));
+                    assert_eq!(
+                        &pixels[pixels.len() - 4..],
+                        &[BACKGROUND[0], BACKGROUND[1], BACKGROUND[2], 255]
+                    );
+                });
+            }
+        }
+
+        #[test]
+        #[ignore = "Hidden memory-only cached background benchmark; no activation or network"]
+        fn search_background_compose_cached() {
+            unsafe {
+                let windows = hidden_results();
+                let hwnd = windows.owner;
+                SetWindowLongW(hwnd, GWL_STYLE, (WS_POPUP | WS_CLIPCHILDREN) as i32);
+                for scale in [1.0, 2.0] {
+                    access(hwnd, |s| {
+                        s.painter = Painter::new(scale).unwrap();
+                        s.background = None;
+                        s.loading_since = Some(Instant::now());
+                        s.loading_elapsed = 0.3;
+                    });
+                    SetWindowPos(
+                        hwnd,
+                        null_mut(),
+                        -16000,
+                        -16000,
+                        (640.0 * scale) as i32,
+                        (560.0 * scale) as i32,
+                        SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+                    );
+                    compose_background(hwnd);
+                    let mut samples = Vec::new();
+                    for _ in 0..64 {
+                        let started = Instant::now();
+                        compose_background(hwnd);
+                        samples.push(started.elapsed().as_micros());
+                    }
+                    samples.sort_unstable();
+                    eprintln!(
+                        "search cached whole-client compose + loading overlay at {}%: median={}us p95={}us",
+                        (scale * 100.0) as u32,
+                        samples[32],
+                        samples[60]
+                    );
+                    access(hwnd, |s| {
+                        assert!(
+                            s.surface
+                                .pixels_mut()
+                                .as_chunks::<4>()
+                                .0
+                                .iter()
+                                .all(|p| p[3] == 255)
+                        )
+                    });
+                }
+                assert_eq!(IsWindowVisible(hwnd), 0);
+            }
+        }
+
+        #[test]
+        fn hidden_client_print_paints_the_complete_background() {
+            unsafe {
+                let windows = hidden_results();
+                let mut rect = RECT::default();
+                GetClientRect(windows.owner, &mut rect);
+                let mut raster = NativeRaster::new((rect.right as u32, rect.bottom as u32));
+                SendMessageW(
+                    windows.owner,
+                    WM_PRINTCLIENT,
+                    raster.dc as usize,
+                    PRF_CLIENT as isize,
+                );
+                assert_eq!(GetPixel(raster.dc, 30, 70), crate::theme::colorref(SURFACE));
+                assert!(
+                    raster
+                        .pixels()
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .all(|p| p[3] == 255)
+                );
+            }
+        }
+
+        #[test]
+        fn hidden_scrolled_viewport_print_clips_native_children_to_its_bounds() {
+            unsafe {
+                let windows = hidden_results();
+                access(windows.owner, |state| {
+                    state.results_scroll.jump(6.0 * ROW_HEIGHT + 16.0)
+                });
+                position_results(windows.owner);
+                let viewport = GetDlgItem(windows.owner, RESULTS_VIEWPORT);
+                let mut outer = RECT::default();
+                GetWindowRect(viewport, &mut outer);
+                let width = outer.right - outer.left;
+                let height = outer.bottom - outer.top;
+                let mut raster = NativeRaster::new(((width + 40) as u32, (height + 40) as u32));
+                let untouched = [17, 18, 19, 255];
+                for pixel in raster.pixels().as_chunks_mut::<4>().0 {
+                    pixel.copy_from_slice(&untouched);
+                }
+                SetViewportOrgEx(raster.dc, 20, 20, null_mut());
+                SendMessageW(
+                    viewport,
+                    WM_PRINT,
+                    raster.dc as usize,
+                    (PRF_CLIENT | PRF_NONCLIENT | PRF_CHILDREN | PRF_ERASEBKGND) as isize,
+                );
+                let pixels = raster.pixels();
+                let mut glyphs = 0;
+                for y in 0..height + 40 {
+                    for x in 0..width + 40 {
+                        let i = ((y * (width + 40) + x) * 4) as usize;
+                        if !(20..width + 20).contains(&x) || !(20..height + 20).contains(&y) {
+                            assert_eq!(
+                                pixels[i..i + 4],
+                                untouched,
+                                "native child print must not leak at ({x}, {y})"
+                            );
+                        } else if pixels[i..i + 3] == WHITE {
+                            glyphs += 1;
+                        }
+                    }
+                }
+                assert!(glyphs > 0, "clipping must retain native owner-drawn rows");
+            }
+        }
+
+        #[test]
+        fn viewport_scrollbar_print_is_dark_and_has_a_themed_thumb() {
+            unsafe {
+                let windows = hidden_results();
+                let viewport = GetDlgItem(windows.owner, RESULTS_VIEWPORT);
+                let mut outer = RECT::default();
+                let mut client = RECT::default();
+                GetWindowRect(viewport, &mut outer);
+                GetClientRect(viewport, &mut client);
+                let width = outer.right - outer.left;
+                let height = outer.bottom - outer.top;
+                let mut bar = SCROLLBARINFO {
+                    cbSize: std::mem::size_of::<SCROLLBARINFO>() as u32,
+                    ..Default::default()
+                };
+                assert_ne!(GetScrollBarInfo(viewport, OBJID_VSCROLL, &mut bar), 0);
+                let top = bar.rcScrollBar.top - outer.top + bar.xyThumbTop;
+                let bottom = bar.rcScrollBar.top - outer.top + bar.xyThumbBottom;
+                assert!(bottom > top);
+                for scale in [1.0, 1.25, 1.5, 2.0] {
+                    access(windows.owner, |s| s.painter = Painter::new(scale).unwrap());
+                    let mut raster = NativeRaster::new((width as u32, height as u32));
+                    SendMessageW(
+                        viewport,
+                        WM_PRINT,
+                        raster.dc as usize,
+                        (PRF_CLIENT | PRF_NONCLIENT | PRF_ERASEBKGND) as isize,
+                    );
+                    let pixels = raster.pixels();
+                    let mut thumb_pixels = 0;
+                    for y in 0..height {
+                        for x in client.right..width {
+                            let i = ((y * width + x) * 4) as usize;
+                            assert!(
+                                !pixels[i..i + 3].iter().all(|&v| v > 200),
+                                "no white system track at {scale}x"
+                            );
+                            if (top..bottom).contains(&y)
+                                && pixels[i..i + 3] == crate::theme::BORDER_STRONG
+                            {
+                                thumb_pixels += 1;
+                            }
+                        }
+                    }
+                    assert!(
+                        thumb_pixels > 0,
+                        "BORDER_STRONG thumb must occupy its native rectangle at {scale}x"
+                    );
+                }
             }
         }
 
@@ -2802,68 +4104,80 @@ mod native {
             unsafe {
                 let windows = hidden_results();
                 let list = results(windows.owner) as usize;
-                let (send, receive) = std::sync::mpsc::channel();
-                let worker = std::thread::spawn(move || {
-                    use windows::Win32::System::Com::{
-                        CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance,
-                        CoInitializeEx, CoUninitialize,
-                    };
-                    use windows::Win32::UI::Accessibility::{
-                        CUIAutomation, IUIAutomation, IUIAutomationScrollPattern,
-                        UIA_ScrollPatternId,
-                    };
-                    use windows::core::Interface;
-                    // UIA clients must run off the owning window thread; that
-                    // thread continues pumping native provider messages below.
-                    let result = (|| -> windows::core::Result<bool> {
-                        CoInitializeEx(None, COINIT_MULTITHREADED).ok()?;
-                        struct ComGuard;
-                        impl Drop for ComGuard {
-                            fn drop(&mut self) {
-                                unsafe {
-                                    CoUninitialize();
+                for (pass, name) in [
+                    tr("Search results"),
+                    crate::i18n::tr_in(crate::i18n::Language::Vietnamese, "Search results"),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    if pass > 0 {
+                        assert!(name_results(windows.owner, name));
+                    }
+                    let (send, receive) = std::sync::mpsc::channel();
+                    let worker = std::thread::spawn(move || {
+                        use windows::Win32::System::Com::{
+                            CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance,
+                            CoInitializeEx, CoUninitialize,
+                        };
+                        use windows::Win32::UI::Accessibility::{
+                            CUIAutomation, IUIAutomation, IUIAutomationScrollPattern,
+                            UIA_ScrollPatternId,
+                        };
+                        use windows::core::Interface;
+                        // UIA clients must run off the owning window thread; that
+                        // thread continues pumping native provider messages below.
+                        let result = (|| -> windows::core::Result<(bool, String)> {
+                            CoInitializeEx(None, COINIT_MULTITHREADED).ok()?;
+                            struct ComGuard;
+                            impl Drop for ComGuard {
+                                fn drop(&mut self) {
+                                    unsafe {
+                                        CoUninitialize();
+                                    }
                                 }
                             }
-                        }
-                        let _com = ComGuard;
-                        let automation: IUIAutomation =
-                            CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER)?;
-                        let element = automation
-                            .ElementFromHandle(windows::Win32::Foundation::HWND(list as HWND))?;
-                        let pattern: IUIAutomationScrollPattern =
-                            element.GetCurrentPattern(UIA_ScrollPatternId)?.cast()?;
-                        let scrollable = pattern.CurrentVerticallyScrollable()?.as_bool();
-                        pattern.SetScrollPercent(-1.0, 50.0)?;
-                        Ok(scrollable)
-                    })();
-                    send.send(result.map_err(|error| error.to_string()))
-                        .unwrap();
-                });
-                let mut response = None;
-                assert!(
-                    pump_until(Duration::from_secs(10), || {
-                        response = receive.try_recv().ok();
-                        response.is_some()
-                    }),
-                    "native UIA query timed out"
-                );
-                assert_eq!(
-                    response.unwrap(),
-                    Ok(true),
-                    "the real listbox must retain its native UIA ScrollPattern"
-                );
-                assert!(
-                    access(windows.owner, |state| state.results_scroll.offset() > 0.0).unwrap()
-                        && displayed_row_top(windows.owner, 0) < 0,
-                    "UIA scrolling must move the actual pixel viewport: {}",
-                    uia_scroll_snapshot(windows.owner)
-                );
-                let (width, client_right, overlap, style, _, _) =
-                    results_scrollbar_geometry(windows.owner);
-                assert_eq!(overlap, 0, "UIA scrolling must not expose a second bar");
-                assert_eq!(client_right, width);
-                assert_ne!(style, 0);
-                worker.join().unwrap();
+                            let _com = ComGuard;
+                            let automation: IUIAutomation =
+                                CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER)?;
+                            let element = automation.ElementFromHandle(
+                                windows::Win32::Foundation::HWND(list as HWND),
+                            )?;
+                            let pattern: IUIAutomationScrollPattern =
+                                element.GetCurrentPattern(UIA_ScrollPatternId)?.cast()?;
+                            let scrollable = pattern.CurrentVerticallyScrollable()?.as_bool();
+                            pattern.SetScrollPercent(-1.0, 50.0)?;
+                            Ok((scrollable, element.CurrentName()?.to_string()))
+                        })();
+                        send.send(result.map_err(|error| error.to_string()))
+                            .unwrap();
+                    });
+                    let mut response = None;
+                    assert!(
+                        pump_until(Duration::from_secs(10), || {
+                            response = receive.try_recv().ok();
+                            response.is_some()
+                        }),
+                        "native UIA query timed out"
+                    );
+                    assert_eq!(
+                        response.unwrap(),
+                        Ok((true, name.to_owned())),
+                        "the real listbox must retain its native UIA ScrollPattern and explicit name"
+                    );
+                    assert!(
+                        access(windows.owner, |state| state.results_scroll.offset() > 0.0).unwrap()
+                            && displayed_row_top(windows.owner, 0) < 0,
+                        "UIA scrolling must move the actual pixel viewport: {}",
+                        uia_scroll_snapshot(windows.owner)
+                    );
+                    let (width, client_right, overlap, style, _, _) =
+                        results_scrollbar_geometry(windows.owner);
+                    assert_eq!(overlap, 0, "UIA scrolling must not expose a second bar");
+                    assert_eq!(client_right, width);
+                    assert_ne!(style, 0);
+                    worker.join().unwrap();
+                }
             }
         }
 
@@ -3092,6 +4406,33 @@ mod native {
                 let list = results(hwnd);
                 let viewport = GetDlgItem(hwnd, RESULTS_VIEWPORT);
                 SetFocus(list);
+                if let Some(dir) = std::env::var_os("HIYODYNA_PREVIEW_DIR") {
+                    let dir = std::path::PathBuf::from(dir);
+                    RedrawWindow(
+                        hwnd,
+                        null(),
+                        null_mut(),
+                        RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW,
+                    );
+                    for offset in [5.0, 68.0, 60.0, 128.0, 121.0] {
+                        access(hwnd, |s| s.results_scroll.jump(offset));
+                        position_results(hwnd);
+                        UpdateWindow(list);
+                        let partial = dir.join("search-scroll-strip.png");
+                        crate::preferences::tests::save_window(hwnd, &partial);
+                        RedrawWindow(list, null(), null_mut(), RDW_INVALIDATE | RDW_UPDATENOW);
+                        let full = dir.join("search-scroll-full.png");
+                        crate::preferences::tests::save_window(hwnd, &full);
+                        let partial = image::open(partial).unwrap().into_rgba8();
+                        let full = image::open(full).unwrap().into_rgba8();
+                        assert!(
+                            partial == full,
+                            "strip repaint must match a clean repaint at offset {offset}"
+                        );
+                    }
+                    access(hwnd, |s| s.results_scroll.jump(0.0));
+                    position_results(hwnd);
+                }
                 SendMessageW(list, WM_MOUSEWHEEL, (-120_i16 as u16 as usize) << 16, 0);
                 assert_eq!(
                     access(hwnd, |state| state.results_scroll.offset()),
@@ -3354,183 +4695,358 @@ mod native {
                 crate::i18n::Language::Vietnamese,
             ] {
                 crate::i18n::set_language(language);
-                unsafe {
-                    let owner = CreateWindowExW(
-                        0,
-                        wide("STATIC").as_ptr(),
-                        null(),
-                        WS_OVERLAPPEDWINDOW,
-                        30,
-                        30,
-                        300,
-                        180,
-                        null_mut(),
-                        null_mut(),
-                        GetModuleHandleW(null()),
-                        null(),
-                    );
-                    let mut windows = TestWindows {
-                        owner,
-                        searches: Vec::new(),
-                    };
-                    let snapshot = MediaSnapshot {
-                        key: "preview".into(),
-                        generation: 42,
-                        title: "Blinding Lights".into(),
-                        artist: "The Weeknd".into(),
-                        ..Default::default()
-                    };
-                    show(owner, &snapshot);
-                    let hwnd = WINDOW.with(Cell::get);
-                    windows.searches.push(hwnd);
-                    assert!(!hwnd.is_null());
-                    let dc = GetDC(hwnd);
-                    let font = SendMessageW(GetDlgItem(hwnd, TITLE), WM_GETFONT, 0, 0) as HFONT;
-                    let previous = SelectObject(dc, font);
-                    let mut face = [0_u16; 64];
-                    let len = GetTextFaceW(dc, face.len() as i32, face.as_mut_ptr());
-                    SelectObject(dc, previous);
-                    ReleaseDC(hwnd, dc);
-                    let face = String::from_utf16_lossy(&face[..len.saturating_sub(1) as usize]);
-                    assert!(
-                        face.starts_with("Inter"),
-                        "native input must use the bundled sans-serif font, got {face}"
-                    );
-                    SetWindowPos(
-                        hwnd,
-                        HWND_TOPMOST,
-                        50,
-                        50,
-                        0,
-                        0,
-                        SWP_NOSIZE | SWP_NOACTIVATE,
-                    );
-                    let dir = std::path::PathBuf::from(
-                        std::env::var_os("HIYODYNA_PREVIEW_DIR").expect("preview directory"),
-                    );
-                    std::fs::create_dir_all(&dir).unwrap();
-                    let capture = |name: &str| {
-                        RedrawWindow(
-                            hwnd,
+                for preview_scale in [1.0, 1.25, 1.5, 2.0] {
+                    if std::env::var("HIYODYNA_PREVIEW_CASE").is_ok_and(|case| {
+                        case != format!("{}-{}", language.as_str(), (preview_scale * 100.0) as u32)
+                    }) {
+                        continue;
+                    }
+                    unsafe {
+                        let owner = CreateWindowExW(
+                            0,
+                            wide("STATIC").as_ptr(),
                             null(),
+                            WS_OVERLAPPEDWINDOW,
+                            30,
+                            30,
+                            300,
+                            180,
                             null_mut(),
-                            RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW,
+                            null_mut(),
+                            GetModuleHandleW(null()),
+                            null(),
                         );
-                        crate::preferences::tests::save_window(
+                        let mut windows = TestWindows {
+                            owner,
+                            searches: Vec::new(),
+                        };
+                        let snapshot = MediaSnapshot {
+                            key: "preview".into(),
+                            generation: 42,
+                            title: "Blinding Lights".into(),
+                            artist: "The Weeknd".into(),
+                            ..Default::default()
+                        };
+                        let hwnd = create(owner, &snapshot).unwrap();
+                        windows.searches.push(hwnd);
+                        assert!(!hwnd.is_null());
+                        // Synthetic DPI fixtures need a full-size memory-DC
+                        // host, not this desktop's maximum tracking rectangle.
+                        // Production hosts retain their work-area clamping;
+                        // the separate real-host minimum fixture covers it.
+                        let mut proposed = RECT::default();
+                        GetWindowRect(hwnd, &mut proposed);
+                        let dpi = (preview_scale * 96.0) as usize;
+                        SendMessageW(
                             hwnd,
-                            &dir.join(format!("lyrics-{}-{name}.png", language.as_str())),
+                            WM_DPICHANGED,
+                            dpi | (dpi << 16),
+                            (&proposed as *const RECT) as isize,
                         );
-                    };
-                    assert_eq!(IsWindowEnabled(GetDlgItem(hwnd, APPLY)), 0);
-                    capture("empty");
-                    let list = results(hwnd);
-                    native_tab(hwnd, GetDlgItem(hwnd, SEARCH), list, false);
-                    native_tab(hwnd, list, GetDlgItem(hwnd, SEARCH), true);
-                    native_tab(hwnd, list, GetDlgItem(hwnd, CANCEL), false);
-                    native_tab(hwnd, GetDlgItem(hwnd, CANCEL), list, true);
-                    {
-                        let _held_shift = NativeTestKeyboard::new(true);
-                        native_tab(
-                            hwnd,
-                            GetDlgItem(hwnd, TITLE),
-                            GetDlgItem(hwnd, ARTIST),
-                            false,
-                        );
+                        SetWindowLongW(hwnd, GWL_STYLE, (WS_POPUP | WS_CLIPCHILDREN) as i32);
+                        let dc = GetDC(hwnd);
+                        let font = SendMessageW(GetDlgItem(hwnd, TITLE), WM_GETFONT, 0, 0) as HFONT;
+                        let previous = SelectObject(dc, font);
+                        let mut face = [0_u16; 64];
+                        let len = GetTextFaceW(dc, face.len() as i32, face.as_mut_ptr());
+                        SelectObject(dc, previous);
+                        ReleaseDC(hwnd, dc);
+                        let face =
+                            String::from_utf16_lossy(&face[..len.saturating_sub(1) as usize]);
                         assert!(
-                            windows_sys::Win32::UI::Input::KeyboardAndMouse::GetKeyState(
-                                windows_sys::Win32::UI::Input::KeyboardAndMouse::VK_SHIFT as i32
-                            ) < 0,
-                            "synthetic Tab must restore the caller's held Shift state"
+                            face.starts_with("Inter"),
+                            "native input must use the bundled sans-serif font, got {face}"
+                        );
+                        SetWindowPos(
+                            hwnd,
+                            null_mut(),
+                            -16000,
+                            -16000,
+                            0,
+                            0,
+                            SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER | SWP_FRAMECHANGED,
+                        );
+                        let dir = std::path::PathBuf::from(
+                            std::env::var_os("HIYODYNA_PREVIEW_DIR").expect("preview directory"),
+                        );
+                        std::fs::create_dir_all(&dir).unwrap();
+                        let preview_size = Cell::new((640.0, 560.0));
+                        let resize = |width: f64, height: f64| {
+                            preview_size.set((width, height));
+                            let mut client = RECT::default();
+                            let mut outer = RECT::default();
+                            GetClientRect(hwnd, &mut client);
+                            GetWindowRect(hwnd, &mut outer);
+                            SetWindowPos(
+                                hwnd,
+                                null_mut(),
+                                0,
+                                0,
+                                (width * preview_scale).round() as i32 + outer.right
+                                    - outer.left
+                                    - client.right,
+                                (height * preview_scale).round() as i32 + outer.bottom
+                                    - outer.top
+                                    - client.bottom,
+                                SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+                            );
+                            if access(hwnd, |s| s.painter.scale != preview_scale as f32).unwrap() {
+                                set_font_scaled(hwnd, preview_scale);
+                            }
+                            layout_scaled(hwnd, preview_scale);
+                            for (id, x) in [
+                                (crate::window_chrome::CLOSE, width - 44.0),
+                                (crate::window_chrome::MAXIMIZE, width - 76.0),
+                            ] {
+                                MoveWindow(
+                                    GetDlgItem(hwnd, id),
+                                    (x * preview_scale).round() as i32,
+                                    (14.0 * preview_scale).round() as i32,
+                                    (32.0 * preview_scale).round() as i32,
+                                    (30.0 * preview_scale).round() as i32,
+                                    0,
+                                );
+                            }
+                            GetClientRect(hwnd, &mut client);
+                            assert_eq!(
+                                (client.right, client.bottom),
+                                (
+                                    (width * preview_scale).round() as i32,
+                                    (height * preview_scale).round() as i32
+                                )
+                            );
+                        };
+                        resize(640.0, 560.0);
+                        // Standard EDIT printing needs an initialized shown
+                        // host. Show it only after placing it beyond all screens.
+                        ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+                        let mut offscreen = RECT::default();
+                        GetWindowRect(hwnd, &mut offscreen);
+                        assert!(
+                            offscreen.right < -10000 && offscreen.bottom < -10000,
+                            "the preview host must never enter the visible desktop"
+                        );
+                        let capture = |name: &str| {
+                            // Activation/dialog messages use real desktop DPI.
+                            // Reapply synthetic fixture geometry before capture.
+                            let (width, height) = preview_size.get();
+                            resize(width, height);
+                            RedrawWindow(
+                                hwnd,
+                                null(),
+                                null_mut(),
+                                RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW,
+                            );
+                            let image = printed_window(hwnd);
+                            image
+                                .save(dir.join(format!(
+                                    "lyrics-{}-{}-{name}.png",
+                                    language.as_str(),
+                                    (preview_scale * 100.0) as u32
+                                )))
+                                .unwrap();
+                            for id in [TITLE, ARTIST] {
+                                if input(hwnd, id).is_empty() {
+                                    continue;
+                                }
+                                let mut bounds = RECT::default();
+                                GetWindowRect(GetDlgItem(hwnd, id), &mut bounds);
+                                MapWindowPoints(
+                                    null_mut(),
+                                    hwnd,
+                                    (&mut bounds as *mut RECT).cast(),
+                                    2,
+                                );
+                                let printed = (bounds.top..bounds.bottom).any(|y| {
+                                    (bounds.left..bounds.right).any(|x| {
+                                        image.get_pixel(x as u32, y as u32).0[..3]
+                                            .iter()
+                                            .all(|&v| v > 200)
+                                    })
+                                });
+                                assert!(
+                                    printed,
+                                    "{language:?} at {preview_scale}x {name}: native edit {id} must print its current query"
+                                );
+                            }
+                            image
+                        };
+                        assert_eq!(IsWindowEnabled(GetDlgItem(hwnd, APPLY)), 0);
+                        capture("initial");
+                        let list = results(hwnd);
+                        native_tab(hwnd, GetDlgItem(hwnd, SEARCH), list, false);
+                        native_tab(hwnd, list, GetDlgItem(hwnd, SEARCH), true);
+                        native_tab(hwnd, list, GetDlgItem(hwnd, CANCEL), false);
+                        native_tab(hwnd, GetDlgItem(hwnd, CANCEL), list, true);
+                        {
+                            let _held_shift = NativeTestKeyboard::new(true);
+                            native_tab(
+                                hwnd,
+                                GetDlgItem(hwnd, TITLE),
+                                GetDlgItem(hwnd, ARTIST),
+                                false,
+                            );
+                            assert!(
+                                windows_sys::Win32::UI::Input::KeyboardAndMouse::GetKeyState(
+                                    windows_sys::Win32::UI::Input::KeyboardAndMouse::VK_SHIFT
+                                        as i32
+                                ) < 0
+                            );
+                        }
+                        SendMessageW(hwnd, WM_ACTIVATE, WA_INACTIVE as usize, 0);
+                        SetFocus(owner);
+                        SendMessageW(hwnd, WM_SETFOCUS, 0, 0);
+                        assert_eq!(GetFocus(), GetDlgItem(hwnd, ARTIST));
+                        text(hwnd, STATUS, "Searching lyric providers...");
+                        capture("loading");
+                        tick_results(hwnd, Instant::now() + Duration::from_millis(300));
+                        capture("loading-advanced");
+                        let job = access(hwnd, |state| state.session.begin()).unwrap();
+                        let mut matches = vec![
+                            SearchResult::fixture("Blinding Lights", "The Weeknd"),
+                            SearchResult::fixture("Blinding Lights (Live)", "The Weeknd"),
+                            SearchResult::fixture(
+                                "Blinding Lights — Alternate recording",
+                                "The Weeknd",
+                            ),
+                        ];
+                        matches[0].timing = "Words".into();
+                        matches[1].source = "AMLL TTML DB".into();
+                        matches[2].timing = "Unknown".into();
+                        matches[2].source = "NetEase".into();
+                        job.deliver(Completion::Search(Ok(matches)));
+                        poll(hwnd);
+                        let list = results(hwnd);
+                        assert_eq!(SendMessageW(list, LB_GETCOUNT, 0, 0), 3);
+                        assert_ne!(IsWindowEnabled(GetDlgItem(hwnd, APPLY)), 0);
+                        for (from, to) in [
+                            (GetDlgItem(hwnd, TITLE), GetDlgItem(hwnd, ARTIST)),
+                            (GetDlgItem(hwnd, ARTIST), GetDlgItem(hwnd, SEARCH)),
+                            (GetDlgItem(hwnd, SEARCH), list),
+                            (list, GetDlgItem(hwnd, APPLY)),
+                            (GetDlgItem(hwnd, APPLY), GetDlgItem(hwnd, CANCEL)),
+                        ] {
+                            native_tab(hwnd, from, to, false);
+                            native_tab(hwnd, to, from, true);
+                        }
+                        SetFocus(list);
+                        capture("selected");
+                        text(hwnd, STATUS, "Fetching selected lyrics...");
+                        apply_enabled(hwnd, false);
+                        capture("fetching");
+                        apply_enabled(hwnd, true);
+                        let mut row = RECT::default();
+                        SendMessageW(list, LB_GETITEMRECT, 0, (&mut row as *mut RECT) as isize);
+                        assert_eq!(
+                            row.bottom - row.top,
+                            (f64::from(ROW_HEIGHT) * preview_scale).round() as i32
+                        );
+                        access(hwnd, |state| state.session.begin())
+                            .unwrap()
+                            .deliver(Completion::Fetch(Err("Preview provider failure".into())));
+                        poll(hwnd);
+                        capture("error");
+                        status(hwnd, "Instrumental", None);
+                        capture("instrumental");
+                        access(hwnd, |state| state.session.begin())
+                            .unwrap()
+                            .deliver(Completion::Search(Ok(Vec::new())));
+                        poll(hwnd);
+                        capture("empty");
+                        resize(520.0, 420.0);
+                        capture("minimum");
+                        reset(hwnd, &MediaSnapshot::default());
+                        assert_eq!(SendMessageW(list, LB_GETCOUNT, 0, 0), 0);
+                        assert_eq!(IsWindowEnabled(GetDlgItem(hwnd, APPLY)), 0);
+                        assert_ne!(IsWindowEnabled(GetDlgItem(hwnd, SEARCH)), 0);
+                        capture("no-track");
+                        if preview_scale == 1.0 || preview_scale == 2.0 {
+                            reset(hwnd, &snapshot);
+                            resize(640.0, 420.0);
+                            let matches = (1..=24)
+                                .map(|index| {
+                                    let mut result = SearchResult::fixture(
+                                        &format!("Blinding Lights — Recording {index}"),
+                                        "The Weeknd",
+                                    );
+                                    match index % 3 {
+                                        0 => {
+                                            result.source = "NetEase".into();
+                                            result.timing = "Unknown".into();
+                                        }
+                                        1 => result.timing = "Words".into(),
+                                        _ => result.source = "AMLL TTML DB".into(),
+                                    }
+                                    result
+                                })
+                                .collect();
+                            access(hwnd, |state| state.session.begin())
+                                .unwrap()
+                                .deliver(Completion::Search(Ok(matches)));
+                            poll(hwnd);
+                            SendMessageW(list, LB_SETCURSEL, 7, 0);
+                            SetFocus(list);
+                            access(hwnd, |state| {
+                                state
+                                    .results_scroll
+                                    .jump((6.0 * ROW_HEIGHT + 16.0) * preview_scale as f32);
+                            });
+                            position_results(hwnd);
+                            let image = capture("scrolling");
+                            assert_eq!(SendMessageW(list, LB_GETTOPINDEX, 0, 0), 6);
+                            let viewport = GetDlgItem(hwnd, RESULTS_VIEWPORT);
+                            let mut bar = SCROLLBARINFO {
+                                cbSize: std::mem::size_of::<SCROLLBARINFO>() as u32,
+                                ..Default::default()
+                            };
+                            assert_ne!(GetScrollBarInfo(viewport, OBJID_VSCROLL, &mut bar), 0);
+                            assert!(bar.xyThumbBottom > bar.xyThumbTop);
+                            MapWindowPoints(
+                                null_mut(),
+                                hwnd,
+                                (&mut bar.rcScrollBar as *mut RECT).cast(),
+                                2,
+                            );
+                            let rgb = |color: [u8; 3]| [color[2], color[1], color[0], 255];
+                            let mut thumb_pixels = 0;
+                            let mut track_pixels = 0;
+                            // Also reject the clipped native list's upper arrow:
+                            // its window starts above the viewport on fractional moves.
+                            let clipped_top = bar.rcScrollBar.top - (16.0 * preview_scale) as i32;
+                            for y in clipped_top..bar.rcScrollBar.bottom {
+                                for x in bar.rcScrollBar.left..bar.rcScrollBar.right {
+                                    let pixel = image.get_pixel(x as u32, y as u32).0;
+                                    assert!(
+                                        !pixel[..3].iter().all(|&value| value > 200),
+                                        "{language:?} at {preview_scale}x: no white system pixels anywhere in the scrollbar strip ({x}, {y}) {pixel:?}"
+                                    );
+                                    if pixel == rgb(crate::theme::BORDER_STRONG)
+                                        && (bar.rcScrollBar.top + bar.xyThumbTop
+                                            ..bar.rcScrollBar.top + bar.xyThumbBottom)
+                                            .contains(&y)
+                                    {
+                                        thumb_pixels += 1;
+                                    }
+                                    if pixel == rgb(BACKGROUND) {
+                                        track_pixels += 1;
+                                    }
+                                }
+                            }
+                            assert!(
+                                thumb_pixels > 0,
+                                "the full-host preview must show the themed thumb"
+                            );
+                            assert!(
+                                track_pixels > 0,
+                                "the full-host preview must show the dark track"
+                            );
+                        }
+                        GetWindowRect(hwnd, &mut offscreen);
+                        assert!(
+                            offscreen.right < -10000 && offscreen.bottom < -10000,
+                            "memory-DC previews must remain outside the visible desktop"
                         );
                     }
-                    assert_eq!(GetFocus(), GetDlgItem(hwnd, ARTIST));
-                    SendMessageW(hwnd, WM_ACTIVATE, WA_INACTIVE as usize, 0);
-                    SetFocus(owner);
-                    SendMessageW(hwnd, WM_SETFOCUS, 0, 0);
-                    assert_eq!(
-                        GetFocus(),
-                        GetDlgItem(hwnd, ARTIST),
-                        "returning to search must restore the edited field"
-                    );
-                    text(
-                        hwnd,
-                        STATUS,
-                        crate::i18n::tr("Searching lyric providers..."),
-                    );
-                    capture("loading");
-                    let job = access(hwnd, |state| state.session.begin()).unwrap();
-                    job.deliver(Completion::Search(Ok(vec![
-                        SearchResult::fixture("Blinding Lights", "The Weeknd"),
-                        SearchResult::fixture("Blinding Lights (Live)", "The Weeknd"),
-                        SearchResult::fixture(
-                            "Blinding Lights — Alternate recording",
-                            "The Weeknd",
-                        ),
-                    ])));
-                    poll(hwnd);
-                    let list = results(hwnd);
-                    assert_eq!(SendMessageW(list, LB_GETCOUNT, 0, 0), 3);
-                    assert_ne!(IsWindowEnabled(GetDlgItem(hwnd, APPLY)), 0);
-                    for (from, to) in [
-                        (GetDlgItem(hwnd, TITLE), GetDlgItem(hwnd, ARTIST)),
-                        (GetDlgItem(hwnd, ARTIST), GetDlgItem(hwnd, SEARCH)),
-                        (GetDlgItem(hwnd, SEARCH), list),
-                        (list, GetDlgItem(hwnd, APPLY)),
-                        (GetDlgItem(hwnd, APPLY), GetDlgItem(hwnd, CANCEL)),
-                    ] {
-                        native_tab(hwnd, from, to, false);
-                        native_tab(hwnd, to, from, true);
-                    }
-                    SetFocus(list);
-                    capture("selected");
-                    let mut row = RECT::default();
-                    SendMessageW(list, LB_GETITEMRECT, 0, (&mut row as *mut RECT) as isize);
-                    assert_eq!(
-                        row.bottom - row.top,
-                        (f64::from(ROW_HEIGHT) * scale(hwnd)).round() as i32
-                    );
-                    text(
-                        hwnd,
-                        STATUS,
-                        &crate::i18n::format_copy(
-                            "Lyrics request failed: {error}",
-                            &[(
-                                "error",
-                                crate::i18n::tr(
-                                    "The provider is temporarily unavailable. Try again.",
-                                ),
-                            )],
-                        ),
-                    );
-                    capture("error");
-                    let s = scale(hwnd);
-                    let mut bounds = RECT {
-                        left: 0,
-                        top: 0,
-                        right: (504.0 * s) as i32,
-                        bottom: (340.0 * s) as i32,
-                    };
-                    windows_sys::Win32::UI::HiDpi::AdjustWindowRectExForDpi(
-                        &mut bounds,
-                        STYLE,
-                        0,
-                        WS_EX_CONTROLPARENT | WS_EX_APPWINDOW,
-                        (s * 96.0) as u32,
-                    );
-                    SetWindowPos(
-                        hwnd,
-                        null_mut(),
-                        0,
-                        0,
-                        bounds.right - bounds.left,
-                        bounds.bottom - bounds.top,
-                        SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
-                    );
-                    capture("minimum");
-                    reset(hwnd, &MediaSnapshot::default());
-                    assert_eq!(SendMessageW(list, LB_GETCOUNT, 0, 0), 0);
-                    assert_eq!(IsWindowEnabled(GetDlgItem(hwnd, APPLY)), 0);
-                    capture("no-track");
                 }
             }
         }
@@ -3579,9 +5095,13 @@ mod native {
                 assert_eq!(input(hwnd, ARTIST), "The Weeknd");
                 let style = GetWindowLongW(hwnd, GWL_STYLE) as u32;
                 assert_eq!(
-                    style & (WS_CAPTION | WS_THICKFRAME | WS_SYSMENU),
-                    WS_CAPTION | WS_THICKFRAME | WS_SYSMENU
+                    style & WS_CAPTION,
+                    0,
+                    "search uses the custom client-area chrome"
                 );
+                assert_ne!(style & WS_THICKFRAME, 0);
+                assert!(!GetDlgItem(hwnd, crate::window_chrome::MAXIMIZE).is_null());
+                assert!(!GetDlgItem(hwnd, crate::window_chrome::CLOSE).is_null());
                 assert_ne!(IsWindowEnabled(owner), 0, "Search must remain modeless");
                 show(owner, &snapshot);
                 assert_eq!(

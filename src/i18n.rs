@@ -298,6 +298,7 @@ catalog! {
     FindLyrics => ("Find lyrics", "Tìm lời bài hát"),
     FindLyricsMenu => ("Find lyrics…", "Tìm lời bài hát…"),
     SearchLyrics => ("Search lyrics", "Tìm lời bài hát"),
+    SearchResults => ("Search results", "Kết quả tìm kiếm"),
     SearchLyricsTitle => ("Search lyrics - HiyoDyna", "Tìm lời bài hát - HiyoDyna"),
     SearchTagline => ("Find the right recording, then make it yours.", "Tìm đúng bản thu và chọn lời bài hát phù hợp."),
     MatchingRecordings => ("MATCHING RECORDINGS", "BẢN THU PHÙ HỢP"),
