@@ -421,6 +421,8 @@ mod native {
             if GetParent(list) != viewport {
                 return false;
             }
+            crate::dark_scrollbar::apply(viewport);
+            crate::dark_scrollbar::apply(list);
             // Dialog traversal descends into control parents in sibling order.
             // Keep this parent at the original list's place before the actions.
             if SetWindowPos(
@@ -1852,7 +1854,7 @@ mod native {
                                 Rect::new(16.0, 2.0, width, 20.0),
                                 11.0,
                                 false,
-                                tone,
+                                MUTED,
                             );
                         } else {
                             let label = match item.CtlID as i32 {
@@ -1978,7 +1980,16 @@ mod native {
                         SWP_NOZORDER | SWP_NOACTIVATE,
                     );
                     layout(hwnd);
+                    crate::dark_scrollbar::apply(GetDlgItem(hwnd, RESULTS_VIEWPORT));
+                    crate::dark_scrollbar::apply(results(hwnd));
                     0
+                }
+                WM_THEMECHANGED => {
+                    // SetWindowTheme retains associations across theme changes.
+                    // Reapply to children only, avoiding synchronous self-recursion.
+                    crate::dark_scrollbar::apply(GetDlgItem(hwnd, RESULTS_VIEWPORT));
+                    crate::dark_scrollbar::apply(results(hwnd));
+                    DefWindowProcW(hwnd, message, wparam, lparam)
                 }
                 WM_CLOSE => {
                     DestroyWindow(hwnd);
@@ -3142,6 +3153,59 @@ mod native {
         }
 
         #[test]
+        fn no_media_status_text_meets_aa_without_changing_its_dot() {
+            unsafe {
+                let windows = hidden_results();
+                for source in [
+                    "No active media track. You can search; play a track before applying lyrics.",
+                    "Play a media track before applying lyrics.",
+                ] {
+                    status(windows.owner, source, None);
+                    let mut raster = NativeRaster::new((440, 24));
+                    let item = DRAWITEMSTRUCT {
+                        CtlID: STATUS as u32,
+                        hDC: raster.dc,
+                        rcItem: RECT {
+                            left: 0,
+                            top: 0,
+                            right: 440,
+                            bottom: 24,
+                        },
+                        ..Default::default()
+                    };
+                    SendMessageW(
+                        windows.owner,
+                        WM_DRAWITEM,
+                        0,
+                        (&item as *const DRAWITEMSTRUCT) as isize,
+                    );
+                    let pixels = raster.pixels();
+                    let foreground = pixels
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .enumerate()
+                        .filter(|(index, _)| index % 440 >= 16)
+                        .map(|(_, pixel)| [pixel[0], pixel[1], pixel[2]])
+                        .max_by_key(|pixel| {
+                            pixel.iter().map(|&channel| u32::from(channel)).sum::<u32>()
+                        })
+                        .unwrap();
+                    assert!(
+                        crate::theme::contrast_ratio(foreground, BACKGROUND) >= 4.5,
+                        "the actual no-media status text must meet AA: {foreground:?}"
+                    );
+                    assert_eq!(foreground, MUTED);
+                    assert!(crate::theme::contrast_ratio(MUTED, BACKGROUND) >= 4.5);
+                    assert_eq!(
+                        GetPixel(raster.dc, 2, 13),
+                        crate::theme::colorref(crate::theme::DIM)
+                    );
+                }
+            }
+        }
+
+        #[test]
         fn loading_line_advances_and_pump_stops_when_search_settles() {
             unsafe {
                 let windows = hidden_results();
@@ -4100,9 +4164,130 @@ mod native {
         }
 
         #[test]
+        fn dark_scrollbar_applies_on_first_call_and_keeps_pressed_track_dark() {
+            unsafe {
+                use windows_sys::Win32::UI::Controls::{
+                    CloseThemeData, DrawThemeBackground, OpenThemeData, SBP_LOWERTRACKVERT,
+                    SCRBS_PRESSED,
+                };
+                let windows = hidden_results();
+                // A new, never-opted-in control catches skipping SetWindowTheme
+                // because of the undocumented opt-in's first-call return value.
+                let control = CreateWindowExW(
+                    0,
+                    wide("STATIC").as_ptr(),
+                    null(),
+                    WS_CHILD | WS_VSCROLL,
+                    0,
+                    0,
+                    100,
+                    200,
+                    windows.owner,
+                    null_mut(),
+                    GetModuleHandleW(null()),
+                    null(),
+                );
+                assert!(!control.is_null()); // Owned/destroyed by TestWindows.
+                let supported = crate::dark_scrollbar::initialize();
+                assert_eq!(crate::dark_scrollbar::apply(control), supported);
+                assert_eq!(crate::dark_scrollbar::apply(control), supported);
+                if !supported {
+                    return;
+                }
+                // Exercise native theme data, not our idle/print painter. This
+                // still does NOT prove USER32's pixels during a live tracker loop.
+                for control in [
+                    control,
+                    GetDlgItem(windows.owner, RESULTS_VIEWPORT),
+                    results(windows.owner),
+                ] {
+                    let theme = OpenThemeData(control, wide("ScrollBar").as_ptr());
+                    assert_ne!(theme, 0);
+                    let mut raster = NativeRaster::new((16, 64));
+                    let rect = RECT {
+                        left: 0,
+                        top: 0,
+                        right: 16,
+                        bottom: 64,
+                    };
+                    let drawn = DrawThemeBackground(
+                        theme,
+                        raster.dc,
+                        SBP_LOWERTRACKVERT,
+                        SCRBS_PRESSED,
+                        &rect,
+                        null(),
+                    );
+                    CloseThemeData(theme);
+                    assert!(drawn >= 0);
+                    let pixels = raster.pixels();
+                    assert!(
+                        pixels
+                            .as_chunks::<4>()
+                            .0
+                            .iter()
+                            .all(|pixel| { pixel[..3].iter().all(|&channel| channel < 160) }),
+                        "native pressed-track theme must be dark, not the stock light theme"
+                    );
+                }
+            }
+        }
+
+        #[test]
         fn search_native_accessibility_keeps_list_scroll_pattern() {
             unsafe {
                 let windows = hidden_results();
+                // Verify the native opt-in, not custom WM_PRINT pixels, which
+                // cannot establish the tracker's appearance during a live drag.
+                use windows_sys::Win32::System::LibraryLoader::GetProcAddress;
+                let supported = crate::dark_scrollbar::initialize();
+                assert_eq!(crate::dark_scrollbar::initialize(), supported);
+                assert!(!crate::dark_scrollbar::apply(null_mut()));
+                for control in [
+                    GetDlgItem(windows.owner, RESULTS_VIEWPORT),
+                    results(windows.owner),
+                ] {
+                    assert_ne!(GetWindowLongW(control, GWL_STYLE) as u32 & WS_VSCROLL, 0);
+                    let geometry = || {
+                        let mut bar = SCROLLBARINFO {
+                            cbSize: std::mem::size_of::<SCROLLBARINFO>() as u32,
+                            ..Default::default()
+                        };
+                        assert_ne!(GetScrollBarInfo(control, OBJID_VSCROLL, &mut bar), 0);
+                        assert!(bar.rcScrollBar.right > bar.rcScrollBar.left);
+                        assert!(bar.rcScrollBar.bottom > bar.rcScrollBar.top);
+                        (
+                            bar.rcScrollBar.left,
+                            bar.rcScrollBar.top,
+                            bar.rcScrollBar.right,
+                            bar.rcScrollBar.bottom,
+                            bar.dxyLineButton,
+                            bar.xyThumbTop,
+                            bar.xyThumbBottom,
+                        )
+                    };
+                    let before = geometry();
+                    assert_eq!(crate::dark_scrollbar::apply(control), supported);
+                    assert_eq!(crate::dark_scrollbar::apply(control), supported);
+                    assert_ne!(GetWindowLongW(control, GWL_STYLE) as u32 & WS_VSCROLL, 0);
+                    assert_eq!(
+                        geometry(),
+                        before,
+                        "idempotent dark theming must retain native geometry"
+                    );
+                    if supported {
+                        let module = GetModuleHandleW(wide("uxtheme.dll").as_ptr());
+                        if let Some(query) = GetProcAddress(module, 137_usize as *const u8) {
+                            let allowed: unsafe extern "system" fn(HWND) -> bool =
+                                std::mem::transmute(query);
+                            assert!(
+                                allowed(control),
+                                "the native scrollbar window must opt into dark tracking"
+                            );
+                        }
+                    }
+                }
+                SendMessageW(windows.owner, WM_THEMECHANGED, 0, 0);
                 let list = results(windows.owner) as usize;
                 for (pass, name) in [
                     tr("Search results"),
