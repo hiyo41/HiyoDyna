@@ -17,11 +17,11 @@ Windows users who want a compact clock, media controls, and synchronized lyrics 
 - Tune motion, bounce, accent, clock format, seconds, position, shadow, lyrics mode, and timing offset.
 - Install from a portable executable, or build and install with the optional source setup.
 - Trust that an update came from GitHub and matches its SHA-256.
-- Remove the app cleanly by deleting one executable.
+- Remove the portable build by deleting one executable, plus the settings folder if you want no leftover preferences.
 
 ## Differentiators
 
-- Under 2 MB, one native process, no webview or Electron.
+- One native executable, no webview or Electron.
 - A real spring animation, three accents, a native Settings window with categories, and a Find lyrics window.
 - Synchronized lyrics from AMLL TTML DB, LRCLIB, and NetEase, with no account or API key.
 - AGPL-3.0 source, portable release, optional source setup, optional Start with Windows.

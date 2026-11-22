@@ -24,6 +24,14 @@ const html = read('dist/index.html');
 const notFound = read('dist/404.html');
 const base = process.env.PAGES_BASE || '/';
 const basePrefix = base.endsWith('/') ? base : `${base}/`;
+const baseSegment = basePrefix
+  .slice(1)
+  .replace(/\/$/, '')
+  .replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const rootAbsolute = baseSegment
+  ? new RegExp(`(?:src|href)="/(?!${baseSegment}(?:/|"))[^"]*"`, 'g')
+  : null;
+const cssBase = baseSegment ? new RegExp(`url\\(\\/(?!${baseSegment}\\/)`) : null;
 
 check('title mentions HiyoDyna', /<title>[^<]*HiyoDyna/.test(html));
 check('canonical uses the project URL', /rel="canonical" href="https:\/\/hiyo41\.github\.io\/HiyoDyna\/"/.test(html));
@@ -66,17 +74,16 @@ check(
 );
 check(`JS source is not empty (${jsFiles.length} files, ${jsBytes} bytes)`, jsFiles.length > 0);
 
-const rootAbsolute = /(?:src|href)="\/(?!HiyoDyna(?:\/|"))[^"]*"/g;
-check('no root-absolute links outside the base path', !rootAbsolute.test(html));
+check('no root-absolute links outside the base path', !rootAbsolute || !rootAbsolute.test(html));
 
 const cssFiles = assets.filter((name) => name.endsWith('.css'));
 for (const name of cssFiles) {
   const css = readFileSync(join(root, 'dist', '_astro', name), 'utf8');
-  check(`CSS ${name} uses the base path`, !/url\(\/(?!HiyoDyna\/)/.test(css));
+  check(`CSS ${name} uses the base path`, !cssBase || !cssBase.test(css));
 }
 
 const inlineCss = inlineStyles.join('\n');
-check('inline CSS uses the base path', !/url\(\/(?!HiyoDyna\/)/.test(inlineCss));
+check('inline CSS uses the base path', !cssBase || !cssBase.test(inlineCss));
 
 const allCss = `${inlineCss}\n${cssFiles
   .map((name) => readFileSync(join(root, 'dist', '_astro', name), 'utf8'))
@@ -115,6 +122,19 @@ check(
     html.includes('aria-label="HiyoDyna clock settings preview"'),
 );
 check('islands use real button controls', (html.match(/class="island__button"/g) ?? []).length === 2);
+check(
+  'islands ship dock and compact lyrics state',
+  html.includes('data-dock="center"') &&
+    html.includes('data-compact-lyrics="false"') &&
+    html.includes('data-compact-lyrics="true"'),
+);
+check(
+  'playground ships dock and compact lyrics controls',
+  html.includes('name="dock"') && html.includes('name="compactLyrics"'),
+);
+check('the lyrics section ships', html.includes('id="lyrics"') && html.includes('Lyrics that keep time.'));
+check('the lyrics nav link ships', html.includes('href="#lyrics"'));
+check('no stale size claim ships', !/under\s*2\s*MB/i.test(html));
 
 check('the favicon is copied', existsSync(join(root, 'dist', 'favicon.svg')));
 check('the base path is applied to icons', html.includes(`href="${basePrefix}favicon.svg"`));

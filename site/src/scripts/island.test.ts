@@ -60,4 +60,22 @@ describe('island interaction', () => {
     expect(root.classList.contains('is-previewing')).toBe(true);
     controller.destroy();
   });
+
+  it('applies dock and compact lyrics settings and propagates changes', () => {
+    const { root, button } = island();
+    const controller = createIsland(root, {
+      settings: { ...DEFAULT_SETTINGS, dock: 'right', compactLyrics: false },
+    });
+
+    expect(root.dataset.dock).toBe('right');
+    expect(root.dataset.compactLyrics).toBe('false');
+
+    controller.setSettings({ ...DEFAULT_SETTINGS, dock: 'left', compactLyrics: true });
+    expect(root.dataset.dock).toBe('left');
+    expect(root.dataset.compactLyrics).toBe('true');
+    expect(button.getAttribute('aria-expanded')).toBe('false');
+    expect(root.querySelector('.island__text--compact')?.getAttribute('aria-hidden')).toBe('false');
+    expect(root.querySelector('.island__text--expanded')?.getAttribute('aria-hidden')).toBe('true');
+    controller.destroy();
+  });
 });

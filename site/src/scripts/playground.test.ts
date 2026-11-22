@@ -11,6 +11,8 @@ describe('applySetting', () => {
     settings = applySetting(settings, 'showSeconds', 'false');
     settings = applySetting(settings, 'gap', '16');
     settings = applySetting(settings, 'shadow', 'false');
+    settings = applySetting(settings, 'dock', 'right');
+    settings = applySetting(settings, 'compactLyrics', 'false');
 
     expect(settings).toEqual({
       motion: 'fast',
@@ -20,14 +22,16 @@ describe('applySetting', () => {
       showSeconds: false,
       gap: 16,
       shadow: false,
-      dock: 'center',
-      compactLyrics: true,
+      dock: 'right',
+      compactLyrics: false,
     });
   });
 
   it('ignores unknown and out-of-range values', () => {
     expect(applySetting(DEFAULT_SETTINGS, 'motion', 'turbo')).toEqual(DEFAULT_SETTINGS);
     expect(applySetting(DEFAULT_SETTINGS, 'gap', '12')).toEqual(DEFAULT_SETTINGS);
+    expect(applySetting(DEFAULT_SETTINGS, 'dock', 'top')).toEqual(DEFAULT_SETTINGS);
+    expect(applySetting(DEFAULT_SETTINGS, 'compactLyrics', 'yes')).toEqual(DEFAULT_SETTINGS);
     expect(applySetting(DEFAULT_SETTINGS, 'nonsense', '1')).toEqual(DEFAULT_SETTINGS);
   });
 });

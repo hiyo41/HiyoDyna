@@ -68,7 +68,7 @@ const accent = ACCENTS[settings.accent];
             <span class="island__meridiem" data-meridiem-compact></span>
             <span class="island__seconds" data-seconds-compact>31</span>
           </span>
-          <span class="island__lyric-compact" data-lyric-compact>Compact lyrics preview</span>
+          <span class="island__lyric-compact" data-lyric-compact>And the night is burning</span>
         </div>
 
         <div class="island__text island__text--expanded" aria-hidden="true">
@@ -132,6 +132,12 @@ const accent = ACCENTS[settings.accent];
     left: 100%;
     transform: translateX(-100%) scale(var(--island-scale, 1));
     transform-origin: top right;
+  }
+
+  .island__clock-compact {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
   }
 
   .island__lyric-compact {

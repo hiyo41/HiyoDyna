@@ -22,6 +22,15 @@ describe('settings', () => {
     expect(reset).not.toBe(DEFAULT_SETTINGS);
   });
 
+  it('restores dock and compact lyrics defaults on reset', () => {
+    const changed = { ...DEFAULT_SETTINGS, dock: 'right' as const, compactLyrics: false };
+    const reset = resetSettings();
+    expect(changed.dock).toBe('right');
+    expect(changed.compactLyrics).toBe(false);
+    expect(reset.dock).toBe('center');
+    expect(reset.compactLyrics).toBe(true);
+  });
+
   it('maps the app accents', () => {
     expect(ACCENTS).toEqual({
       ice: '#8FC7FF',

@@ -40,6 +40,7 @@ const docks = [
 
 <div class="settings-panel">
   <form data-settings-form aria-label="HiyoDyna clock settings">
+    <h3 class="settings-group">Motion</h3>
     <fieldset>
       <legend>Motion</legend>
       <div class="segmented">
@@ -78,6 +79,7 @@ const docks = [
       </div>
     </fieldset>
 
+    <h3 class="settings-group">Appearance</h3>
     <fieldset>
       <legend>Accent</legend>
       <div class="swatches">
@@ -94,6 +96,18 @@ const docks = [
     </fieldset>
 
     <fieldset>
+      <legend>Shadow</legend>
+      <div class="switch-list">
+        <label class="switch">
+          <input type="checkbox" name="shadow" value="true" checked={settings.shadow} />
+          <span class="switch__track" aria-hidden="true"><span class="switch__knob"></span></span>
+          <span>Soft shadow</span>
+        </label>
+      </div>
+    </fieldset>
+
+    <h3 class="settings-group">Clock &amp; position</h3>
+    <fieldset>
       <legend>Clock</legend>
       <div class="segmented">
         <label>
@@ -108,22 +122,12 @@ const docks = [
     </fieldset>
 
     <fieldset>
-      <legend>Display</legend>
+      <legend>Seconds</legend>
       <div class="switch-list">
         <label class="switch">
           <input type="checkbox" name="showSeconds" value="true" checked={settings.showSeconds} />
           <span class="switch__track" aria-hidden="true"><span class="switch__knob"></span></span>
           <span>Seconds</span>
-        </label>
-        <label class="switch">
-          <input type="checkbox" name="shadow" value="true" checked={settings.shadow} />
-          <span class="switch__track" aria-hidden="true"><span class="switch__knob"></span></span>
-          <span>Soft shadow</span>
-        </label>
-        <label class="switch">
-          <input type="checkbox" name="compactLyrics" value="true" checked={settings.compactLyrics} />
-          <span class="switch__track" aria-hidden="true"><span class="switch__knob"></span></span>
-          <span>Compact lyrics</span>
         </label>
       </div>
     </fieldset>
@@ -166,6 +170,18 @@ const docks = [
       </div>
     </fieldset>
 
+    <h3 class="settings-group">Lyrics</h3>
+    <fieldset>
+      <legend>Compact lyrics</legend>
+      <div class="switch-list">
+        <label class="switch">
+          <input type="checkbox" name="compactLyrics" value="true" checked={settings.compactLyrics} />
+          <span class="switch__track" aria-hidden="true"><span class="switch__knob"></span></span>
+          <span>Compact lyrics</span>
+        </label>
+      </div>
+    </fieldset>
+
     <div class="settings-actions">
       <button class="button button--ghost" type="button" data-preview>Preview motion</button>
       <button class="reset" type="button" data-reset>Reset defaults</button>
@@ -187,6 +203,21 @@ const docks = [
 <style>
   .settings-panel {
     font-size: 14px;
+  }
+
+  .settings-group {
+    margin: 28px 0 12px;
+    font-family: var(--font-body);
+    font-size: 11px;
+    font-weight: 500;
+    line-height: 1;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+  }
+
+  .settings-group:first-child {
+    margin-top: 0;
   }
 
   fieldset {

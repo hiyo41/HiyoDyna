@@ -42,7 +42,7 @@ const source = 'https://github.com/hiyo41/HiyoDyna';
         <div class="hero__island">
           <Island
             id="hero"
-            hint="Hover or tap the island"
+            hint="Web preview · hover or tap"
             settings={{ ...DEFAULT_SETTINGS, compactLyrics: false }}
           />
         </div>
@@ -51,8 +51,7 @@ const source = 'https://github.com/hiyo41/HiyoDyna';
           <h1>A Dynamic Island-style clock for Windows.</h1>
           <p class="lede">
             A small capsule at the top of your screen. Hover for the date and the seconds; scroll
-            for media controls and synchronized lyrics. Written in Rust, drawn with Win32, and
-            under 2 MB.
+            for media controls and synchronized lyrics. Written in Rust and drawn with Win32.
           </p>
           <div class="button-row hero__actions">
             <DownloadButton />
@@ -71,8 +70,8 @@ const source = 'https://github.com/hiyo41/HiyoDyna';
     <section class="facts" aria-label="At a glance">
       <div class="wrap facts__grid">
         <div class="fact">
-          <span class="fact__value">Under 2 MB</span>
-          <span class="fact__label">Single executable</span>
+          <span class="fact__value">One executable</span>
+          <span class="fact__label">No runtime to install</span>
         </div>
         <div class="fact">
           <span class="fact__value">Native Win32</span>
@@ -107,10 +106,10 @@ const source = 'https://github.com/hiyo41/HiyoDyna';
     <section class="section settings-section" id="settings">
       <div class="wrap">
         <div class="section-head">
-          <h2>Every control, live.</h2>
+          <h2>The main controls, live.</h2>
           <p class="lede">
-            The tray menu, without the tray. Change the spring, the accent, or the clock and watch
-            the capsule respond.
+            The look controls from the tray, without the tray. Change the spring, the accent, or the
+            clock and watch the capsule respond.
           </p>
         </div>
 
@@ -121,7 +120,7 @@ const source = 'https://github.com/hiyo41/HiyoDyna';
               id="playground"
               settings={DEFAULT_SETTINGS}
               label="HiyoDyna clock settings preview"
-              hint="Hover or tap to preview"
+              hint="Web preview · hover or tap"
             />
           </div>
           <SettingsPanel />
@@ -144,9 +143,9 @@ const source = 'https://github.com/hiyo41/HiyoDyna';
             itself.
           </p>
           <ul class="native__specs">
-            <li><span>1</span> process</li>
+            <li><span>1</span> resident process</li>
             <li><span>0</span> webviews</li>
-            <li><span>&lt; 2 MB</span> on disk</li>
+            <li><span>1</span> file on disk</li>
           </ul>
         </div>
       </div>
@@ -157,8 +156,8 @@ const source = 'https://github.com/hiyo41/HiyoDyna';
         <div class="section-head">
           <h2>Download, run.</h2>
           <p class="lede">
-            The release is a single executable. No installer, no admin prompt, and no Rust
-            toolchain.
+            The release is a portable executable. No installer or admin prompt, and no Rust
+            toolchain. A zip with the executable, both READMEs, and the license is also published.
           </p>
         </div>
 
@@ -190,7 +189,7 @@ const source = 'https://github.com/hiyo41/HiyoDyna';
           <aside class="install__notes" aria-label="Install notes">
             <h3>Before you run it</h3>
             <ul>
-              <li>Windows 10/11 x64.</li>
+              <li>Windows 10 or 11, x64. Media and lyrics need Windows 10 version 1809 or later.</li>
               <li>
                 The build is unsigned, so SmartScreen may ask for confirmation. The SHA-256 is on
                 the release page.
