@@ -242,9 +242,10 @@ impl Animation {
             ),
         };
 
-        // Expanded pages can differ greatly in height. Their shrinking axes must
-        // approach the destination without revealing compact content or rebounding.
-        let monotonic_shrink = self.page_shrink && *position >= target;
+        // Shrinking pages and collapse height must approach their destination
+        // without undershooting or rebounding the compact lyric baseline.
+        let collapse_height = axis == 1 && self.target.height == COMPACT.height;
+        let monotonic_shrink = (self.page_shrink || collapse_height) && *position >= target;
         let compact_resize = axis == 0 && self.compact_resize;
         let previous = *position;
         let damping = if monotonic_shrink || compact_resize {
@@ -319,6 +320,42 @@ impl Animation {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn collapse_height_and_lyric_baseline_never_undershoot_or_rebound() {
+        use crate::settings::{BouncePreset, MotionPreset, Settings};
+        for motion in [MotionPreset::Slow, MotionPreset::Normal, MotionPreset::Fast] {
+            for bounce in [BouncePreset::Low, BouncePreset::Medium, BouncePreset::High] {
+                for dt in [1.0 / 30.0, 1.0 / 120.0] {
+                    let settings = Settings {
+                        motion,
+                        bounce,
+                        ..Settings::default()
+                    };
+                    let mut animation = Animation::new_with_tuning(settings.tuning());
+                    animation.target = ShapeState {
+                        height: 500.0,
+                        ..EXPANDED
+                    };
+                    for _ in 0..600 {
+                        animation.advance(dt);
+                    }
+                    animation.collapse();
+                    let mut previous_baseline = (animation.current.height - 22.0) * 0.5;
+                    for frame in 0..600 {
+                        animation.advance(dt);
+                        let baseline = (animation.current.height - 22.0) * 0.5;
+                        assert!(
+                            baseline >= 9.0 && baseline <= previous_baseline,
+                            "collapse baseline dipped or rebounded on frame {frame}: {previous_baseline} -> {baseline}, {motion:?}/{bounce:?}"
+                        );
+                        previous_baseline = baseline;
+                    }
+                    assert_eq!(animation.current, COMPACT);
+                }
+            }
+        }
+    }
+
     #[test]
     fn compact_sentence_width_changes_do_not_rebound() {
         use crate::settings::{BouncePreset, MotionPreset, Settings};

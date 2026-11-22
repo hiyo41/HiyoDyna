@@ -6,6 +6,14 @@ use crate::settings::{LyricsMode, Settings};
 const SIZE: f32 = 13.0;
 pub(crate) const SOURCE_SPACE: f32 = 13.0;
 
+pub(crate) fn wait_pulse(remaining: f64, playing: bool, visible: bool) -> f32 {
+    if playing && visible && remaining > 0.0 && remaining <= 3.0 {
+        (0.8 + 0.2 * (std::f64::consts::TAU * (3.0 - remaining) / 1.6).cos()) as f32
+    } else {
+        1.0
+    }
+}
+
 #[derive(Clone)]
 struct Frame {
     line: LyricLine,
@@ -384,6 +392,91 @@ pub(crate) fn draw_source(c: &mut Canvas<'_>, right: f32, height: f32, source: &
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn pulse_boundaries_and_playback_visibility_gates() {
+        for (remaining, playing, visible, expected) in [
+            (3.0, true, true, 1.0),
+            (2.2, true, true, 0.6),
+            (2.2, false, true, 1.0),
+            (2.2, true, false, 1.0),
+            (4.0, true, true, 1.0),
+            (0.0, true, true, 1.0),
+            (-0.1, true, true, 1.0),
+        ] {
+            assert_eq!(super::wait_pulse(remaining, playing, visible), expected);
+        }
+    }
+
+    #[test]
+    fn pulse_has_a_continuous_bounded_one_point_six_second_cycle() {
+        for (elapsed, expected) in [(0.0, 1.0), (0.4, 0.8), (0.8, 0.6), (1.2, 0.8), (1.6, 1.0)] {
+            assert!((super::wait_pulse(3.0 - elapsed, true, true) - expected).abs() < 0.00001);
+        }
+        let mut previous = 1.0;
+        for step in 0..1600 {
+            let remaining = 3.0 - step as f64 / 1000.0;
+            let pulse = super::wait_pulse(remaining, true, true);
+            assert!((0.6..=1.0).contains(&pulse));
+            assert!((pulse - previous).abs() < 0.001);
+            if remaining > 1.6 {
+                assert!((pulse - super::wait_pulse(remaining - 1.6, true, true)).abs() < 0.00001);
+            }
+            previous = pulse;
+        }
+    }
+
+    #[test]
+    fn collapse_line_change_preserves_one_continuous_composition() {
+        use std::time::{Duration, Instant};
+        let now = Instant::now();
+        let lyrics = crate::lyrics::parse_lrc("[00:00]First line\n[00:04]Second line").unwrap();
+        let mut presentation = super::Presentation::default();
+        // Keep receiving snapshots during the expanded page, then change line
+        // exactly when collapse begins.
+        for frame in 0..60 {
+            presentation.update(
+                "track",
+                1,
+                &lyrics.lines[0],
+                3.9,
+                now + Duration::from_millis(frame * 16),
+            );
+        }
+        let collapse = now + Duration::from_millis(960);
+        for frame in 0..60 {
+            let when = collapse + Duration::from_millis(frame * 16);
+            presentation.update(
+                "track",
+                1,
+                &lyrics.lines[1],
+                4.0 + frame as f64 * 0.016,
+                when,
+            );
+            let layers = presentation.layers(when);
+            assert!((layers.iter().map(|layer| layer.opacity).sum::<f32>() - 1.0).abs() < 0.001);
+            for start in [0.0, 4.0] {
+                assert!(
+                    layers
+                        .iter()
+                        .filter(|layer| layer.frame.line.start == start)
+                        .count()
+                        <= 1,
+                    "collapse must not duplicate a lyric layer"
+                );
+            }
+            if frame == 0 {
+                assert_eq!(layers.len(), 1);
+                assert_eq!(layers[0].frame.line.start, 0.0);
+                assert_eq!(layers[0].offset, 0.0);
+            }
+            if frame >= 10 {
+                assert_eq!(layers.len(), 1);
+                assert_eq!(layers[0].frame.line.start, 4.0);
+                assert_eq!(layers[0].offset, 0.0);
+            }
+        }
+    }
+
     #[test]
     fn countdown_space_retracts_continuously_after_the_numeric_cutoff() {
         let lyrics =
