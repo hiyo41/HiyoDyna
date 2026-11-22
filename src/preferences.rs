@@ -1,4 +1,4 @@
-use crate::canvas::{Canvas, MUTED, Painter, Rect, WHITE};
+use crate::canvas::{Canvas, Painter, Rect};
 use crate::clock::ClockFormat;
 use crate::hotkey::Shortcut;
 use crate::i18n::{Language, tr};
@@ -25,50 +25,170 @@ const COMMAND: u32 = WM_APP + 40;
 const RELAYOUT: u32 = WM_APP + 41;
 pub(crate) const MESSAGE: u32 = WM_APP + 42;
 const REMEMBER_FOCUS: u32 = WM_APP + 43;
-const WIDTH: f32 = 360.0;
-const CONTENT: f32 = 1275.0;
-const CONTENT_TOP: f32 = 68.0;
-const CONTENT_BOTTOM: f32 = 62.0;
+const HEADER_HEIGHT: f32 = 64.0;
+const FOOTER_HEIGHT: f32 = 64.0;
+const NAV_FIRST: usize = 0x7000;
 const WINDOW_STYLE: u32 = WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN;
 const UPDATE_POLL: usize = 0x5544;
 const SCROLL_FRAME: u32 = WM_APP + 44;
+const ABOUT_TEXT: i32 = 0x7010;
 
 #[derive(Clone, Copy)]
 struct SettingsLayout {
-    column: f32,
     wide: bool,
-    zoom: f32,
+    sidebar: Rect,
+    content: Rect,
+    header: Rect,
+    footer: Rect,
 }
 
 impl SettingsLayout {
-    fn new(width: f32) -> Self {
-        let wide = width >= 760.0;
-        let column = if wide { (width - 16.0) * 0.5 } else { width };
-        let zoom = ((column - 48.0) / (WIDTH - 48.0)).clamp(0.85, 1.25);
-        Self { column, wide, zoom }
+    fn new(width: f32, height: f32) -> Self {
+        let wide = width >= 700.0;
+        let top = HEADER_HEIGHT + if wide { 0.0 } else { 40.0 };
+        let footer = Rect::new(0.0, (height - FOOTER_HEIGHT).max(top), width, FOOTER_HEIGHT);
+        Self {
+            wide,
+            sidebar: Rect::new(
+                0.0,
+                HEADER_HEIGHT,
+                if wide { 208.0 } else { 0.0 },
+                (footer.y - HEADER_HEIGHT).max(0.0),
+            ),
+            content: Rect::new(
+                if wide { 232.0 } else { 24.0 },
+                top,
+                (width - if wide { 256.0 } else { 48.0 }).max(0.0),
+                (footer.y - top).max(0.0),
+            ),
+            header: Rect::new(0.0, 0.0, width, HEADER_HEIGHT),
+            footer,
+        }
     }
 
+    // Keep the source row order/IDs while giving rows a 44px height and 12px gap.
+    // Section membership never depends on a column or a y threshold.
     fn rect(self, rect: Rect) -> Rect {
-        let second = self.wide && rect.y >= 627.0;
-        let stretch = (self.column - 48.0).max(1.0) / (WIDTH - 48.0);
+        let stretch = self.content.w / 312.0;
         Rect::new(
-            24.0 + (rect.x - 24.0) * stretch + if second { self.column + 16.0 } else { 0.0 },
-            (rect.y - if second { 627.0 } else { 0.0 }) * self.zoom,
+            self.content.x + (rect.x - 24.0) * stretch,
+            rect.y * 1.5,
             rect.w * stretch,
-            rect.h * self.zoom,
+            rect.h * 1.5,
         )
     }
 
     fn content_height(self) -> f32 {
-        (if self.wide { CONTENT - 627.0 } else { CONTENT }) * self.zoom
+        let last = self.section_rect(4);
+        last.y + last.h
     }
 
     fn text_scale(self) -> f32 {
-        self.zoom
+        1.0
     }
 
-    fn max_scroll(self, height: f32) -> f32 {
-        (self.content_height() - (height - CONTENT_TOP - CONTENT_BOTTOM).max(0.0)).max(0.0)
+    fn max_scroll(self) -> f32 {
+        (self.content_height() - self.content.h).max(0.0)
+    }
+
+    fn section_rect(self, index: usize) -> Rect {
+        let section = SettingsSection::ALL[index];
+        let top = section.top();
+        let bottom = SettingsSection::ALL
+            .get(index + 1)
+            .map_or(1275.0, |next| next.top());
+        Rect::new(
+            self.content.x,
+            top * 1.5,
+            self.content.w,
+            (bottom - top) * 1.5,
+        )
+    }
+
+    fn sidebar_rect(self, index: usize) -> Rect {
+        if self.wide {
+            Rect::new(
+                16.0,
+                self.sidebar.y + 16.0 + index as f32 * 48.0,
+                176.0,
+                40.0,
+            )
+        } else {
+            let width = self.header.w / 5.0;
+            Rect::new(index as f32 * width, self.header.h, width, 40.0)
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SettingsSection {
+    Appearance,
+    Motion,
+    ClockPosition,
+    MusicLyrics,
+    Application,
+}
+
+impl SettingsSection {
+    const ALL: [Self; 5] = [
+        Self::Appearance,
+        Self::Motion,
+        Self::ClockPosition,
+        Self::MusicLyrics,
+        Self::Application,
+    ];
+
+    fn index(self) -> usize {
+        self as usize
+    }
+
+    fn label(self) -> &'static str {
+        tr(match self {
+            Self::Appearance => "Appearance",
+            Self::Motion => "Motion",
+            Self::ClockPosition => "Clock & position",
+            Self::MusicLyrics => "Music & lyrics",
+            Self::Application => "Application",
+        })
+    }
+
+    fn rows(self) -> &'static [f32] {
+        match self {
+            Self::Appearance => &[34.0, 71.0],
+            Self::Motion => &[151.0, 188.0],
+            Self::ClockPosition => &[268.0, 305.0, 342.0, 379.0],
+            Self::MusicLyrics => &[462.0, 499.0, 539.0, 578.0],
+            Self::Application => &[
+                658.0, 726.0, 763.0, 800.0, 837.0, 906.0, 976.0, 1013.0, 1050.0, 1110.0, 1155.0,
+                1195.0, 1235.0,
+            ],
+        }
+    }
+
+    fn top(self) -> f32 {
+        match self {
+            Self::Appearance => 0.0,
+            Self::Motion => 117.0,
+            Self::ClockPosition => 234.0,
+            Self::MusicLyrics => 428.0,
+            Self::Application => 627.0,
+        }
+    }
+
+    fn for_command(command: TrayCommand) -> Self {
+        match command {
+            TrayCommand::Accent(_) | TrayCommand::Shadow(_) => Self::Appearance,
+            TrayCommand::Motion(_) | TrayCommand::Bounce(_) => Self::Motion,
+            TrayCommand::Clock(_)
+            | TrayCommand::ShowSeconds(_)
+            | TrayCommand::TopGap(_)
+            | TrayCommand::Dock(_) => Self::ClockPosition,
+            TrayCommand::Lyrics(_)
+            | TrayCommand::LyricOffset(_)
+            | TrayCommand::CompactLyrics(_)
+            | TrayCommand::ClearLyricsCache => Self::MusicLyrics,
+            _ => Self::Application,
+        }
     }
 }
 
@@ -78,6 +198,7 @@ thread_local! {
 }
 
 struct Control {
+    section: SettingsSection,
     rect: Rect,
     label: String,
     command: TrayCommand,
@@ -259,16 +380,16 @@ unsafe fn draw_button(hwnd: HWND, dc: HDC) {
 }
 
 fn reveal_control(state: &mut State, index: usize) {
-    let layout = SettingsLayout::new(state.width);
+    let layout = SettingsLayout::new(state.width, state.height);
     let rect = layout.rect(state.controls[index].rect);
-    let visible = (state.height - CONTENT_TOP - CONTENT_BOTTOM).max(0.0);
+    let visible = layout.content.h;
     if rect.y < state.scroll {
         state.scroll = rect.y;
     }
     if rect.y + rect.h > state.scroll + visible {
         state.scroll = rect.y + rect.h - visible;
     }
-    state.scroll = state.scroll.clamp(0.0, layout.max_scroll(state.height));
+    state.scroll = state.scroll.clamp(0.0, layout.max_scroll());
     state.scroll_motion.jump(state.scroll);
     unsafe {
         state.frame_pump.stop();
@@ -276,6 +397,7 @@ fn reveal_control(state: &mut State, index: usize) {
 }
 
 struct State {
+    active_section: SettingsSection,
     painter: Painter,
     surface: WindowSurface,
     frame_pump: FramePump,
@@ -290,9 +412,33 @@ struct State {
     background: Option<Background>,
     content: Option<ContentBackground>,
     button_rasters: Vec<ButtonRaster>,
+    positions: PositionCache,
     shortcut: ShortcutCapture,
     shortcut_available: bool,
     updates: crate::update::CheckSession,
+}
+
+#[derive(Default)]
+struct PositionCache {
+    entries: Vec<PlacedControl>,
+    regions: Vec<HRGN>,
+}
+
+struct PlacedControl {
+    hwnd: HWND,
+    bounds: (i32, i32, i32, i32),
+    visible: bool,
+    clip: Option<(i32, i32, i32)>,
+}
+
+impl Drop for PositionCache {
+    fn drop(&mut self) {
+        for region in &self.regions {
+            unsafe {
+                DeleteObject(*region);
+            }
+        }
+    }
 }
 
 struct Background {
@@ -320,6 +466,7 @@ struct ButtonRasterKey {
     enabled: bool,
     status: bool,
     destructive: bool,
+    toggle: bool,
 }
 
 struct ButtonRaster {
@@ -332,9 +479,20 @@ fn button_raster(state: &mut State, item: &DRAWITEMSTRUCT, enabled: bool) -> std
         .controls
         .get((item.CtlID as usize).saturating_sub(100));
     let (label, selected) = match item.CtlID {
-        1 => (if state.about { "‹" } else { "×" }, false),
+        1 => (
+            tr(if state.about {
+                "Back to settings"
+            } else {
+                "Close"
+            }),
+            false,
+        ),
         2 => (tr("Restart"), false),
         3 => (tr("Exit"), false),
+        id if (NAV_FIRST..NAV_FIRST + 5).contains(&(id as usize)) => {
+            let section = SettingsSection::ALL[id as usize - NAV_FIRST];
+            (section.label(), state.active_section == section)
+        }
         _ => control.map_or(("", false), |c| (c.label.as_str(), c.selected)),
     };
     let key = ButtonRasterKey {
@@ -344,8 +502,14 @@ fn button_raster(state: &mut State, item: &DRAWITEMSTRUCT, enabled: bool) -> std
             (item.rcItem.bottom - item.rcItem.top).max(0) as u32,
         ),
         scale: state.scale.to_bits(),
-        text_scale: SettingsLayout::new(state.width).text_scale().to_bits(),
-        label: label.into(),
+        text_scale: SettingsLayout::new(state.width, state.height)
+            .text_scale()
+            .to_bits(),
+        label: if item.CtlID == ABOUT_TEXT as u32 {
+            about_prose()
+        } else {
+            label.into()
+        },
         accent: state.settings.accent_bgra(),
         item_state: item.itemState,
         selected,
@@ -356,38 +520,154 @@ fn button_raster(state: &mut State, item: &DRAWITEMSTRUCT, enabled: bool) -> std
                 Some(LocalAction::ShortcutStatus | LocalAction::UpdateStatus)
             )
         }),
-        destructive: item.CtlID == 3 || control.is_some_and(|c| c.command == TrayCommand::Reset),
+        destructive: item.CtlID == 3
+            || control.is_some_and(|c| {
+                matches!(
+                    c.command,
+                    TrayCommand::Reset | TrayCommand::ClearLyricsCache
+                )
+            }),
+        toggle: control.is_some_and(|c| {
+            matches!(
+                c.command,
+                TrayCommand::Shadow(_)
+                    | TrayCommand::ShowSeconds(_)
+                    | TrayCommand::CompactLyrics(_)
+                    | TrayCommand::ToggleAutostart
+            )
+        }),
     };
     if let Some(raster) = state.button_rasters.iter().find(|raster| raster.key == key) {
         return raster.pixels.clone();
     }
     let mut pixels = vec![0; key.size.0 as usize * key.size.1 as usize * 4];
     let mut canvas = Canvas::new(&mut pixels, key.size, &mut state.painter);
-    if key.status {
-        canvas.rect(canvas.clip, 0.0, crate::native_ui::BACKGROUND, 1.0);
+    let nav = (NAV_FIRST..NAV_FIRST + 5).contains(&(key.id as usize));
+    canvas.rect(
+        canvas.clip,
+        0.0,
+        if key.id < 100 || nav || key.id == ABOUT_TEXT as u32 {
+            crate::theme::BG
+        } else {
+            crate::theme::SURFACE_RAISED
+        },
+        1.0,
+    );
+    if key.id == ABOUT_TEXT as u32 {
+        let bounds = canvas.clip;
+        let mut prose = key.label.lines();
+        crate::native_ui::wrapped_text(
+            &mut canvas,
+            prose.next().unwrap_or_default(),
+            Rect::new(0.0, 0.0, bounds.w, 60.0),
+            17.0,
+            crate::theme::TEXT,
+        );
+        canvas.text(
+            prose.next().unwrap_or_default(),
+            Rect::new(0.0, 65.0, bounds.w, 24.0),
+            12.0,
+            false,
+            crate::theme::MUTED,
+        );
+        crate::native_ui::wrapped_text(
+            &mut canvas,
+            &prose.collect::<Vec<_>>().join("\n"),
+            Rect::new(0.0, 91.0, bounds.w, (bounds.h - 91.0).max(0.0)),
+            11.0,
+            crate::theme::MUTED,
+        );
+    } else if key.status {
         let bounds = canvas.clip;
         crate::native_ui::wrapped_text(
             &mut canvas,
             &key.label,
             bounds,
             11.0 * f32::from_bits(key.text_scale),
-            MUTED,
+            crate::theme::MUTED,
         );
     } else {
-        crate::native_ui::button(
-            &mut canvas,
-            &key.label,
-            crate::native_ui::ButtonStyle {
-                accent: key.accent,
-                selected: key.selected,
-                enabled: key.enabled,
-                focused: key.item_state & ODS_FOCUS != 0,
-                pressed: key.item_state & ODS_SELECTED != 0,
-                hovered: key.item_state & ODS_HOTLIGHT != 0,
-                destructive: key.destructive,
-                text_scale: f32::from_bits(key.text_scale),
-            },
+        let bounds = canvas.clip;
+        let inner = Rect::new(
+            2.0,
+            2.0,
+            (bounds.w - 4.0).max(0.0),
+            (bounds.h - 4.0).max(0.0),
         );
+        if key.toggle {
+            crate::native_ui::switch(&mut canvas, inner, key.selected, key.accent);
+        } else {
+            let fill = if nav && key.selected {
+                crate::theme::SURFACE_RAISED
+            } else if key.selected && key.enabled {
+                key.accent
+            } else if key.item_state & (ODS_SELECTED | ODS_HOTLIGHT) != 0 {
+                crate::theme::BORDER
+            } else if nav {
+                crate::theme::BG
+            } else {
+                crate::theme::SURFACE
+            };
+            canvas.rect(inner, if nav { 8.0 } else { inner.h * 0.5 }, fill, 1.0);
+            if key.item_state & (ODS_SELECTED | ODS_HOTLIGHT) != 0 {
+                canvas.rect(inner, inner.h * 0.5, crate::theme::TEXT, 0.08);
+            }
+            if nav && key.selected {
+                canvas.rect(
+                    Rect::new(2.0, 8.0, 3.0, (bounds.h - 16.0).max(0.0)),
+                    1.5,
+                    key.accent,
+                    1.0,
+                );
+            }
+            let color = if !key.enabled {
+                crate::theme::DIM
+            } else if key.destructive {
+                crate::theme::DANGER
+            } else if key.selected && !nav {
+                crate::theme::INVERSE
+            } else if nav && !key.selected {
+                crate::theme::MUTED
+            } else {
+                crate::theme::TEXT
+            };
+            let size = 11.0;
+            let label = key.label.replace('&', "");
+            let available = (bounds.w - if nav { 22.0 } else { 12.0 }).max(0.0);
+            let mut lines = vec![label.as_str()];
+            if canvas.painter.width(&label, size, key.selected) > available {
+                let split = label
+                    .char_indices()
+                    .filter(|(_, ch)| ch.is_whitespace())
+                    .min_by_key(|(index, _)| index.abs_diff(label.len() / 2));
+                if let Some((index, _)) = split {
+                    lines = vec![label[..index].trim(), label[index..].trim()];
+                }
+            }
+            let line_height = bounds.h / lines.len() as f32;
+            for (index, line) in lines.into_iter().enumerate() {
+                let width = canvas.painter.width(line, size, key.selected);
+                canvas.ellipsis(
+                    line,
+                    Rect::new(
+                        if nav {
+                            14.0
+                        } else {
+                            ((bounds.w - width) * 0.5).max(6.0)
+                        },
+                        index as f32 * line_height,
+                        available,
+                        line_height,
+                    ),
+                    size,
+                    key.selected,
+                    color,
+                );
+            }
+        }
+        if key.item_state & ODS_FOCUS != 0 {
+            crate::native_ui::focus_ring(&mut canvas, inner, inner.h * 0.5, key.accent);
+        }
     }
     let pixels: std::sync::Arc<[u8]> = pixels.into();
     // Keep only the latest image for each native control. Repeated interaction
@@ -405,7 +685,7 @@ fn button_raster(state: &mut State, item: &DRAWITEMSTRUCT, enabled: bool) -> std
 fn copy_scrolled_content(state: &mut State, pixels: &mut [u8], size: (u32, u32)) {
     let scale = state.scale;
     let language = crate::i18n::language();
-    let layout = SettingsLayout::new(state.width);
+    let layout = SettingsLayout::new(state.width, state.height);
     let content = state.content.get_or_insert_with(|| ContentBackground {
         scale: 0,
         language,
@@ -414,21 +694,22 @@ fn copy_scrolled_content(state: &mut State, pixels: &mut [u8], size: (u32, u32))
     });
     let desired_size = (
         (state.width * scale).round() as u32,
-        ((CONTENT_TOP + layout.content_height()) * scale).ceil() as u32,
+        ((layout.content.y + layout.content_height()) * scale).ceil() as u32,
     );
     if content.scale != scale.to_bits()
         || content.language != language
         || content.size != desired_size
     {
         content.size = (desired_size.0, desired_size.1);
-        content.pixels = [8, 8, 8, 255].repeat(content.size.0 as usize * content.size.1 as usize);
+        let [b, g, r] = crate::theme::BG;
+        content.pixels = [b, g, r, 255].repeat(content.size.0 as usize * content.size.1 as usize);
         let mut c = Canvas::new(&mut content.pixels, content.size, &mut state.painter);
         draw_settings_content(&mut c);
         content.scale = scale.to_bits();
         content.language = language;
     }
-    let first = (CONTENT_TOP * scale).ceil().max(0.0) as usize;
-    let last = ((state.height - CONTENT_BOTTOM) * scale)
+    let first = (layout.content.y * scale).ceil().max(0.0) as usize;
+    let last = (layout.footer.y * scale)
         .floor()
         .max(first as f32)
         .min(size.1 as f32) as usize;
@@ -446,36 +727,39 @@ fn copy_scrolled_content(state: &mut State, pixels: &mut [u8], size: (u32, u32))
 }
 
 fn draw_settings_content(c: &mut Canvas<'_>) {
-    let layout = SettingsLayout::new(c.clip.w);
+    let layout = SettingsLayout::new(c.clip.w, c.clip.h);
     let map = |rect: Rect| {
         let mut rect = layout.rect(rect);
-        rect.y += CONTENT_TOP;
+        rect.y += layout.content.y;
         rect
     };
     for (y, h, title, detail) in [
-        (0.0, 110.0, "Appearance", "Color & depth"),
-        (117.0, 110.0, "Motion", "Pace & spring"),
-        (234.0, 187.0, "Clock & position", "Time & placement"),
-        (428.0, 192.0, "Music & lyrics", "Timing & display"),
-        (627.0, 645.0, "Application", "Startup & updates"),
+        (0.0, 109.0, "Appearance", "Color & depth"),
+        (117.0, 109.0, "Motion", "Pace & spring"),
+        (234.0, 186.0, "Clock & position", "Time & placement"),
+        (428.0, 191.0, "Music & lyrics", "Timing & display"),
+        (627.0, 640.0, "Application", "Startup & updates"),
     ] {
-        // Keep the separator in the section's column, including its last edge.
-        let mut separator = map(Rect::new(26.0, y, 308.0, 1.0));
-        separator.y += h * layout.zoom;
-        c.rect(separator, 0.0, WHITE, 0.06);
+        crate::native_ui::card(
+            c,
+            map(Rect::new(24.0, y, 312.0, h)),
+            14.0,
+            crate::theme::SURFACE_RAISED,
+            crate::theme::BORDER,
+        );
         c.text(
             tr(title),
-            map(Rect::new(32.0, 9.0 + y, 290.0, 18.0)),
+            map(Rect::new(32.0, 9.0 + y, 175.0, 18.0)),
             12.0 * layout.text_scale(),
             true,
-            WHITE,
+            crate::theme::TEXT,
         );
         c.text(
             tr(detail),
             map(Rect::new(207.0, 9.0 + y, 115.0, 18.0)),
             9.0 * layout.text_scale(),
             false,
-            MUTED,
+            crate::theme::MUTED,
         );
     }
     for (y, label) in [
@@ -507,7 +791,7 @@ fn draw_settings_content(c: &mut Canvas<'_>) {
             map(Rect::new(32.0, y, width, 29.0)),
             11.0 * layout.text_scale(),
             false,
-            MUTED,
+            crate::theme::TEXT,
         );
     }
 }
@@ -576,7 +860,8 @@ fn update_controls(
 
 struct Popup {
     state: RefCell<State>,
-    suggested: Cell<Option<RECT>>,
+    suggested: Cell<Option<(RECT, u32)>>,
+    placement: Cell<Option<(RECT, u32)>>,
     owner: HWND,
     focus: Cell<HWND>,
 }
@@ -606,6 +891,7 @@ fn controls_with_autostart(settings: &Settings, autostart: bool) -> Vec<Control>
     let mut out = Vec::new();
     let mut add = |x, y, w, label: &str, command, selected| {
         out.push(Control {
+            section: SettingsSection::for_command(command),
             rect: Rect::new(x, y, w, 29.0),
             label: tr(label).into(),
             command,
@@ -803,6 +1089,7 @@ fn controls_with_autostart(settings: &Settings, autostart: bool) -> Vec<Control>
         out.insert(
             placement + i,
             Control {
+                section: SettingsSection::ClockPosition,
                 rect: Rect::new(132.0 + i as f32 * 64.0, 379.0, 59.0, 29.0),
                 label: tr(["Left", "Center", "Right"][i]).into(),
                 command: TrayCommand::Dock(anchor),
@@ -813,6 +1100,7 @@ fn controls_with_autostart(settings: &Settings, autostart: bool) -> Vec<Control>
         );
     }
     out.push(Control {
+        section: SettingsSection::Application,
         rect: Rect::new(32.0, 782.0, 287.0, 29.0),
         label: tr("Fade and click through ({shortcut})")
             .replace("{shortcut}", &settings.shortcut.label()),
@@ -836,6 +1124,7 @@ fn controls_with_autostart(settings: &Settings, autostart: bool) -> Vec<Control>
         }
     }
     out.push(Control {
+        section: SettingsSection::MusicLyrics,
         rect: Rect::new(242.0, 539.0, 77.0, 29.0),
         label: tr(if settings.compact_lyrics { "On" } else { "Off" }).into(),
         command: TrayCommand::CompactLyrics(!settings.compact_lyrics),
@@ -848,6 +1137,7 @@ fn controls_with_autostart(settings: &Settings, autostart: bool) -> Vec<Control>
         .enumerate()
     {
         out.push(Control {
+            section: SettingsSection::Application,
             rect: Rect::new(32.0 + i as f32 * 97.0, 906.0, 93.0, 29.0),
             label: match language {
                 Language::System => tr("System"),
@@ -924,6 +1214,7 @@ fn controls_with_autostart(settings: &Settings, autostart: bool) -> Vec<Control>
             LocalAction::ShortcutStatus | LocalAction::UpdateStatus
         );
         out.push(Control {
+            section: SettingsSection::Application,
             rect: Rect::new(
                 x,
                 y,
@@ -949,6 +1240,10 @@ fn controls_with_autostart(settings: &Settings, autostart: bool) -> Vec<Control>
             .total_cmp(&b.rect.y)
             .then(a.rect.x.total_cmp(&b.rect.x))
     });
+    debug_assert!(
+        out.iter()
+            .all(|control| control.section.rows().contains(&control.rect.y))
+    );
     out
 }
 
@@ -973,8 +1268,8 @@ struct PopupGeometry {
 fn popup_geometry(anchor: POINT, work: RECT, dpi: u32) -> PopupGeometry {
     let scale = if dpi == 0 { 96 } else { dpi } as f32 / 96.0;
     let available = (work.bottom - work.top - 24).max(1);
-    let height = 760.0_f32.min(available as f32 / scale);
-    let width_px = ((WIDTH * scale) as i32).min((work.right - work.left).max(1));
+    let height = 680.0_f32.min(available as f32 / scale);
+    let width_px = ((760.0 * scale) as i32).min((work.right - work.left).max(1));
     let height_px = (height * scale) as i32;
     PopupGeometry {
         scale,
@@ -1053,6 +1348,7 @@ pub(crate) fn show(
         };
         let popup = Box::new(Popup {
             state: RefCell::new(State {
+                active_section: SettingsSection::Appearance,
                 painter,
                 surface,
                 frame_pump: FramePump::new(SCROLL_FRAME),
@@ -1063,19 +1359,21 @@ pub(crate) fn show(
                     shortcut_available,
                 ),
                 scale,
-                height: 760.0,
-                width: WIDTH,
+                height: 680.0,
+                width: 760.0,
                 scroll: 0.0,
                 scroll_motion: SmoothScroll::default(),
                 about: false,
                 background: None,
                 content: None,
                 button_rasters: Vec::new(),
+                positions: PositionCache::default(),
                 shortcut: ShortcutCapture::default(),
                 shortcut_available,
                 updates: crate::update::CheckSession::new(settings.update),
             }),
             suggested: Cell::new(None),
+            placement: Cell::new(None),
             owner,
             focus: Cell::new(null_mut()),
         });
@@ -1153,6 +1451,7 @@ pub(crate) fn show(
             SetWindowSubclass(button, Some(button_proc), 1, 0);
             SetWindowSubclass(button, Some(crate::native_ui::hover_proc), 2, 0);
         }
+        install_navigation(hwnd);
         if let Err(error) = initial_layout(hwnd, state, anchor) {
             DestroyWindow(hwnd);
             UnregisterClassW(class_name.as_ptr(), instance);
@@ -1199,11 +1498,21 @@ pub(crate) fn update(settings: &Settings, shortcut_available: bool) {
         for (id, key) in [(2, "Restart"), (3, "Exit")] {
             SetWindowTextW(GetDlgItem(hwnd, id), wide(tr(key)).as_ptr());
         }
+        for section in SettingsSection::ALL {
+            let button = GetDlgItem(hwnd, (NAV_FIRST + section.index()) as i32);
+            SetWindowTextW(button, wide(section.label()).as_ptr());
+            InvalidateRect(button, null(), 0);
+        }
         let about = (*ptr).state.borrow().about;
         SetWindowTextW(
             GetDlgItem(hwnd, 1),
             wide(tr(if about { "Back to settings" } else { "Close" })).as_ptr(),
         );
+        let prose = GetDlgItem(hwnd, ABOUT_TEXT);
+        if !prose.is_null() {
+            SetWindowTextW(prose, wide(&about_prose()).as_ptr());
+            InvalidateRect(prose, null(), 0);
+        }
         crate::window_chrome::refresh(hwnd);
         InvalidateRect(hwnd, null(), 0);
         crate::native_ui::refresh_language();
@@ -1331,6 +1640,45 @@ unsafe fn refresh_local(hwnd: HWND, state: &RefCell<State>) {
     }
 }
 
+unsafe fn install_navigation(hwnd: HWND) {
+    unsafe {
+        for section in SettingsSection::ALL {
+            let button = CreateWindowExW(
+                0,
+                wide("BUTTON").as_ptr(),
+                wide(section.label()).as_ptr(),
+                WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON as u32,
+                0,
+                0,
+                1,
+                1,
+                hwnd,
+                (NAV_FIRST + section.index()) as *mut _,
+                GetModuleHandleW(null()),
+                null(),
+            );
+            SetWindowSubclass(button, Some(button_proc), 1, 0);
+            SetWindowSubclass(button, Some(crate::native_ui::hover_proc), 2, 0);
+        }
+    }
+}
+
+unsafe fn select_section(hwnd: HWND, state: &RefCell<State>, section: SettingsSection) {
+    let target = {
+        let mut state = state.borrow_mut();
+        state.active_section = section;
+        SettingsLayout::new(state.width, state.height)
+            .section_rect(section.index())
+            .y
+    };
+    unsafe {
+        for index in 0..5 {
+            InvalidateRect(GetDlgItem(hwnd, (NAV_FIRST + index) as i32), null(), 0);
+        }
+        queue_scroll(hwnd, state, target);
+    }
+}
+
 // Called by the application's ordinary message loop before Translate/Dispatch.
 pub(crate) fn translate_message(message: &MSG) -> bool {
     unsafe {
@@ -1374,6 +1722,22 @@ pub(crate) fn translate_message(message: &MSG) -> bool {
         {
             return true;
         }
+        if message.message == WM_KEYDOWN && !state.borrow().about {
+            let id = GetDlgCtrlID(GetFocus()) as usize;
+            if (NAV_FIRST..NAV_FIRST + 5).contains(&id)
+                && matches!(message.wParam, 13 | 32 | 37..=40)
+            {
+                let index = id - NAV_FIRST;
+                let index = match message.wParam {
+                    37 | 38 => (index + 4) % 5,
+                    39 | 40 => (index + 1) % 5,
+                    _ => index,
+                };
+                select_section(hwnd, state, SettingsSection::ALL[index]);
+                SetFocus(GetDlgItem(hwnd, (NAV_FIRST + index) as i32));
+                return true;
+            }
+        }
         if message.message == WM_KEYDOWN && message.wParam == 9 && !state.borrow().about {
             let mut order = [
                 crate::window_chrome::MINIMIZE,
@@ -1382,6 +1746,7 @@ pub(crate) fn translate_message(message: &MSG) -> bool {
             ]
             .map(|id| GetDlgItem(hwnd, id))
             .to_vec();
+            order.extend((0..5).map(|index| GetDlgItem(hwnd, (NAV_FIRST + index) as i32)));
             order.extend(
                 state
                     .borrow()
@@ -1448,7 +1813,7 @@ pub(crate) fn translate_message(message: &MSG) -> bool {
                 match message.wParam {
                     33 => state.scroll_motion.target() - 180.0,
                     34 => state.scroll_motion.target() + 180.0,
-                    35 => CONTENT,
+                    35 => SettingsLayout::new(state.width, state.height).max_scroll(),
                     _ => 0.0,
                 }
             };
@@ -1475,7 +1840,7 @@ unsafe fn queue_scroll(hwnd: HWND, state: &RefCell<State>, target: f32) {
             let scroll = state.scroll;
             state.scroll_motion.jump(scroll);
         }
-        let max = SettingsLayout::new(state.width).max_scroll(state.height);
+        let max = SettingsLayout::new(state.width, state.height).max_scroll();
         state.scroll_motion.scroll_to(target, max, Instant::now());
         unsafe {
             if state.scroll_motion.moving() {
@@ -1500,13 +1865,23 @@ unsafe fn advance_scroll(hwnd: HWND, state: &RefCell<State>, now: Instant) {
     let (changed, moving) = {
         let mut state = state.borrow_mut();
         state.scroll_motion.tick(now);
-        let changed = state.scroll != state.scroll_motion.offset();
+        let changed = (state.scroll * state.scale).round()
+            != (state.scroll_motion.offset() * state.scale).round();
         state.scroll = state.scroll_motion.offset();
         (changed, state.scroll_motion.moving())
     };
     unsafe {
         if changed {
             position_controls(hwnd, state);
+            let state = state.borrow();
+            let viewport = SettingsLayout::new(state.width, state.height).content;
+            let dirty = RECT {
+                left: (viewport.x * state.scale).floor() as i32,
+                top: (viewport.y * state.scale).ceil() as i32,
+                right: ((viewport.x + viewport.w + 14.0) * state.scale).ceil() as i32,
+                bottom: ((viewport.y + viewport.h) * state.scale).floor() as i32,
+            };
+            InvalidateRect(hwnd, &dirty, 0);
         }
         if !moving {
             state.borrow_mut().frame_pump.stop();
@@ -1522,11 +1897,6 @@ unsafe fn client_outer_size(width: i32, height: i32, dpi: u32) -> (i32, i32) {
 
 unsafe fn initial_layout(hwnd: HWND, state: &RefCell<State>, anchor: POINT) -> Result<(), String> {
     unsafe {
-        let owner = GetWindow(hwnd, GW_OWNER);
-        if !owner.is_null() {
-            crate::island_surface::place(hwnd, owner, (420.0, 640.0));
-            return reflow(hwnd, state);
-        }
         let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
         let mut info = MONITORINFO {
             cbSize: size_of::<MONITORINFO>() as u32,
@@ -1546,6 +1916,47 @@ unsafe fn initial_layout(hwnd: HWND, state: &RefCell<State>, anchor: POINT) -> R
         let height = height.min(info.rcWork.bottom - info.rcWork.top);
         let origin = clamp_anchor(geometry.origin, info.rcWork, width, height);
         // Native calls can synchronously reenter proc; no State borrow crosses them.
+        position_in_work_area(
+            hwnd,
+            RECT {
+                left: origin.x,
+                top: origin.y,
+                right: origin.x + width,
+                bottom: origin.y + height,
+            },
+            info.rcWork,
+            dpi,
+        );
+        reflow(hwnd, state)
+    }
+}
+
+fn tracking_minimum(dpi: u32, work: RECT) -> POINT {
+    let scale = dpi.max(96) as f32 / 96.0;
+    POINT {
+        x: ((420.0 * scale).round() as i32).min((work.right - work.left).max(1)),
+        y: ((560.0 * scale).round() as i32).min((work.bottom - work.top).max(1)),
+    }
+}
+
+unsafe fn position_in_work_area(hwnd: HWND, rect: RECT, work: RECT, dpi: u32) {
+    let minimum = tracking_minimum(dpi, work);
+    let width = (rect.right - rect.left).clamp(minimum.x, (work.right - work.left).max(1));
+    let height = (rect.bottom - rect.top).clamp(minimum.y, (work.bottom - work.top).max(1));
+    let origin = clamp_anchor(
+        POINT {
+            x: rect.left,
+            y: rect.top,
+        },
+        work,
+        width,
+        height,
+    );
+    unsafe {
+        let popup = &*(GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const Popup);
+        // SetWindowPos asks for tracking limits synchronously, possibly before
+        // the HWND has adopted the destination monitor's DPI or location.
+        let previous = popup.placement.replace(Some((work, dpi)));
         SetWindowPos(
             hwnd,
             null_mut(),
@@ -1555,7 +1966,7 @@ unsafe fn initial_layout(hwnd: HWND, state: &RefCell<State>, anchor: POINT) -> R
             height,
             SWP_NOZORDER | SWP_NOACTIVATE,
         );
-        reflow(hwnd, state)
+        popup.placement.set(previous);
     }
 }
 
@@ -1585,7 +1996,7 @@ unsafe fn reflow(hwnd: HWND, state: &RefCell<State>) -> Result<(), String> {
             state.height = rect.bottom.max(0) as f32 / scale;
             state.scroll = state.scroll.clamp(
                 0.0,
-                SettingsLayout::new(state.width).max_scroll(state.height),
+                SettingsLayout::new(state.width, state.height).max_scroll(),
             );
             let scroll = state.scroll;
             state.scroll_motion.jump(scroll);
@@ -1601,102 +2012,201 @@ unsafe fn reflow(hwnd: HWND, state: &RefCell<State>) -> Result<(), String> {
 
 unsafe fn position_controls(hwnd: HWND, state: &RefCell<State>) {
     let started = trace_start();
-    let (positions, scale, height) = {
+    let (mut positions, scale, layout, about, scroll_px) = {
         let state = state.borrow();
+        let layout = SettingsLayout::new(state.width, state.height);
         let positions: Vec<_> = state
             .controls
             .iter()
             .map(|control| {
-                let rect = SettingsLayout::new(state.width).rect(control.rect);
-                let y = CONTENT_TOP + rect.y - state.scroll;
-                let visible =
-                    !state.about && y + rect.h > CONTENT_TOP && y < state.height - CONTENT_BOTTOM;
-                (control.hwnd, rect.x, y, rect.w, rect.h, visible)
+                let rect = layout.rect(control.rect);
+                let y = layout.content.y + rect.y - state.scroll;
+                let visible = !state.about && y + rect.h > layout.content.y && y < layout.footer.y;
+                (
+                    control.hwnd,
+                    Rect::new(rect.x, layout.content.y + rect.y, rect.w, rect.h),
+                    visible,
+                    true,
+                )
             })
             .collect();
-        (positions, state.scale, state.height)
+        (
+            positions,
+            state.scale,
+            layout,
+            state.about,
+            (state.scroll * state.scale).round() as i32,
+        )
     };
-    let width = state.borrow().width;
-    let footer_width = ((width - 56.0) * 0.5).max(1.0);
-    let about = state.borrow().about;
     unsafe {
-        // One scroll is one frame. Child moves must never copy pixels from the
-        // previous background or become visible before the whole layout is ready.
-        let visible_window = IsWindowVisible(hwnd) != 0;
-        if visible_window {
-            SendMessageW(hwnd, WM_SETREDRAW, 0, 0);
+        for section in SettingsSection::ALL {
+            positions.push((
+                GetDlgItem(hwnd, (NAV_FIRST + section.index()) as i32),
+                layout.sidebar_rect(section.index()),
+                !about,
+                false,
+            ));
         }
-        for (button, x, y, w, h, visible) in positions {
-            if button.is_null() {
-                continue;
-            }
-            if !visible {
-                // Offscreen controls retain their native identity for keyboard
-                // navigation; lay them out when they re-enter the viewport.
-                if GetWindowLongW(button, GWL_STYLE) as u32 & WS_VISIBLE != 0 {
-                    ShowWindow(button, SW_HIDE);
-                }
-                continue;
-            }
-            let left = (x * scale).round() as i32;
-            let top = (y * scale).round() as i32;
-            let width = ((x + w) * scale).round() as i32 - left;
-            let height_px = ((y + h) * scale).round() as i32 - top;
-            SetWindowPos(
-                button,
-                null_mut(),
-                left,
-                top,
-                width,
-                height_px,
-                SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOCOPYBITS | SWP_NOREDRAW,
-            );
-            // Child windows must share the software background's viewport clip.
-            // A native region also clips hit testing and WS_CLIPCHILDREN, avoiding
-            // missing whole rows or controls drawing across the fixed chrome.
-            let clip_top = ((CONTENT_TOP * scale).ceil() as i32 - top).clamp(0, height_px);
-            let clip_bottom = (((height - CONTENT_BOTTOM) * scale).floor() as i32 - top)
-                .clamp(clip_top, height_px);
-            let region = CreateRectRgn(0, clip_top, width, clip_bottom);
-            if SetWindowRgn(button, region, 0) == 0 {
-                DeleteObject(region);
-            }
-            if GetWindowLongW(button, GWL_STYLE) as u32 & WS_VISIBLE == 0 {
-                ShowWindow(button, SW_SHOWNA);
-            }
-            InvalidateRect(button, null(), 0);
-        }
-        for (id, x, y, w) in [
-            (1, 210.0, 16.0, 32.0),
-            (2, 24.0, height - 46.0, footer_width),
-            (3, 32.0 + footer_width, height - 46.0, footer_width),
+        let footer_width = ((layout.header.w - 56.0) * 0.5).max(1.0);
+        for (id, rect, visible) in [
+            (
+                1,
+                Rect::new(layout.header.w - 246.0, 16.0, 136.0, 30.0),
+                about,
+            ),
+            (
+                2,
+                Rect::new(24.0, layout.footer.y + 12.0, footer_width, 30.0),
+                true,
+            ),
+            (
+                3,
+                Rect::new(
+                    32.0 + footer_width,
+                    layout.footer.y + 12.0,
+                    footer_width,
+                    30.0,
+                ),
+                true,
+            ),
         ] {
-            let button = GetDlgItem(hwnd, id);
-            SetWindowPos(
-                button,
-                null_mut(),
-                (x * scale).round() as i32,
-                (y * scale) as i32,
-                (w * scale) as i32,
-                (30.0 * scale) as i32,
-                SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOCOPYBITS | SWP_NOREDRAW,
+            positions.push((GetDlgItem(hwnd, id), rect, visible, false));
+        }
+        let mut text = GetDlgItem(hwnd, ABOUT_TEXT);
+        if about && text.is_null() {
+            text = CreateWindowExW(
+                0,
+                wide("STATIC").as_ptr(),
+                wide(&about_prose()).as_ptr(),
+                WS_CHILD | 0x80, // SS_LEFT | SS_NOPREFIX
+                0,
+                0,
+                1,
+                1,
+                hwnd,
+                ABOUT_TEXT as usize as *mut _,
+                GetModuleHandleW(null()),
+                null(),
             );
-            InvalidateRect(button, null(), 0);
-            if id == 1 {
-                ShowWindow(button, if about { SW_SHOWNA } else { SW_HIDE });
+            // Keep STATIC's native Text role; SS_OWNERDRAW would expose Custom.
+            // The subclass still supplies opaque buffered paint/print clients.
+            if !text.is_null() {
+                SetWindowSubclass(text, Some(button_proc), 1, 0);
             }
         }
-        if visible_window {
-            SendMessageW(hwnd, WM_SETREDRAW, 1, 0);
-            RedrawWindow(
-                hwnd,
-                null(),
-                null_mut(),
-                RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW,
-            );
+        positions.push((
+            text,
+            Rect::new(
+                26.0,
+                97.0,
+                layout.header.w - 52.0,
+                (layout.footer.y - 97.0).max(0.0),
+            ),
+            about,
+            false,
+        ));
+        // Native calls may synchronously re-enter the parent. Keep the cache out
+        // of the RefCell until the complete deferred layout has been committed.
+        let mut cache = std::mem::take(&mut state.borrow_mut().positions);
+        let mut batch = BeginDeferWindowPos(positions.len() as i32);
+        let mut dirty = Vec::new();
+        let mut moves = Vec::new();
+        for (button, rect, visible, clipped) in positions {
+            if button.is_null() || IsWindow(button) == 0 {
+                continue;
+            }
+            let left = (rect.x * scale).round() as i32;
+            let top = (rect.y * scale).round() as i32 - if clipped { scroll_px } else { 0 };
+            let width = ((rect.x + rect.w) * scale).round() as i32 - left;
+            let height = (rect.h * scale).round() as i32;
+            let bounds = (left, top, width, height);
+            let index = cache.entries.iter().position(|entry| entry.hwnd == button);
+            let index = index.unwrap_or_else(|| {
+                cache.entries.push(PlacedControl {
+                    hwnd: button,
+                    bounds: (0, 0, 0, 0),
+                    visible: GetWindowLongW(button, GWL_STYLE) as u32 & WS_VISIBLE != 0,
+                    clip: None,
+                });
+                cache.regions.push(CreateRectRgn(0, 0, 0, 0));
+                cache.entries.len() - 1
+            });
+            let entry = &mut cache.entries[index];
+            let moved = visible && (entry.bounds != bounds || !entry.visible);
+            if moved || visible != entry.visible {
+                let flags = SWP_NOZORDER
+                    | SWP_NOACTIVATE
+                    | SWP_NOCOPYBITS
+                    | SWP_NOREDRAW
+                    | if visible {
+                        SWP_SHOWWINDOW
+                    } else {
+                        SWP_HIDEWINDOW
+                    };
+                if !batch.is_null() {
+                    batch =
+                        DeferWindowPos(batch, button, null_mut(), left, top, width, height, flags);
+                }
+                moves.push((button, bounds, flags));
+                if visible {
+                    dirty.push(button);
+                }
+            }
+            if visible && clipped {
+                let clip_top = ((layout.content.y * scale).ceil() as i32 - top).clamp(0, height);
+                let clip_bottom =
+                    ((layout.footer.y * scale).floor() as i32 - top).clamp(clip_top, height);
+                let clip = Some((width, clip_top, clip_bottom));
+                if entry.clip != clip {
+                    let region = cache.regions[index];
+                    // SetWindowRgn transfers ownership to Windows. Retain our
+                    // scratch region and transfer a copy only when clipping changes.
+                    SetRectRgn(region, 0, clip_top, width, clip_bottom);
+                    let owned = CreateRectRgn(0, 0, 0, 0);
+                    CombineRgn(owned, region, null_mut(), RGN_COPY);
+                    if SetWindowRgn(button, owned, 0) == 0 {
+                        DeleteObject(owned);
+                    } else {
+                        entry.clip = clip;
+                        if !moved {
+                            dirty.push(button);
+                        }
+                    }
+                }
+            }
+            entry.bounds = bounds;
+            entry.visible = visible;
+        }
+        if batch.is_null() || EndDeferWindowPos(batch) == 0 {
+            for (button, (left, top, width, height), flags) in moves {
+                SetWindowPos(button, null_mut(), left, top, width, height, flags);
+            }
+        }
+        state.borrow_mut().positions = cache;
+        for button in dirty {
+            InvalidateRect(button, null(), 0);
         }
     }
-    trace_ui("settings", "reposition", started);
+    trace_ui("settings-scroll", "reposition", started);
+}
+
+fn about_prose() -> String {
+    let mut lines = vec![
+        tr("A little space. More possibility.").to_string(),
+        concat!("HiyoDyna ", env!("CARGO_PKG_VERSION")).into(),
+    ];
+    lines.extend(
+        [
+            "Built with Rust and native Windows APIs.",
+            "Lyrics by AMLL TTML DB and LRCLIB.",
+            "Inspired by Spicy Lyrics.",
+            "AGPL-3.0 · github.com/hiyo41/HiyoDyna",
+            "Scroll settings to explore all controls.",
+            "Press Escape or Close to return.",
+        ]
+        .map(|line| tr(line).to_string()),
+    );
+    lines.join("\r\n")
 }
 
 unsafe extern "system" fn proc(
@@ -1726,14 +2236,29 @@ unsafe extern "system" fn proc(
         }
         match message {
             WM_GETMINMAXINFO => {
-                let scale =
-                    windows_sys::Win32::UI::HiDpi::GetDpiForWindow(hwnd).max(96) as f32 / 96.0;
-                let (x, y) = client_outer_size(
-                    (WIDTH * scale).round() as i32,
-                    (300.0 * scale).round() as i32,
-                    (scale * 96.0) as u32,
-                );
-                (*(lparam as *mut MINMAXINFO)).ptMinTrackSize = POINT { x, y };
+                let destination = (*ptr).placement.get().or_else(|| {
+                    let suggested = (*ptr).suggested.get();
+                    let monitor = suggested.map_or_else(
+                        || MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST),
+                        |(rect, _)| MonitorFromRect(&rect, MONITOR_DEFAULTTONEAREST),
+                    );
+                    let mut info = MONITORINFO {
+                        cbSize: size_of::<MONITORINFO>() as u32,
+                        ..Default::default()
+                    };
+                    (GetMonitorInfoW(monitor, &mut info) != 0).then(|| {
+                        (
+                            info.rcWork,
+                            suggested.map_or_else(
+                                || windows_sys::Win32::UI::HiDpi::GetDpiForWindow(hwnd),
+                                |(_, dpi)| dpi,
+                            ),
+                        )
+                    })
+                });
+                if let Some((work, dpi)) = destination {
+                    (*(lparam as *mut MINMAXINFO)).ptMinTrackSize = tracking_minimum(dpi, work);
+                }
                 0
             }
             WM_SIZE if wparam != SIZE_MINIMIZED as usize => {
@@ -1745,13 +2270,16 @@ unsafe extern "system" fn proc(
                 // Copy the temporary suggested rectangle and defer native calls and
                 // State mutation until the message loop has no outstanding borrow.
                 if lparam != 0 {
-                    (*ptr).suggested.set(Some(*(lparam as *const RECT)));
+                    (*ptr).suggested.set(Some((
+                        *(lparam as *const RECT),
+                        (wparam as u32 & 0xffff).max(96),
+                    )));
                 }
                 PostMessageW(hwnd, RELAYOUT, 0, 0);
                 0
             }
             RELAYOUT => {
-                if let Some(mut rect) = (*ptr).suggested.take() {
+                if let Some((rect, dpi)) = (*ptr).suggested.take() {
                     let mut info = MONITORINFO {
                         cbSize: size_of::<MONITORINFO>() as u32,
                         ..Default::default()
@@ -1759,37 +2287,18 @@ unsafe extern "system" fn proc(
                     if GetMonitorInfoW(MonitorFromRect(&rect, MONITOR_DEFAULTTONEAREST), &mut info)
                         != 0
                     {
-                        let width = (rect.right - rect.left)
-                            .min(info.rcWork.right - info.rcWork.left)
-                            .max(1);
-                        let height = (rect.bottom - rect.top)
-                            .min(info.rcWork.bottom - info.rcWork.top)
-                            .max(1);
-                        let origin = clamp_anchor(
-                            POINT {
-                                x: rect.left,
-                                y: rect.top,
-                            },
-                            info.rcWork,
-                            width,
-                            height,
+                        position_in_work_area(hwnd, rect, info.rcWork, dpi);
+                    } else {
+                        SetWindowPos(
+                            hwnd,
+                            null_mut(),
+                            rect.left,
+                            rect.top,
+                            rect.right - rect.left,
+                            rect.bottom - rect.top,
+                            SWP_NOZORDER | SWP_NOACTIVATE,
                         );
-                        rect = RECT {
-                            left: origin.x,
-                            top: origin.y,
-                            right: origin.x + width,
-                            bottom: origin.y + height,
-                        };
                     }
-                    SetWindowPos(
-                        hwnd,
-                        null_mut(),
-                        rect.left,
-                        rect.top,
-                        rect.right - rect.left,
-                        rect.bottom - rect.top,
-                        SWP_NOZORDER | SWP_NOACTIVATE,
-                    );
                 }
                 let _ = reflow(hwnd, &(*ptr).state);
                 0
@@ -1819,6 +2328,10 @@ unsafe extern "system" fn proc(
             COMMAND => {
                 let state = &(*ptr).state;
                 let id = wparam;
+                if (NAV_FIRST..NAV_FIRST + 5).contains(&id) {
+                    select_section(hwnd, state, SettingsSection::ALL[id - NAV_FIRST]);
+                    return 0;
+                }
                 if id == 1 && !state.borrow().about {
                     DestroyWindow(hwnd);
                     return 0;
@@ -1950,14 +2463,15 @@ unsafe extern "system" fn proc(
                     size,
                     state.scale.to_bits(),
                     state.height.to_bits(),
-                    state.scroll.to_bits(),
+                    (state.scroll * state.scale).round().to_bits(),
                     state.about,
                 );
                 let pixels = match state.background.take() {
                     Some(background) if background.key == key => background.pixels,
                     _ => {
                         let content_size = size;
-                        let mut pixels = [8, 8, 8, 255]
+                        let [b, g, r] = crate::theme::BG;
+                        let mut pixels = [b, g, r, 255]
                             .repeat(content_size.0 as usize * content_size.1 as usize);
                         if !state.about {
                             copy_scrolled_content(state, &mut pixels, content_size);
@@ -1972,7 +2486,7 @@ unsafe extern "system" fn proc(
                             Rect::new(24.0, 16.0, 170.0, 25.0),
                             22.0,
                             true,
-                            WHITE,
+                            crate::theme::TEXT,
                         );
                         c.text(
                             tr(if state.about {
@@ -1983,72 +2497,49 @@ unsafe extern "system" fn proc(
                             Rect::new(25.0, 42.0, 200.0, 16.0),
                             10.0,
                             false,
-                            MUTED,
+                            crate::theme::MUTED,
                         );
                         let old_clip = c.clip;
-                        c.clip = Rect::new(
-                            0.0,
-                            CONTENT_TOP,
-                            state.width,
-                            (state.height - CONTENT_TOP - CONTENT_BOTTOM).max(0.0),
-                        );
-                        if state.about {
-                            c.text(
-                                tr("A little space. More possibility."),
-                                Rect::new(26.0, 97.0, 310.0, 28.0),
-                                17.0,
-                                true,
-                                WHITE,
-                            );
-                            c.text(
-                                concat!("HiyoDyna ", env!("CARGO_PKG_VERSION")),
-                                Rect::new(26.0, 144.0, 310.0, 24.0),
-                                12.0,
-                                false,
-                                MUTED,
-                            );
-                            for (i, line) in [
-                                "Built with Rust and native Windows APIs.",
-                                "Lyrics by AMLL TTML DB and LRCLIB.",
-                                "Inspired by Spicy Lyrics.",
-                                "AGPL-3.0 · github.com/hiyo41/HiyoDyna",
-                                "Scroll settings to explore all controls.",
-                                "Press Escape or Close to return.",
-                            ]
-                            .iter()
-                            .enumerate()
-                            {
-                                c.text(
-                                    tr(line),
-                                    Rect::new(26.0, 188.0 + i as f32 * 28.0, 310.0, 24.0),
-                                    11.0,
-                                    false,
-                                    MUTED,
-                                );
-                            }
-                        }
+                        let layout = SettingsLayout::new(state.width, state.height);
+                        c.clip = if state.about {
+                            Rect::new(
+                                0.0,
+                                layout.header.h,
+                                state.width,
+                                layout.footer.y - layout.header.h,
+                            )
+                        } else {
+                            layout.content
+                        };
                         c.clip = old_clip;
                         if !state.about {
-                            let visible = (state.height - CONTENT_TOP - CONTENT_BOTTOM).max(0.0);
-                            let content_height = SettingsLayout::new(state.width).content_height();
+                            let visible = layout.content.h;
+                            let content_height = layout.content_height();
                             let thumb = (visible * visible / content_height).min(visible);
                             c.rect(
                                 Rect::new(
                                     state.width - 14.0,
-                                    68.0 + state.scroll / content_height * visible,
+                                    layout.content.y + state.scroll / content_height * visible,
                                     2.0,
                                     thumb,
                                 ),
                                 1.0,
-                                MUTED,
+                                crate::theme::MUTED,
                                 0.22,
                             );
                         }
                         c.rect(
                             Rect::new(22.0, state.height - 59.0, state.width - 44.0, 1.0),
                             0.0,
-                            WHITE,
-                            0.07,
+                            crate::theme::BORDER,
+                            1.0,
+                        );
+                        c.text(
+                            concat!("HiyoDyna ", env!("CARGO_PKG_VERSION")),
+                            Rect::new(24.0, state.height - 19.0, state.width - 48.0, 16.0),
+                            9.0,
+                            false,
+                            crate::theme::DIM,
                         );
                         pixels
                     }
@@ -2082,11 +2573,16 @@ unsafe extern "system" fn proc(
                 if saved == 0 {
                     return 1;
                 }
-                let region = CreateRectRgn(0, 0, 0, 0);
-                if !item.hwndItem.is_null() && GetWindowRgn(item.hwndItem, region) != ERROR {
-                    ExtSelectClipRgn(item.hDC, region, RGN_AND);
+                let borrowed = (*ptr).state.borrow();
+                if let Some(index) = borrowed
+                    .positions
+                    .entries
+                    .iter()
+                    .position(|entry| entry.hwnd == item.hwndItem && entry.clip.is_some())
+                {
+                    ExtSelectClipRgn(item.hDC, borrowed.positions.regions[index], RGN_AND);
                 }
-                DeleteObject(region);
+                drop(borrowed);
                 blit(item.hDC, &pixels, size);
                 RestoreDC(item.hDC, saved);
                 1
@@ -2107,32 +2603,229 @@ pub(crate) mod tests {
         std::sync::atomic::AtomicBool::new(false);
 
     #[test]
-    fn expanded_settings_reflow_groups_and_reduce_scrolling() {
-        let layout = SettingsLayout::new(920.0);
-        let left = layout.rect(Rect::new(32.0, 34.0, 287.0, 29.0));
-        let right = layout.rect(Rect::new(32.0, 658.0, 287.0, 29.0));
-        assert!(right.x > 460.0, "Application belongs in the second column");
-        assert!(
-            right.y < 50.0,
-            "Application starts at the top when expanded"
-        );
-        assert!(left.w > 350.0, "controls should grow with the content area");
-        assert!(
-            layout.content_height() < 850.0,
-            "wide layout should need less scrolling"
-        );
-        assert!((1.0..=1.25).contains(&layout.text_scale()));
+    fn layout_wide_sidebar_and_narrow_chips() {
+        assert!(!SettingsLayout::new(699.0, 680.0).wide);
+        assert!(SettingsLayout::new(700.0, 680.0).wide);
+        let wide = SettingsLayout::new(920.0, 760.0);
+        assert!(wide.wide);
+        assert_eq!(wide.sidebar.w, 208.0);
+        assert_eq!(wide.content.x, 232.0);
+        assert_eq!(wide.header.h, 64.0);
+        assert_eq!(wide.footer.h, 64.0);
+        for section in SettingsSection::ALL {
+            let r = wide.sidebar_rect(section.index());
+            assert!(r.x >= wide.sidebar.x && r.y >= wide.sidebar.y);
+            assert!(r.x + r.w <= wide.sidebar.x + wide.sidebar.w);
+            assert!(r.y + r.h <= wide.sidebar.y + wide.sidebar.h);
+            for next in section.index() + 1..5 {
+                let overlap = r.intersect(wide.sidebar_rect(next));
+                assert!(overlap.w == 0.0 || overlap.h == 0.0);
+            }
+        }
+        let narrow = SettingsLayout::new(640.0, 640.0);
+        assert!(!narrow.wide);
+        assert_eq!(narrow.sidebar.w, 0.0);
+        for index in 0..5 {
+            let r = narrow.sidebar_rect(index);
+            assert_eq!(r.y, 64.0);
+            assert_eq!(r.h, 40.0);
+            assert!(r.x >= 0.0 && r.x + r.w <= 640.0);
+        }
+    }
+
+    #[test]
+    fn layout_sections_contain_controls_and_scroll_matches_viewport() {
         let controls = controls_with_autostart(&Settings::default(), false);
-        for (i, control) in controls.iter().enumerate() {
-            let r = layout.rect(control.rect);
-            assert!(r.x >= 20.0 && r.x + r.w <= 900.0);
-            for other in &controls[i + 1..] {
-                let overlap = r.intersect(layout.rect(other.rect));
+        for (width, height) in [
+            (920.0, 760.0),
+            (640.0, 640.0),
+            (420.0, 560.0),
+            (920.0, 2000.0),
+        ] {
+            let layout = SettingsLayout::new(width, height);
+            assert_eq!(
+                layout.max_scroll(),
+                (layout.content_height() - layout.content.h).max(0.0)
+            );
+            for section in SettingsSection::ALL {
+                let r = layout.section_rect(section.index());
                 assert!(
-                    overlap.w < 0.1 || overlap.h < 0.1,
-                    "controls overlap after reflow"
+                    r.x >= layout.content.x && r.x + r.w <= layout.content.x + layout.content.w
                 );
             }
+            for (index, control) in controls.iter().enumerate() {
+                let r = layout.rect(control.rect);
+                let section = layout.section_rect(control.section.index());
+                assert!(r.x >= section.x && r.x + r.w <= section.x + section.w + 0.01);
+                assert!(r.y >= section.y && r.y + r.h <= section.y + section.h);
+                for other in &controls[index + 1..] {
+                    let overlap = r.intersect(layout.rect(other.rect));
+                    assert!(
+                        overlap.w < 0.01 || overlap.h < 0.01,
+                        "controls {index} and {} overlap at width {width}",
+                        other.label
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn layout_resize_retains_selection_and_reveals_focused_control() {
+        let popup = HiddenPopup::new(1.0);
+        let button = unsafe {
+            CreateWindowExW(
+                0,
+                wide("BUTTON").as_ptr(),
+                wide("Reset").as_ptr(),
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                0,
+                0,
+                1,
+                1,
+                popup.hwnd,
+                143usize as *mut _,
+                GetModuleHandleW(null()),
+                null(),
+            )
+        };
+        {
+            let mut state = popup.popup.state.borrow_mut();
+            state.active_section = SettingsSection::Application;
+            state.controls[43].hwnd = button;
+        }
+        unsafe {
+            SetFocus(button);
+        }
+        for width in [920, 640, 920] {
+            unsafe {
+                SetWindowPos(
+                    popup.hwnd,
+                    null_mut(),
+                    0,
+                    0,
+                    width,
+                    560,
+                    SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+                reflow(popup.hwnd, &popup.popup.state).unwrap();
+            }
+            let state = popup.popup.state.borrow();
+            let layout = SettingsLayout::new(state.width, state.height);
+            let rect = layout.rect(state.controls[43].rect);
+            assert_eq!(state.active_section, SettingsSection::Application);
+            assert!(state.scroll >= 0.0 && state.scroll <= layout.max_scroll());
+            assert!(rect.y >= state.scroll && rect.y + rect.h <= state.scroll + layout.content.h);
+            unsafe {
+                assert_eq!(GetFocus(), button);
+            }
+        }
+    }
+
+    #[test]
+    fn layout_navigation_click_and_keyboard_select_sections() {
+        let popup = HiddenPopup::new(1.0);
+        unsafe {
+            install_navigation(popup.hwnd);
+            WINDOW.with(|window| window.set(popup.hwnd));
+            position_controls(popup.hwnd, &popup.popup.state);
+            proc(popup.hwnd, COMMAND, NAV_FIRST + 2, 0);
+            assert_eq!(
+                popup.popup.state.borrow().active_section,
+                SettingsSection::ClockPosition
+            );
+            let target = popup.popup.state.borrow().scroll_motion.target();
+            assert_eq!(target, 351.0);
+            let button = GetDlgItem(popup.hwnd, (NAV_FIRST + 2) as i32);
+            SetFocus(button);
+            assert!(translate_message(&MSG {
+                hwnd: button,
+                message: WM_KEYDOWN,
+                wParam: 40,
+                ..Default::default()
+            }));
+            assert_eq!(
+                popup.popup.state.borrow().active_section,
+                SettingsSection::MusicLyrics
+            );
+            assert_eq!(GetFocus(), GetDlgItem(popup.hwnd, (NAV_FIRST + 3) as i32));
+            assert!(translate_message(&MSG {
+                hwnd: GetFocus(),
+                message: WM_KEYDOWN,
+                wParam: 32,
+                ..Default::default()
+            }));
+            assert_eq!(popup.popup.state.borrow().scroll_motion.target(), 642.0);
+            WINDOW.with(|window| window.set(null_mut()));
+        }
+    }
+
+    #[test]
+    fn layout_navigation_refreshes_native_names_without_reflow() {
+        let popup = HiddenPopup::new(1.0);
+        unsafe {
+            install_navigation(popup.hwnd);
+            WINDOW.with(|window| window.set(popup.hwnd));
+            let button = GetDlgItem(popup.hwnd, NAV_FIRST as i32);
+            SetWindowTextW(button, wide("Outdated caption").as_ptr());
+            update(&Settings::default(), true);
+            let mut text = [0u16; 128];
+            let len = GetWindowTextW(button, text.as_mut_ptr(), text.len() as i32);
+            WINDOW.with(|window| window.set(null_mut()));
+            assert_eq!(
+                String::from_utf16_lossy(&text[..len as usize]),
+                SettingsSection::Appearance.label()
+            );
+        }
+    }
+
+    #[test]
+    fn layout_about_body_remains_visible_without_category_navigation() {
+        for width in [420, 920] {
+            let popup = HiddenPopup::new(1.0);
+            unsafe {
+                install_navigation(popup.hwnd);
+                SetWindowPos(
+                    popup.hwnd,
+                    null_mut(),
+                    0,
+                    0,
+                    width,
+                    680,
+                    SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+                reflow(popup.hwnd, &popup.popup.state).unwrap();
+                proc(popup.hwnd, COMMAND, 142, 0);
+                for index in 0..5 {
+                    assert_eq!(
+                        IsWindowVisible(GetDlgItem(popup.hwnd, (NAV_FIRST + index) as i32)),
+                        0
+                    );
+                }
+            }
+            let child = unsafe { GetDlgItem(popup.hwnd, ABOUT_TEXT) };
+            let mut bounds = RECT::default();
+            unsafe {
+                GetClientRect(child, &mut bounds);
+            }
+            let pixels = button_raster(
+                &mut popup.popup.state.borrow_mut(),
+                &DRAWITEMSTRUCT {
+                    CtlID: ABOUT_TEXT as u32,
+                    hwndItem: child,
+                    rcItem: bounds,
+                    ..Default::default()
+                },
+                true,
+            );
+            assert!(
+                pixels
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .any(|pixel| pixel[..3] != crate::theme::BG),
+                "About body disappeared at width {width}"
+            );
         }
     }
 
@@ -2146,63 +2839,23 @@ pub(crate) mod tests {
         for language in [Language::English, Language::Vietnamese] {
             crate::i18n::set_language(language);
             for scale in [1.0, 1.25, 1.5, 2.0] {
-                for (name, width, height) in [("normal", 420.0, 640.0), ("wide", 920.0, 760.0)] {
-                    let popup = HiddenPopup::new(scale);
+                for (name, width, height) in [
+                    ("420", 420.0, 680.0),
+                    ("700", 700.0, 680.0),
+                    ("760", 760.0, 680.0),
+                    ("920", 920.0, 680.0),
+                ] {
+                    let popup = HiddenPopup::native(width, height, scale);
                     unsafe {
-                        SetWindowPos(
+                        save_settings_surface(
                             popup.hwnd,
-                            null_mut(),
-                            0,
-                            0,
-                            (width * scale) as i32,
-                            (height * scale) as i32,
-                            SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+                            &dir.join(format!(
+                                "settings-responsive-{name}-{}-{}.png",
+                                language.as_str(),
+                                (scale * 100.0) as u32
+                            )),
                         );
                     }
-                    popup.paint();
-                    let mut pixels = popup.pixels();
-                    let size = ((width * scale) as u32, (height * scale) as u32);
-                    let layout = SettingsLayout::new(width);
-                    let mut state = popup.popup.state.borrow_mut();
-                    for index in 0..state.controls.len() {
-                        let r = layout.rect(state.controls[index].rect);
-                        let left = (r.x * scale).round() as usize;
-                        let top = ((CONTENT_TOP + r.y) * scale).round() as usize;
-                        let w = ((r.x + r.w) * scale).round() as usize - left;
-                        let h = ((CONTENT_TOP + r.y + r.h) * scale).round() as usize - top;
-                        let item = DRAWITEMSTRUCT {
-                            CtlID: index as u32 + 100,
-                            rcItem: RECT {
-                                left: 0,
-                                top: 0,
-                                right: w as i32,
-                                bottom: h as i32,
-                            },
-                            ..Default::default()
-                        };
-                        let raster = button_raster(&mut state, &item, true);
-                        for row in 0..h {
-                            let y = top + row;
-                            if y >= ((height - CONTENT_BOTTOM) * scale).floor() as usize {
-                                break;
-                            }
-                            assert!(left + w <= size.0 as usize);
-                            let dst = (y * size.0 as usize + left) * 4;
-                            pixels[dst..dst + w * 4]
-                                .copy_from_slice(&raster[row * w * 4..(row + 1) * w * 4]);
-                        }
-                    }
-                    for p in pixels.as_chunks_mut::<4>().0 {
-                        p.swap(0, 2);
-                    }
-                    image::RgbaImage::from_raw(size.0, size.1, pixels)
-                        .unwrap()
-                        .save(dir.join(format!(
-                            "settings-responsive-{name}-{}-{}.png",
-                            language.as_str(),
-                            (scale * 100.0) as u32
-                        )))
-                        .unwrap();
                 }
             }
         }
@@ -2347,7 +3000,7 @@ pub(crate) mod tests {
                 .any(|c| c.action == Some(LocalAction::CheckUpdate))
         );
         for control in controls {
-            assert!(control.rect.y >= 0.0 && control.rect.y + control.rect.h <= CONTENT);
+            assert!(control.rect.y >= 0.0 && control.rect.y + control.rect.h <= 1275.0);
         }
     }
 
@@ -2480,6 +3133,7 @@ pub(crate) mod tests {
             control.hwnd = (index + 100) as HWND;
         }
         State {
+            active_section: SettingsSection::Appearance,
             painter: Painter::new(scale).unwrap(),
             surface: WindowSurface::new().unwrap(),
             frame_pump: FramePump::new(SCROLL_FRAME),
@@ -2487,13 +3141,14 @@ pub(crate) mod tests {
             controls,
             scale,
             height: 760.0,
-            width: WIDTH,
+            width: 420.0,
             scroll: 0.0,
             scroll_motion: SmoothScroll::default(),
             about: false,
             background: None,
             content: None,
             button_rasters: Vec::new(),
+            positions: PositionCache::default(),
             shortcut: ShortcutCapture::default(),
             shortcut_available: true,
             updates: crate::update::CheckSession::new(settings.update),
@@ -2515,7 +3170,7 @@ pub(crate) mod tests {
                     WS_POPUP,
                     0,
                     0,
-                    (WIDTH * scale) as i32,
+                    (420.0 * scale) as i32,
                     (760.0 * scale) as i32,
                     null_mut(),
                     null_mut(),
@@ -2526,6 +3181,7 @@ pub(crate) mod tests {
                 let popup = Box::new(Popup {
                     state: RefCell::new(state_for_test(Settings::default(), scale)),
                     suggested: Cell::new(None),
+                    placement: Cell::new(None),
                     owner: null_mut(),
                     focus: Cell::new(null_mut()),
                 });
@@ -2550,6 +3206,125 @@ pub(crate) mod tests {
                 .unwrap()
                 .pixels
                 .clone()
+        }
+
+        // Real native children, but never a foreground/show call. Synthetic DPI
+        // updates both painters and native geometry without moving monitors.
+        fn native(width: f32, height: f32, scale: f32) -> Self {
+            let popup = Self::new(scale);
+            unsafe {
+                for control in &mut popup.popup.state.borrow_mut().controls {
+                    control.hwnd = null_mut();
+                }
+                SetWindowLongPtrW(popup.hwnd, GWLP_WNDPROC, proc as *const () as isize);
+                let controls: Vec<_> = popup
+                    .popup
+                    .state
+                    .borrow()
+                    .controls
+                    .iter()
+                    .map(|control| {
+                        (
+                            control.accessible_name(),
+                            control.is_choice(),
+                            control.selected,
+                            matches!(
+                                control.action,
+                                Some(LocalAction::ShortcutStatus | LocalAction::UpdateStatus)
+                            ),
+                        )
+                    })
+                    .collect();
+                for (index, (name, choice, selected, status)) in controls.into_iter().enumerate() {
+                    let child = CreateWindowExW(
+                        0,
+                        wide(if status { "STATIC" } else { "BUTTON" }).as_ptr(),
+                        wide(&name).as_ptr(),
+                        WS_CHILD
+                            | if status { 0x0d } else { WS_TABSTOP }
+                            | if choice {
+                                BS_CHECKBOX as u32 | BS_PUSHLIKE as u32
+                            } else {
+                                0
+                            },
+                        0,
+                        0,
+                        1,
+                        1,
+                        popup.hwnd,
+                        (index + 100) as *mut _,
+                        GetModuleHandleW(null()),
+                        null(),
+                    );
+                    assert!(!child.is_null());
+                    popup.popup.state.borrow_mut().controls[index].hwnd = child;
+                    if !status {
+                        SetWindowSubclass(child, Some(button_proc), 1, 0);
+                        SetWindowSubclass(child, Some(crate::native_ui::hover_proc), 2, 0);
+                    }
+                    if choice {
+                        SendMessageW(child, BM_SETCHECK, usize::from(selected), 0);
+                    }
+                }
+                for (id, label) in [(1, "Close"), (2, "Restart"), (3, "Exit")] {
+                    let child = CreateWindowExW(
+                        0,
+                        wide("BUTTON").as_ptr(),
+                        wide(tr(label)).as_ptr(),
+                        WS_CHILD | WS_TABSTOP | BS_OWNERDRAW as u32,
+                        0,
+                        0,
+                        1,
+                        1,
+                        popup.hwnd,
+                        id as *mut _,
+                        GetModuleHandleW(null()),
+                        null(),
+                    );
+                    assert!(!child.is_null());
+                    SetWindowSubclass(child, Some(button_proc), 1, 0);
+                    SetWindowSubclass(child, Some(crate::native_ui::hover_proc), 2, 0);
+                }
+                install_navigation(popup.hwnd);
+                crate::window_chrome::install(popup.hwnd, true, true).unwrap();
+                SetWindowPos(
+                    popup.hwnd,
+                    null_mut(),
+                    -32000,
+                    -32000,
+                    (width * scale).round() as i32,
+                    (height * scale).round() as i32,
+                    SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+                SendMessageW(popup.hwnd, WM_DPICHANGED, (scale * 96.0) as usize, 0);
+                {
+                    let mut state = popup.popup.state.borrow_mut();
+                    state.painter = Painter::new(scale).unwrap();
+                    state.scale = scale;
+                    state.width = width;
+                    state.height = height;
+                    state.background = None;
+                    state.content = None;
+                }
+                for (id, x) in [
+                    (crate::window_chrome::CLOSE, width - 44.0),
+                    (crate::window_chrome::MAXIMIZE, width - 76.0),
+                ] {
+                    SetWindowPos(
+                        GetDlgItem(popup.hwnd, id),
+                        null_mut(),
+                        (x * scale).round() as i32,
+                        (14.0 * scale).round() as i32,
+                        (32.0 * scale).round() as i32,
+                        (30.0 * scale).round() as i32,
+                        SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW,
+                    );
+                }
+                refresh_local(popup.hwnd, &popup.popup.state);
+                position_controls(popup.hwnd, &popup.popup.state);
+                assert_eq!(IsWindowVisible(popup.hwnd), 0, "previews must stay hidden");
+            }
+            popup
         }
     }
 
@@ -2601,10 +3376,335 @@ pub(crate) mod tests {
         assert_eq!(state.surface.pixels_mut().as_ptr(), address);
     }
 
+    #[test]
+    fn scroll_frames_queue_parent_paint_only_when_the_displayed_pixel_changes() {
+        let popup = HiddenPopup::new(1.25);
+        popup.paint();
+        unsafe {
+            // Win32 discards partial invalidation on hidden parents. Use an
+            // offscreen, nonactivating window to observe the queued dirty region.
+            SetWindowPos(
+                popup.hwnd,
+                null_mut(),
+                -32000,
+                -32000,
+                0,
+                0,
+                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+            ShowWindow(popup.hwnd, SW_SHOWNOACTIVATE);
+            ValidateRect(popup.hwnd, null());
+            for offset in [0.1, 0.2, 0.3] {
+                popup.popup.state.borrow_mut().scroll_motion.jump(offset);
+                advance_scroll(popup.hwnd, &popup.popup.state, Instant::now());
+                assert_eq!(GetUpdateRect(popup.hwnd, null_mut(), 0), 0);
+            }
+            popup.popup.state.borrow_mut().scroll_motion.jump(1.0);
+            advance_scroll(popup.hwnd, &popup.popup.state, Instant::now());
+            assert_ne!(
+                GetUpdateRect(popup.hwnd, null_mut(), 0),
+                0,
+                "moving content needs a queued parent paint, not just child moves"
+            );
+            assert_eq!(
+                popup.popup.state.borrow().surface.presents,
+                1,
+                "scroll frames must not present synchronously"
+            );
+        }
+    }
+
+    #[test]
+    fn resizing_viewport_repaints_newly_exposed_child_pixels() {
+        let popup = HiddenPopup::native(760.0, 680.0, 1.0);
+        unsafe {
+            ShowWindow(popup.hwnd, SW_SHOWNOACTIVATE);
+            let button = GetDlgItem(popup.hwnd, 100);
+            popup.popup.state.borrow_mut().height = 200.0;
+            position_controls(popup.hwnd, &popup.popup.state);
+            ValidateRect(button, null());
+            let before = popup.popup.state.borrow().positions.entries[0].bounds;
+            popup.popup.state.borrow_mut().height = 215.0;
+            position_controls(popup.hwnd, &popup.popup.state);
+            assert_eq!(
+                popup.popup.state.borrow().positions.entries[0].bounds,
+                before
+            );
+            assert_ne!(
+                GetUpdateRect(button, null_mut(), 0),
+                0,
+                "a taller viewport must paint newly exposed pixels even without a child move"
+            );
+        }
+    }
+
+    #[test]
+    fn fractional_dpi_children_and_background_share_the_same_rounded_scroll() {
+        for scale in [1.25, 1.5] {
+            let popup = HiddenPopup::new(scale);
+            unsafe {
+                for control in &mut popup.popup.state.borrow_mut().controls {
+                    control.hwnd = null_mut();
+                }
+                let button = CreateWindowExW(
+                    0,
+                    wide("BUTTON").as_ptr(),
+                    null(),
+                    WS_CHILD | WS_VISIBLE,
+                    0,
+                    0,
+                    1,
+                    1,
+                    popup.hwnd,
+                    100usize as *mut _,
+                    GetModuleHandleW(null()),
+                    null(),
+                );
+                popup.popup.state.borrow_mut().controls[0].hwnd = button;
+                position_controls(popup.hwnd, &popup.popup.state);
+                let initial = popup.popup.state.borrow().positions.entries[0].bounds.1;
+                for scroll in [0.1_f32, 0.2, 0.3, 0.4, 0.5, 1.0] {
+                    popup.popup.state.borrow_mut().scroll = scroll;
+                    position_controls(popup.hwnd, &popup.popup.state);
+                    assert_eq!(
+                        popup.popup.state.borrow().positions.entries[0].bounds.1,
+                        initial - (scroll * scale).round() as i32,
+                        "child must follow the background's integer offset at {scale}x, scroll {scroll}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn row_labels_use_primary_text_and_section_details_stay_muted() {
+        let popup = HiddenPopup::new(1.0);
+        popup.paint();
+        let pixels = popup.pixels();
+        let contains = |left: usize, top: usize, right: usize, bottom: usize, color: [u8; 3]| {
+            (top..bottom).any(|y| {
+                (left..right).any(|x| {
+                    (0..3).all(|channel| {
+                        pixels[(y * 420 + x) * 4 + channel].abs_diff(color[channel]) <= 16
+                    })
+                })
+            })
+        };
+        assert!(
+            contains(32, 155, 131, 199, crate::theme::TEXT),
+            "Accent row label"
+        );
+        assert!(
+            contains(242, 117, 380, 144, crate::theme::MUTED),
+            "Appearance detail"
+        );
+    }
+
+    #[test]
+    fn appearance_card_and_settings_actions_use_theme_tokens() {
+        let popup = HiddenPopup::new(1.0);
+        popup.paint();
+        let pixels = popup.pixels();
+        let pixel = |x: usize, y: usize| &pixels[(y * 420 + x) * 4..(y * 420 + x) * 4 + 3];
+        assert_eq!(
+            pixel(210, 134),
+            crate::theme::SURFACE_RAISED,
+            "Appearance card interior"
+        );
+        assert_eq!(
+            pixel(210, 104),
+            crate::theme::BORDER,
+            "Appearance card top edge"
+        );
+        let mut state = popup.popup.state.borrow_mut();
+        for (id, color) in [
+            (100, crate::theme::ICE),
+            (3, crate::theme::DANGER),
+            (126, crate::theme::DANGER),
+            (143, crate::theme::DANGER),
+        ] {
+            let image = button_raster(
+                &mut state,
+                &DRAWITEMSTRUCT {
+                    CtlID: id,
+                    rcItem: RECT {
+                        right: 80,
+                        bottom: 32,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                true,
+            );
+            assert!(
+                image
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .any(|pixel| pixel[..3] == color),
+                "control {id} must use its theme token"
+            );
+        }
+    }
+
+    #[test]
+    fn about_child_renders_the_prose_with_title_and_body_theme_tokens() {
+        let popup = HiddenPopup::new(1.0);
+        popup.popup.state.borrow_mut().about = true;
+        unsafe {
+            position_controls(popup.hwnd, &popup.popup.state);
+        }
+        let image = button_raster(
+            &mut popup.popup.state.borrow_mut(),
+            &DRAWITEMSTRUCT {
+                CtlID: ABOUT_TEXT as u32,
+                rcItem: RECT {
+                    right: 368,
+                    bottom: 400,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            true,
+        );
+        assert!(
+            image[..368 * 40 * 4]
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .any(|pixel| pixel[..3] == crate::theme::TEXT),
+            "the native prose child must render its prominent title"
+        );
+        assert!(
+            image[368 * 40 * 4..]
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .any(|pixel| pixel[..3] == crate::theme::MUTED)
+        );
+        assert!(image.as_chunks::<4>().0.iter().all(|pixel| pixel[3] == 255));
+    }
+
+    #[test]
+    fn about_prose_has_a_named_native_read_only_text_child() {
+        let popup = HiddenPopup::new(1.0);
+        popup.popup.state.borrow_mut().about = true;
+        unsafe {
+            position_controls(popup.hwnd, &popup.popup.state);
+            let child = GetDlgItem(popup.hwnd, ABOUT_TEXT);
+            assert!(!child.is_null(), "About prose needs a native text child");
+            let mut name = [0; 1024];
+            let len = GetWindowTextW(child, name.as_mut_ptr(), name.len() as i32);
+            let name = String::from_utf16_lossy(&name[..len as usize]);
+            assert!(name.contains("HiyoDyna"));
+            assert!(name.contains("AMLL TTML DB"));
+            assert_eq!(GetWindowLongW(child, GWL_STYLE) as u32 & WS_TABSTOP, 0);
+        }
+    }
+
+    #[test]
+    fn unchanged_rounded_scroll_does_not_move_or_invalidate_children() {
+        unsafe extern "system" fn observe(
+            hwnd: HWND,
+            message: u32,
+            w: WPARAM,
+            l: LPARAM,
+            _: usize,
+            data: usize,
+        ) -> LRESULT {
+            unsafe {
+                if message == WM_WINDOWPOSCHANGING || message == WM_SETREDRAW || message == WM_PAINT
+                {
+                    let count = &*(data as *const Cell<usize>);
+                    count.set(count.get() + 1);
+                }
+                DefSubclassProc(hwnd, message, w, l)
+            }
+        }
+        let popup = HiddenPopup::new(1.0);
+        let count = Cell::new(0usize);
+        let parent_count = Cell::new(0usize);
+        unsafe {
+            for control in &mut popup.popup.state.borrow_mut().controls {
+                control.hwnd = null_mut();
+            }
+            let button = CreateWindowExW(
+                0,
+                wide("BUTTON").as_ptr(),
+                wide("Ice").as_ptr(),
+                WS_CHILD | WS_VISIBLE,
+                0,
+                0,
+                80,
+                32,
+                popup.hwnd,
+                100usize as *mut _,
+                GetModuleHandleW(null()),
+                null(),
+            );
+            popup.popup.state.borrow_mut().controls[0].hwnd = button;
+            SetWindowSubclass(
+                button,
+                Some(observe),
+                9,
+                &count as *const Cell<usize> as usize,
+            );
+            position_controls(popup.hwnd, &popup.popup.state);
+            ValidateRect(button, null());
+            count.set(0);
+            for scroll in [0.0, 0.1, 0.2, 0.3] {
+                popup.popup.state.borrow_mut().scroll = scroll;
+                position_controls(popup.hwnd, &popup.popup.state);
+            }
+            assert_eq!(
+                count.get(),
+                0,
+                "unchanged rounded positions must skip native moves"
+            );
+            assert_eq!(
+                GetUpdateRect(button, null_mut(), 0),
+                0,
+                "unchanged child must stay valid"
+            );
+            let regions = popup.popup.state.borrow().positions.regions.clone();
+            SetWindowSubclass(
+                popup.hwnd,
+                Some(observe),
+                9,
+                &parent_count as *const Cell<usize> as usize,
+            );
+            for scroll in [1.0, 2.0, 3.0, 4.0] {
+                count.set(0);
+                popup.popup.state.borrow_mut().scroll = scroll;
+                position_controls(popup.hwnd, &popup.popup.state);
+                assert_eq!(
+                    count.get(),
+                    1,
+                    "each changed position needs exactly one deferred move, without synchronous painting"
+                );
+                assert_eq!(
+                    popup.popup.state.borrow().positions.regions,
+                    regions,
+                    "scroll frames must reuse owned region handles"
+                );
+            }
+            assert_eq!(
+                parent_count.get(),
+                0,
+                "frame path must not toggle redraw or paint synchronously"
+            );
+            RemoveWindowSubclass(popup.hwnd, Some(observe), 9);
+            RemoveWindowSubclass(button, Some(observe), 9);
+        }
+    }
+
     impl Drop for HiddenPopup {
         fn drop(&mut self) {
             unsafe {
+                // The fixture owns the Box; a native proc must not drop it again.
+                SetWindowLongPtrW(self.hwnd, GWLP_USERDATA, 0);
                 DestroyWindow(self.hwnd);
+                assert_eq!(IsWindow(self.hwnd), 0);
             }
         }
     }
@@ -2810,14 +3910,14 @@ pub(crate) mod tests {
             }
         }
         for (scale, height, scroll, y, width, rows, first, last) in [
-            (1.0, 760.0, 44.0, 34.0, 59, 29, 10, 29),
-            (1.0, 300.0, 0.0, 151.0, 59, 29, 0, 19),
-            (1.25, 760.0, 44.0, 34.0, 74, 36, 12, 36),
-            (1.25, 300.0, 0.0, 151.0, 74, 36, 0, 23),
-            (1.5, 760.0, 44.0, 34.0, 89, 44, 15, 44),
-            (1.5, 300.0, 0.0, 151.0, 89, 43, 0, 28),
-            (2.0, 760.0, 44.0, 34.0, 118, 58, 20, 58),
-            (2.0, 300.0, 0.0, 151.0, 118, 58, 0, 38),
+            (1.0, 760.0, 44.0, 34.0, 70, 29, 10, 29),
+            (1.0, 338.0, 0.0, 151.0, 70, 29, 0, 19),
+            (1.25, 760.0, 44.0, 34.0, 88, 36, 12, 36),
+            (1.25, 338.0, 0.0, 151.0, 88, 36, 0, 23),
+            (1.5, 760.0, 44.0, 34.0, 106, 44, 15, 44),
+            (1.5, 338.0, 0.0, 151.0, 106, 44, 0, 28),
+            (2.0, 760.0, 44.0, 34.0, 140, 58, 20, 58),
+            (2.0, 338.0, 0.0, 151.0, 140, 58, 0, 38),
         ] {
             let popup = HiddenPopup::new(scale);
             unsafe {
@@ -2844,7 +3944,8 @@ pub(crate) mod tests {
                         control.hwnd = null_mut();
                     }
                     state.controls[0].hwnd = button;
-                    state.controls[0].rect.y = y;
+                    state.controls[0].rect.y = y / 1.5;
+                    state.controls[0].rect.h = 29.0 / 1.5;
                     state.height = height;
                     state.scroll = scroll;
                 }
@@ -2944,6 +4045,7 @@ pub(crate) mod tests {
             let popup = Box::new(Popup {
                 state: RefCell::new(state_for_test(Settings::default(), 1.0)),
                 suggested: Cell::new(None),
+                placement: Cell::new(None),
                 owner: null_mut(),
                 focus: Cell::new(null_mut()),
             });
@@ -2982,7 +4084,7 @@ pub(crate) mod tests {
                     control.hwnd = null_mut();
                 }
                 state.controls[0].hwnd = button;
-                state.scroll = 44.0;
+                state.scroll = 61.0;
             }
             position_controls(popup.hwnd, &popup.popup.state);
             assert_ne!(
@@ -2997,7 +4099,7 @@ pub(crate) mod tests {
             DeleteObject(region);
             assert_eq!(
                 (bounds.left, bounds.top, bounds.right, bounds.bottom),
-                (0, 10, 59, 29)
+                (0, 10, 70, 44)
             );
         }
     }
@@ -3029,9 +4131,9 @@ pub(crate) mod tests {
             popup.popup.state.borrow_mut().scroll = 137.0;
             popup.paint();
             let after = popup.pixels();
-            let row = (WIDTH * scale) as usize * 4;
-            let top = (CONTENT_TOP * scale).floor() as usize * row;
-            let bottom = ((760.0 - CONTENT_BOTTOM) * scale).ceil() as usize * row;
+            let row = (420.0 * scale) as usize * 4;
+            let top = (104.0 * scale).floor() as usize * row;
+            let bottom = ((760.0 - FOOTER_HEIGHT) * scale).ceil() as usize * row;
             assert!(before[..top] == after[..top], "header at scale {scale}");
             assert!(
                 before[bottom..] == after[bottom..],
@@ -3052,8 +4154,116 @@ pub(crate) mod tests {
                 0,
                 (&mut info as *mut MINMAXINFO) as isize,
             );
-            assert_eq!(info.ptMinTrackSize.x, 360);
-            assert_eq!(info.ptMinTrackSize.y, 300);
+            assert_eq!(info.ptMinTrackSize.x, 420);
+            assert_eq!(info.ptMinTrackSize.y, 560);
+        }
+    }
+
+    #[test]
+    fn native_minimum_cannot_expand_creation_or_dpi_relayout_past_work_area() {
+        unsafe extern "system" fn sizing_proc(
+            hwnd: HWND,
+            message: u32,
+            wparam: WPARAM,
+            lparam: LPARAM,
+            _id: usize,
+            _data: usize,
+        ) -> LRESULT {
+            unsafe {
+                match message {
+                    WM_GETMINMAXINFO => proc(hwnd, message, wparam, lparam),
+                    WM_NCCALCSIZE => 0,
+                    _ => DefSubclassProc(hwnd, message, wparam, lparam),
+                }
+            }
+        }
+        unsafe {
+            let popup = HiddenPopup::new(1.0);
+            SetWindowSubclass(popup.hwnd, Some(sizing_proc), 7, 0);
+            SetWindowLongW(popup.hwnd, GWL_STYLE, (WS_POPUP | WS_THICKFRAME) as i32);
+            let mut info = MONITORINFO {
+                cbSize: size_of::<MONITORINFO>() as u32,
+                ..Default::default()
+            };
+            assert_ne!(
+                GetMonitorInfoW(
+                    MonitorFromWindow(popup.hwnd, MONITOR_DEFAULTTONEAREST),
+                    &mut info
+                ),
+                0
+            );
+            let work = RECT {
+                right: info.rcWork.left + (info.rcWork.right - info.rcWork.left).min(600),
+                bottom: info.rcWork.top + (info.rcWork.bottom - info.rcWork.top).min(300),
+                ..info.rcWork
+            };
+            let geometry = popup_geometry(
+                POINT {
+                    x: work.right,
+                    y: work.bottom,
+                },
+                work,
+                192,
+            );
+            position_in_work_area(
+                popup.hwnd,
+                RECT {
+                    left: geometry.origin.x,
+                    top: geometry.origin.y,
+                    right: geometry.origin.x + geometry.width_px,
+                    bottom: geometry.origin.y + geometry.height_px,
+                },
+                work,
+                192,
+            );
+            let mut actual = RECT::default();
+            assert_ne!(GetWindowRect(popup.hwnd, &mut actual), 0);
+            assert!(
+                actual.left >= work.left
+                    && actual.top >= work.top
+                    && actual.right <= work.right
+                    && actual.bottom <= work.bottom,
+                "creation escaped work area: {}x{}",
+                actual.right - actual.left,
+                actual.bottom - actual.top
+            );
+
+            // A synthetic destination DPI makes the scaled minimum exceed even
+            // a large desktop, without changing the user's display settings.
+            let dpi = (((info.rcWork.bottom - info.rcWork.top) / 560 + 1) * 96).max(192) as u32;
+            let suggested = RECT {
+                left: info.rcWork.left,
+                top: info.rcWork.top,
+                right: info.rcWork.right + 100,
+                bottom: info.rcWork.bottom + 100,
+            };
+            proc(
+                popup.hwnd,
+                WM_DPICHANGED,
+                (dpi | dpi << 16) as usize,
+                (&suggested as *const RECT) as isize,
+            );
+            let mut limits = MINMAXINFO::default();
+            SendMessageW(
+                popup.hwnd,
+                WM_GETMINMAXINFO,
+                0,
+                (&mut limits as *mut MINMAXINFO) as isize,
+            );
+            assert_eq!(
+                limits.ptMinTrackSize.y,
+                info.rcWork.bottom - info.rcWork.top,
+                "pending DPI transition must use the destination DPI and work area"
+            );
+            proc(popup.hwnd, RELAYOUT, 0, 0);
+            assert_ne!(GetWindowRect(popup.hwnd, &mut actual), 0);
+            assert!(
+                actual.left >= info.rcWork.left
+                    && actual.top >= info.rcWork.top
+                    && actual.right <= info.rcWork.right
+                    && actual.bottom <= info.rcWork.bottom,
+                "DPI relayout escaped work area"
+            );
         }
     }
 
@@ -3074,7 +4284,7 @@ pub(crate) mod tests {
     #[test]
     fn resize_reflow_preserves_user_outer_geometry_and_clamps_scroll() {
         let popup = HiddenPopup::new(1.0);
-        popup.popup.state.borrow_mut().scroll = CONTENT;
+        popup.popup.state.borrow_mut().scroll = 2000.0;
         unsafe {
             SetWindowPos(
                 popup.hwnd,
@@ -3099,7 +4309,7 @@ pub(crate) mod tests {
         assert_eq!((state.width, state.height), (521.0, 420.0));
         assert_eq!(
             state.scroll,
-            CONTENT.min(SettingsLayout::new(state.width).max_scroll(420.0))
+            SettingsLayout::new(state.width, 420.0).max_scroll()
         );
     }
 
@@ -3120,7 +4330,7 @@ pub(crate) mod tests {
         popup.paint();
         let pixels = popup.pixels();
         assert_eq!(pixels.len(), 520 * 420 * 4);
-        assert_eq!(&pixels[(419 * 520 + 519) * 4..], &[8, 8, 8, 255]);
+        assert_eq!(&pixels[(419 * 520 + 519) * 4..], &[10, 11, 13, 255]);
     }
 
     #[test]
@@ -3254,7 +4464,7 @@ pub(crate) mod tests {
                 let window_dc = GetDC(hwnd);
                 let bitmap = CreateCompatibleBitmap(
                     window_dc,
-                    (WIDTH * scale) as i32,
+                    (420.0 * scale) as i32,
                     (760.0 * scale) as i32,
                 );
                 ReleaseDC(hwnd, window_dc);
@@ -3589,8 +4799,201 @@ pub(crate) mod tests {
     }
 
     #[test]
-    #[ignore = "Captures both utility languages and checks real custom-frame controls serially"]
+    fn about_native_uia_exposes_named_noninteractive_text() {
+        let popup = HiddenPopup::native(760.0, 680.0, 1.0);
+        unsafe {
+            proc(popup.hwnd, COMMAND, 142, 0);
+            let child = GetDlgItem(popup.hwnd, ABOUT_TEXT) as usize;
+            let (send, receive) = std::sync::mpsc::channel();
+            let worker = std::thread::spawn(move || {
+                use windows::Win32::System::Com::{
+                    CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx,
+                    CoUninitialize,
+                };
+                use windows::Win32::UI::Accessibility::{
+                    CUIAutomation, IUIAutomation, UIA_TextControlTypeId,
+                };
+                let result = (|| -> windows::core::Result<(String, bool, bool)> {
+                    CoInitializeEx(None, COINIT_MULTITHREADED).ok()?;
+                    struct ComGuard;
+                    impl Drop for ComGuard {
+                        fn drop(&mut self) {
+                            unsafe {
+                                CoUninitialize();
+                            }
+                        }
+                    }
+                    let _guard = ComGuard;
+                    let automation: IUIAutomation =
+                        CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER)?;
+                    let element = automation
+                        .ElementFromHandle(windows::Win32::Foundation::HWND(child as HWND))?;
+                    Ok((
+                        element.CurrentName()?.to_string(),
+                        element.CurrentControlType()? == UIA_TextControlTypeId,
+                        element.CurrentIsKeyboardFocusable()?.as_bool(),
+                    ))
+                })();
+                send.send(result.map_err(|error| error.to_string()))
+                    .unwrap();
+            });
+            let started = Instant::now();
+            let response = loop {
+                if let Ok(response) = receive.try_recv() {
+                    break response;
+                }
+                assert!(
+                    started.elapsed() < std::time::Duration::from_secs(10),
+                    "About UIA query timed out"
+                );
+                let mut message = MSG::default();
+                while PeekMessageW(&mut message, null_mut(), 0, 0, PM_REMOVE) != 0 {
+                    TranslateMessage(&message);
+                    DispatchMessageW(&message);
+                }
+                std::thread::park_timeout(std::time::Duration::from_millis(5));
+            };
+            worker.join().unwrap();
+            let (name, text, focusable) = response.expect("About UIA provider");
+            assert!(name.contains("HiyoDyna") && name.contains("AMLL TTML DB"));
+            assert!(text, "About prose must be a native UIA Text child");
+            assert!(!focusable, "read-only prose must not change tab order");
+        }
+    }
+
+    #[test]
+    fn hidden_native_preview_preserves_control_identity_and_about_readability() {
+        let popup = HiddenPopup::native(760.0, 680.0, 1.25);
+        unsafe {
+            assert_eq!(IsWindowVisible(popup.hwnd), 0);
+            for (index, control) in popup.popup.state.borrow().controls.iter().enumerate() {
+                assert_eq!(GetDlgItem(popup.hwnd, index as i32 + 100), control.hwnd);
+                let mut name = [0; 1024];
+                let len = GetWindowTextW(control.hwnd, name.as_mut_ptr(), name.len() as i32);
+                assert_eq!(
+                    String::from_utf16_lossy(&name[..len as usize]),
+                    control.accessible_name()
+                );
+                if control.is_choice() {
+                    assert_eq!(
+                        SendMessageW(control.hwnd, BM_GETCHECK, 0, 0),
+                        isize::from(control.selected)
+                    );
+                }
+            }
+            proc(popup.hwnd, COMMAND, 142, 0);
+            let child = GetDlgItem(popup.hwnd, ABOUT_TEXT);
+            assert!(!child.is_null());
+            assert_ne!(GetWindowLongW(child, GWL_STYLE) as u32 & WS_VISIBLE, 0);
+            assert_eq!(GetWindowLongW(child, GWL_STYLE) as u32 & WS_TABSTOP, 0);
+            popup.paint();
+            assert!(
+                popup
+                    .pixels()
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .all(|pixel| pixel[3] == 255)
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "Captures hidden native Settings at four widths and four DPIs in both languages"]
     fn native_settings_polish_preview() {
+        responsive_settings_render_matrix();
+    }
+
+    #[test]
+    #[ignore = "Captures hidden native Settings sections, interaction states, and About; run serially"]
+    fn native_settings_states_preview() {
+        let dir = std::path::PathBuf::from(
+            std::env::var_os("HIYODYNA_PREVIEW_DIR").expect("preview directory"),
+        );
+        let old = crate::i18n::language();
+        for language in [Language::English, Language::Vietnamese] {
+            crate::i18n::set_language(language);
+            for scale in [1.0, 1.25, 1.5, 2.0] {
+                for width in [420.0, 700.0, 760.0, 920.0] {
+                    let popup = HiddenPopup::native(width, 680.0, scale);
+                    for (name, offset) in [
+                        ("clock", 351.0),
+                        ("lyrics", 642.0),
+                        ("application", 940.5),
+                        ("application-bottom", f32::MAX),
+                    ] {
+                        {
+                            let mut state = popup.popup.state.borrow_mut();
+                            state.scroll =
+                                offset.min(SettingsLayout::new(width, 680.0).max_scroll());
+                            state.active_section = match name {
+                                "clock" => SettingsSection::ClockPosition,
+                                "lyrics" => SettingsSection::MusicLyrics,
+                                _ => SettingsSection::Application,
+                            };
+                        }
+                        unsafe {
+                            position_controls(popup.hwnd, &popup.popup.state);
+                            save_settings_surface(
+                                popup.hwnd,
+                                &dir.join(format!(
+                                    "settings-states-{}-{}-{}-{name}.png",
+                                    width as u32,
+                                    language.as_str(),
+                                    (scale * 100.0) as u32
+                                )),
+                            );
+                        }
+                    }
+                    unsafe {
+                        WINDOW.with(|window| window.set(popup.hwnd));
+                        let settings = Settings {
+                            accent: AccentPreset::Mint,
+                            shadow: false,
+                            show_seconds: false,
+                            compact_lyrics: false,
+                            language,
+                            ..Settings::default()
+                        };
+                        update(&settings, true);
+                        {
+                            let mut state = popup.popup.state.borrow_mut();
+                            state.scroll = 0.0;
+                            state.active_section = SettingsSection::Appearance;
+                        }
+                        position_controls(popup.hwnd, &popup.popup.state);
+                        save_settings_surface(
+                            popup.hwnd,
+                            &dir.join(format!(
+                                "settings-states-{}-{}-{}-switches-off.png",
+                                width as u32,
+                                language.as_str(),
+                                (scale * 100.0) as u32
+                            )),
+                        );
+                        proc(popup.hwnd, COMMAND, 142, 0);
+                        save_settings_surface(
+                            popup.hwnd,
+                            &dir.join(format!(
+                                "settings-states-{}-{}-{}-about.png",
+                                width as u32,
+                                language.as_str(),
+                                (scale * 100.0) as u32
+                            )),
+                        );
+                        WINDOW.with(|window| window.set(null_mut()));
+                        assert_eq!(IsWindowVisible(popup.hwnd), 0);
+                        assert!(!popup.popup.state.borrow().frame_pump.is_active());
+                    }
+                }
+            }
+        }
+        crate::i18n::set_language(old);
+    }
+
+    #[test]
+    #[ignore = "Checks interactive expand/restore and focus on a real desktop; run explicitly"]
+    fn native_settings_interactive_chrome_smoke() {
         unsafe {
             let old_language = crate::i18n::language();
             struct Cleanup(crate::i18n::Language);
@@ -3624,7 +5027,7 @@ pub(crate) mod tests {
                 HWND_TOPMOST,
                 40,
                 40,
-                (WIDTH * scale) as i32,
+                (420.0 * scale) as i32,
                 (600.0 * scale) as i32,
                 SWP_NOACTIVATE,
             );
@@ -3643,7 +5046,7 @@ pub(crate) mod tests {
             };
             assert_eq!(hit(24.0, 24.0), HTCAPTION as isize);
             assert_eq!(hit(2.0, 2.0), HTTOPLEFT as isize);
-            assert_eq!(hit(WIDTH - 28.0, 28.0), HTCLIENT as isize);
+            assert_eq!(hit(420.0 - 28.0, 28.0), HTCLIENT as isize);
             SendMessageW(hwnd, WM_SYSCOMMAND, SC_MAXIMIZE as usize, 0);
             for _ in 0..160 {
                 SendMessageW(hwnd, WM_TIMER, 0x4953, 0);
@@ -3706,7 +5109,7 @@ pub(crate) mod tests {
                     SendMessageW(hwnd, WM_TIMER, 0x4953, 0);
                 }
                 assert_eq!(GetFocus(), focus);
-                save_window(
+                save_settings_surface(
                     hwnd,
                     &dir.join(format!("settings-island-wide-{}.png", language.as_str())),
                 );
@@ -3722,13 +5125,14 @@ pub(crate) mod tests {
                 );
                 for (name, offset) in [
                     ("top", 0.0_f32),
-                    ("lyrics", 500.0),
-                    ("shortcut-updates", 900.0),
+                    ("lyrics", 642.0),
+                    ("shortcut-updates", 1100.0),
+                    ("application-bottom", 1500.0),
                 ] {
                     {
                         let mut state = state.borrow_mut();
                         state.scroll =
-                            offset.min(SettingsLayout::new(state.width).max_scroll(state.height));
+                            offset.min(SettingsLayout::new(state.width, state.height).max_scroll());
                     }
                     position_controls(hwnd, state);
                     RedrawWindow(
@@ -3738,7 +5142,7 @@ pub(crate) mod tests {
                         RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW,
                     );
                     windows_sys::Win32::Graphics::Dwm::DwmFlush();
-                    save_window(
+                    save_settings_surface(
                         hwnd,
                         &dir.join(format!("settings-{}-{name}.png", language.as_str())),
                     );
@@ -3772,7 +5176,7 @@ pub(crate) mod tests {
                     RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW,
                 );
                 windows_sys::Win32::Graphics::Dwm::DwmFlush();
-                save_window(
+                save_settings_surface(
                     hwnd,
                     &dir.join(format!("settings-{}-about.png", language.as_str())),
                 );
@@ -3890,6 +5294,109 @@ pub(crate) mod tests {
             );
             assert!(take_commands().is_empty());
             assert_ne!(IsWindow(notice), 0);
+        }
+    }
+
+    // Capture the retained parent surface and real native children's print
+    // clients. This works on locked/remote desktops where desktop BitBlt is black.
+    unsafe fn save_settings_surface(hwnd: HWND, path: &std::path::Path) {
+        unsafe {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            InvalidateRect(hwnd, null(), 0);
+            proc(hwnd, WM_PAINT, 0, 0);
+            let popup = &*(GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const Popup);
+            let state = popup.state.borrow();
+            let (width, height) = state.background.as_ref().unwrap().key.0;
+            let background = state.background.as_ref().unwrap().pixels.clone();
+            assert!(
+                background
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .all(|pixel| pixel[3] == 255)
+            );
+            drop(state);
+            let dc = CreateCompatibleDC(null_mut());
+            let info = BITMAPINFO {
+                bmiHeader: BITMAPINFOHEADER {
+                    biSize: size_of::<BITMAPINFOHEADER>() as u32,
+                    biWidth: width as i32,
+                    biHeight: -(height as i32),
+                    biPlanes: 1,
+                    biBitCount: 32,
+                    biCompression: BI_RGB,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let mut bits = null_mut();
+            let bitmap = CreateDIBSection(dc, &info, DIB_RGB_COLORS, &mut bits, null_mut(), 0);
+            assert!(!bitmap.is_null());
+            let previous = SelectObject(dc, bitmap);
+            let pixels = std::slice::from_raw_parts_mut(bits.cast::<u8>(), background.len());
+            pixels.copy_from_slice(&background);
+            let mut child = GetWindow(hwnd, GW_CHILD);
+            while !child.is_null() {
+                if GetWindowLongW(child, GWL_STYLE) as u32 & WS_VISIBLE != 0 {
+                    let mut rect = RECT::default();
+                    GetWindowRect(child, &mut rect);
+                    let mut origin = POINT {
+                        x: rect.left,
+                        y: rect.top,
+                    };
+                    ScreenToClient(hwnd, &mut origin);
+                    // Owner drawing installs the HWND's region in device
+                    // coordinates; give each child a local DC with origin zero.
+                    let child_dc = CreateCompatibleDC(dc);
+                    let child_bitmap =
+                        CreateCompatibleBitmap(dc, rect.right - rect.left, rect.bottom - rect.top);
+                    let child_previous = SelectObject(child_dc, child_bitmap);
+                    BitBlt(
+                        child_dc,
+                        0,
+                        0,
+                        rect.right - rect.left,
+                        rect.bottom - rect.top,
+                        dc,
+                        origin.x,
+                        origin.y,
+                        SRCCOPY,
+                    );
+                    SendMessageW(
+                        child,
+                        WM_PRINTCLIENT,
+                        child_dc as usize,
+                        PRF_CLIENT as isize,
+                    );
+                    BitBlt(
+                        dc,
+                        origin.x,
+                        origin.y,
+                        rect.right - rect.left,
+                        rect.bottom - rect.top,
+                        child_dc,
+                        0,
+                        0,
+                        SRCCOPY,
+                    );
+                    SelectObject(child_dc, child_previous);
+                    DeleteObject(child_bitmap);
+                    DeleteDC(child_dc);
+                }
+                child = GetWindow(child, GW_HWNDNEXT);
+            }
+            GdiFlush();
+            let mut image = pixels.to_vec();
+            for pixel in image.as_chunks_mut::<4>().0 {
+                pixel.swap(0, 2);
+                pixel[3] = 255;
+            }
+            image::save_buffer(path, &image, width, height, image::ColorType::Rgba8).unwrap();
+            SelectObject(dc, previous);
+            DeleteObject(bitmap);
+            DeleteDC(dc);
         }
     }
 
@@ -4012,12 +5519,16 @@ pub(crate) mod tests {
                     ..Default::default()
                 };
                 assert!(translate_message(&msg));
-                // Exercise an animation frame without pumping queued WM_PAINT:
-                // the timer must present one complete frame before returning.
+                // A scroll tick queues buffered paints. Drain those paints as
+                // the native message loop does before comparing complete frames.
                 std::thread::sleep(std::time::Duration::from_millis(20));
                 let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const Popup;
                 let draw_started = Instant::now();
                 advance_scroll(hwnd, &(*ptr).state, Instant::now());
+                let mut paint = MSG::default();
+                while PeekMessageW(&mut paint, null_mut(), WM_PAINT, WM_PAINT, PM_REMOVE) != 0 {
+                    DispatchMessageW(&paint);
+                }
                 frame_times.push(draw_started.elapsed().as_secs_f64() * 1000.0);
                 windows_sys::Win32::Graphics::Dwm::DwmFlush();
                 let immediate = capture_window(hwnd).0;
@@ -4145,17 +5656,17 @@ pub(crate) mod tests {
         let normal = popup_geometry(anchor, work, 96);
         assert_eq!(
             (normal.scale, normal.width_px, normal.height_px),
-            (1.0, 360, 760)
+            (1.0, 760, 680)
         );
-        assert_eq!((normal.origin.x, normal.origin.y), (-360, 280));
+        assert_eq!((normal.origin.x, normal.origin.y), (-760, 360));
 
         let scaled = popup_geometry(anchor, work, 192);
         assert_eq!(
             (scaled.scale, scaled.width_px, scaled.height_px),
-            (2.0, 720, 1016)
+            (2.0, 1520, 1016)
         );
         assert_eq!(scaled.height_px as f32 / scaled.scale, 508.0);
-        assert_eq!((scaled.origin.x, scaled.origin.y), (-720, 24));
+        assert_eq!((scaled.origin.x, scaled.origin.y), (-1520, 24));
 
         // A minimum logical height must not overflow a short, high-DPI work area.
         let short = popup_geometry(
@@ -4199,6 +5710,7 @@ pub(crate) mod tests {
     fn keyboard_reveals_last_control_on_short_work_area() {
         let settings = Settings::default();
         let mut state = State {
+            active_section: SettingsSection::Appearance,
             painter: Painter::new(1.0).unwrap(),
             surface: WindowSurface::new().unwrap(),
             frame_pump: FramePump::new(SCROLL_FRAME),
@@ -4206,23 +5718,25 @@ pub(crate) mod tests {
             controls: controls(&settings),
             scale: 1.0,
             height: 400.0,
-            width: WIDTH,
+            width: 420.0,
             scroll: 0.0,
             scroll_motion: SmoothScroll::default(),
             about: false,
             background: None,
             content: None,
             button_rasters: Vec::new(),
+            positions: PositionCache::default(),
             shortcut: ShortcutCapture::default(),
             shortcut_available: true,
             updates: crate::update::CheckSession::new(settings.update),
         };
         let index = state.controls.len() - 1;
         reveal_control(&mut state, index);
-        let rect = state.controls[index].rect;
+        let layout = SettingsLayout::new(state.width, state.height);
+        let rect = layout.rect(state.controls[index].rect);
         assert!(rect.y >= state.scroll);
-        assert!(CONTENT_TOP + rect.y - state.scroll + rect.h <= state.height - CONTENT_BOTTOM);
+        assert!(layout.content.y + rect.y - state.scroll + rect.h <= layout.footer.y);
         reveal_control(&mut state, 0);
-        assert!(state.controls[0].rect.y >= state.scroll);
+        assert!(layout.rect(state.controls[0].rect).y >= state.scroll);
     }
 }
