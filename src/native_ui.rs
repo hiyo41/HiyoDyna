@@ -20,6 +20,38 @@ pub(crate) struct WindowSurface {
 }
 
 impl WindowSurface {
+    pub(crate) unsafe fn copy_from(&mut self, dc: HDC, source: RECT) -> bool {
+        unsafe {
+            windows_sys::Win32::Graphics::Gdi::BitBlt(
+                self.dc,
+                0,
+                0,
+                source.right - source.left,
+                source.bottom - source.top,
+                dc,
+                source.left,
+                source.top,
+                windows_sys::Win32::Graphics::Gdi::SRCCOPY,
+            ) != 0
+        }
+    }
+
+    pub(crate) unsafe fn copy_to(&self, dc: HDC, source: RECT, x: i32, y: i32) -> bool {
+        unsafe {
+            windows_sys::Win32::Graphics::Gdi::BitBlt(
+                dc,
+                x,
+                y,
+                source.right - source.left,
+                source.bottom - source.top,
+                self.dc,
+                source.left,
+                source.top,
+                windows_sys::Win32::Graphics::Gdi::SRCCOPY,
+            ) != 0
+        }
+    }
+
     pub(crate) fn new() -> Option<Self> {
         let dc =
             unsafe { windows_sys::Win32::Graphics::Gdi::CreateCompatibleDC(std::ptr::null_mut()) };
@@ -530,7 +562,10 @@ pub(crate) fn chip(c: &mut Canvas<'_>, rect: Rect, label: &str, tint: [u8; 3], t
     if rect.w <= 16.0 || text_scale <= 0.0 {
         return;
     }
-    let available = Rect::new(rect.x + 8.0, rect.y, rect.w - 16.0, rect.h);
+    // Text rounds its raster origin; keep that origin inside the clip at
+    // fractional DPI rather than cutting off the first glyph's edge pixels.
+    let x = ((rect.x + 8.0) * c.painter.scale).ceil() / c.painter.scale;
+    let available = Rect::new(x, rect.y, (rect.x + rect.w - 8.0 - x).max(0.0), rect.h);
     let old_clip = c.clip;
     c.clip = old_clip.intersect(available);
     let size = 11.0 * text_scale;
@@ -627,6 +662,7 @@ pub(crate) fn focus_ring(c: &mut Canvas<'_>, rect: Rect, radius: f32, accent: [u
 pub(crate) struct ButtonStyle {
     pub text_scale: f32,
     pub accent: [u8; 3],
+    pub background: [u8; 3],
     pub selected: bool,
     pub focused: bool,
     pub pressed: bool,
@@ -640,6 +676,7 @@ impl Default for ButtonStyle {
         Self {
             text_scale: 1.0,
             accent: WHITE,
+            background: BACKGROUND,
             selected: false,
             focused: false,
             pressed: false,
@@ -652,7 +689,7 @@ impl Default for ButtonStyle {
 
 pub(crate) fn button(c: &mut Canvas<'_>, label: &str, style: ButtonStyle) {
     let rect = c.clip;
-    c.rect(rect, 0.0, BACKGROUND, 1.0);
+    c.rect(rect, 0.0, style.background, 1.0);
     let inner = Rect::new(2.0, 2.0, (rect.w - 4.0).max(0.0), (rect.h - 4.0).max(0.0));
     if style.focused {
         c.rect(rect, rect.h * 0.5, style.accent, 0.9);
@@ -829,26 +866,27 @@ pub(crate) unsafe extern "system" fn hover_proc(
 }
 
 /// Two-line native list row. The LISTBOX retains navigation and accessibility.
-pub(crate) fn result_row(c: &mut Canvas<'_>, title: &str, detail: &str, style: ButtonStyle) {
+pub(crate) fn result_row(
+    c: &mut Canvas<'_>,
+    title: &str,
+    detail: &str,
+    chips: &[(&str, [u8; 3])],
+    style: ButtonStyle,
+) {
     let rect = c.clip;
     c.rect(rect, 0.0, BACKGROUND, 1.0);
-    let row = Rect::new(0.0, 2.0, rect.w, (rect.h - 4.0).max(0.0));
-    if style.focused {
-        c.rect(row, 14.0, WHITE, 0.55);
-    }
-    let row = Rect::new(1.0, 3.0, rect.w - 2.0, (rect.h - 6.0).max(0.0));
+    let row = Rect::new(1.0, 2.0, rect.w - 2.0, (rect.h - 4.0).max(0.0));
     c.rect(
         row,
         13.0,
         if style.selected {
-            [29, 29, 29]
+            crate::theme::SURFACE_RAISED
         } else {
             BACKGROUND
         },
         1.0,
     );
     if style.selected {
-        c.rect(row, 13.0, style.accent, 0.04);
         c.rect(
             Rect::new(3.0, 18.0, 3.0, (rect.h - 36.0).max(0.0)),
             1.5,
@@ -856,20 +894,42 @@ pub(crate) fn result_row(c: &mut Canvas<'_>, title: &str, detail: &str, style: B
             1.0,
         );
     }
+    if style.focused {
+        focus_ring(c, row, 13.0, style.accent);
+    }
     c.ellipsis(
         title,
-        Rect::new(14.0, 7.0, rect.w - 28.0, 22.0),
+        Rect::new(14.0, 8.0, rect.w - 28.0, 22.0),
         13.0,
         true,
         WHITE,
     );
-    c.ellipsis(
-        detail,
-        Rect::new(14.0, 30.0, rect.w - 28.0, 18.0),
-        10.0,
-        false,
-        MUTED,
-    );
+    let mut right = rect.w - 14.0;
+    for &(label, tint) in chips.iter().rev() {
+        // Round outward before adding padding. Subtracting padding again in
+        // chip() must not shrink the text box below a fractional glyph advance.
+        let width =
+            (c.painter.width(label, 11.0, false).ceil() + 17.0).min((right - 14.0).max(0.0));
+        chip(
+            c,
+            Rect::new(right - width, 36.0, width, 22.0),
+            label,
+            tint,
+            1.0,
+        );
+        right -= width + 6.0;
+    }
+    // Metadata stays legible; discard secondary prose before squeezing chips.
+    let available = right - 14.0 - if chips.is_empty() { 0.0 } else { 6.0 };
+    if available >= 96.0 {
+        c.ellipsis(
+            detail,
+            Rect::new(14.0, 36.0, available, 22.0),
+            10.0,
+            false,
+            MUTED,
+        );
+    }
 }
 
 pub(crate) unsafe fn blit(
@@ -1649,6 +1709,75 @@ mod tests {
                 section_header(c, shallow, "Tall glyphs", "Detail", 2.0)
             });
             assert_ink_inside(&pixels, size, scale, shallow);
+        }
+    }
+
+    #[test]
+    fn result_chips_keep_complete_bilingual_timing_labels() {
+        use crate::canvas::Painter;
+        use crate::i18n::{Language, tr_in};
+        for language in [Language::English, Language::Vietnamese] {
+            for scale in [1.0, 1.25, 1.5, 2.0] {
+                let mut painter = Painter::new(scale).unwrap();
+                let size = ((440.0 * scale) as u32, (64.0 * scale) as u32);
+                for timing in ["Words", "Lines", "Unknown"] {
+                    let label = tr_in(language, timing);
+                    let tint = crate::theme::ICE;
+                    let mut actual = vec![0; (size.0 * size.1 * 4) as usize];
+                    result_row(
+                        &mut Canvas::new(&mut actual, size, &mut painter),
+                        "Recording",
+                        "Artist and album",
+                        &[
+                            ("AMLL TTML DB", crate::theme::LAVENDER),
+                            ("3:20", MUTED),
+                            (label, tint),
+                        ],
+                        ButtonStyle::default(),
+                    );
+                    // An independent, unellipsized glyph raster must occur in
+                    // the metadata line, regardless of the chip's placement.
+                    let text_size = ((120.0 * scale) as u32, (22.0 * scale) as u32);
+                    let mut text = vec![0; (text_size.0 * text_size.1 * 4) as usize];
+                    let mut c = Canvas::new(&mut text, text_size, &mut painter);
+                    // Keep edge antialiasing out of the reference background.
+                    let background_rect = Rect::new(-1.0, -1.0, c.clip.w + 2.0, c.clip.h + 2.0);
+                    c.rect(background_rect, 0.0, BACKGROUND, 1.0);
+                    c.rect(background_rect, 0.0, tint, 0.1);
+                    let background = text.clone();
+                    Canvas::new(&mut text, text_size, &mut painter).text(
+                        label,
+                        Rect::new(0.0, 0.0, 120.0, 22.0),
+                        11.0,
+                        false,
+                        tint,
+                    );
+                    let ink = text
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .enumerate()
+                        .filter(|(index, pixel)| pixel[..3] != background[index * 4..index * 4 + 3])
+                        .map(|(index, pixel)| {
+                            (
+                                index as u32 % text_size.0,
+                                index as u32 / text_size.0,
+                                *pixel,
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    assert!(!ink.is_empty());
+                    let width = ink.iter().map(|(x, _, _)| *x).max().unwrap() + 1;
+                    let y = (36.0 * scale).round() as u32;
+                    assert!(
+                        (0..size.0 - width).any(|left| ink.iter().all(|(x, top, pixel)| {
+                            let index = (((y + top) * size.0 + left + x) * 4) as usize;
+                            actual[index..index + 3] == pixel[..3]
+                        })),
+                        "{label} must be complete at {scale}x ({language:?})"
+                    );
+                }
+            }
         }
     }
 
