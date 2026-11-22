@@ -2,6 +2,7 @@ use crate::animation::{COMPACT, ShapeState};
 use crate::canvas::{Canvas, MUTED, Painter, Rect, WHITE};
 use crate::lyrics::LyricLine;
 use crate::settings::{LyricsMode, Settings};
+use crate::theme;
 
 const SIZE: f32 = 13.0;
 pub(crate) const SOURCE_SPACE: f32 = 13.0;
@@ -304,7 +305,7 @@ fn draw_text(
         if upcoming {
             MUTED
         } else if word_sync {
-            [222, 222, 222]
+            theme::mix(WHITE, MUTED, 0.325)
         } else {
             WHITE
         },
@@ -357,7 +358,7 @@ fn draw_note(c: &mut Canvas<'_>, left: f32, height: f32) {
         (13.5, y + 9.0, 6.0, 4.5, 2.25),
         (21.5, y + 7.0, 6.0, 4.5, 2.25),
     ] {
-        c.rect(Rect::new(left + x, y, w, h), r, [150, 150, 150], 1.0);
+        c.rect(Rect::new(left + x, y, w, h), r, MUTED, 1.0);
     }
 }
 
@@ -369,6 +370,7 @@ pub(crate) fn draw_source(c: &mut Canvas<'_>, right: f32, height: f32, source: &
     }
     let x = left + 13.0;
     let y = height * 0.5 - 8.0;
+    // Spotify's source glyph retains its brand color rather than becoming a theme accent.
     c.rect(Rect::new(x, y, 17.0, 17.0), 8.5, [84, 196, 60], 1.0);
     for row in 0..3 {
         let width = 11.0 - row as f32;
@@ -383,7 +385,7 @@ pub(crate) fn draw_source(c: &mut Canvas<'_>, right: f32, height: f32, source: &
                     1.2,
                 ),
                 0.6,
-                [12, 12, 12],
+                theme::INVERSE,
                 1.0,
             );
         }
@@ -392,6 +394,20 @@ pub(crate) fn draw_source(c: &mut Canvas<'_>, right: f32, height: f32, source: &
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn note_uses_the_shared_muted_text_color() {
+        let mut painter = crate::canvas::Painter::new(1.0).unwrap();
+        let mut pixels = vec![0; 60 * 40 * 4];
+        super::draw_note(
+            &mut crate::canvas::Canvas::new(&mut pixels, (60, 40), &mut painter),
+            0.0,
+            40.0,
+        );
+        let center = (24 * 60 + 16) * 4;
+        assert_eq!(&pixels[center..center + 3], &crate::theme::MUTED);
+        assert_eq!(pixels[center + 3], 255);
+    }
+
     #[test]
     fn pulse_boundaries_and_playback_visibility_gates() {
         for (remaining, playing, visible, expected) in [

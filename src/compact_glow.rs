@@ -172,6 +172,7 @@ mod tests {
     #[test]
     fn glow_moves_during_playback_and_freezes_while_paused_without_changing_alpha() {
         let mut glow = CoverGlow::default();
+        // Warm/cool artwork fixtures verify hue sampling independently of UI accents.
         let artwork = Arc::new(image::RgbaImage::from_fn(32, 32, |x, _| {
             image::Rgba(if x < 16 {
                 [220, 70, 40, 255]
@@ -192,7 +193,7 @@ mod tests {
             scale: 1.0,
             shadow_opacity: 0.0,
             hover: 0.0,
-            accent: [255, 199, 143],
+            accent: crate::theme::ICE,
         };
         let mut base = vec![0; (size.0 * size.1 * 4) as usize];
         render_frame_with_margin(&mut base, size, params);
@@ -218,6 +219,7 @@ mod tests {
 
     #[test]
     fn neutral_covers_stay_neutral_and_preserve_artwork_opacity() {
+        // Grayscale artwork fixtures cover brightness and alpha boundaries without a theme hue.
         let mut glow = CoverGlow::default();
         for level in [0, 20, 128, 255] {
             let artwork = Arc::new(image::RgbaImage::from_pixel(
@@ -237,8 +239,7 @@ mod tests {
 
     #[test]
     fn dark_cover_color_survives_black_white_and_transparent_regions() {
-        // A mostly black cover with dark blue artwork, white branding and
-        // transparent padding reproduces the live SMTC thumbnail failure.
+        // Dark blue, white, black and transparent artwork fixtures reproduce the SMTC thumbnail failure.
         let artwork = Arc::new(image::RgbaImage::from_fn(32, 32, |x, y| {
             image::Rgba(if y >= 28 {
                 [255, 255, 255, 0]
@@ -278,7 +279,7 @@ mod tests {
                 scale,
                 shadow_opacity: 0.0,
                 hover: 0.0,
-                accent: [255, 199, 143],
+                accent: crate::theme::ICE,
             };
             let size = ((220.0 * scale) as u32, (60.0 * scale) as u32);
             let mut pixels = vec![0; (size.0 * size.1 * 4) as usize];
@@ -305,6 +306,7 @@ mod tests {
 
     #[test]
     fn cover_glow_tracks_artwork_and_preserves_shape_alpha_at_each_dpi() {
+        // Fixed warm, cool and transparent artwork fixtures exercise cover-derived glow.
         let warm = Arc::new(image::RgbaImage::from_pixel(
             8,
             8,
@@ -333,7 +335,7 @@ mod tests {
                 scale,
                 shadow_opacity: 0.22,
                 hover: 0.0,
-                accent: [255, 199, 143],
+                accent: crate::theme::ICE,
             };
             let mut base = vec![0; (size.0 * size.1 * 4) as usize];
             render_frame_with_margin(&mut base, size, params);

@@ -182,9 +182,11 @@ mod tests {
     fn tray_pixels_have_an_opaque_center_and_transparent_corner() {
         let pixels = render_tray_pixels(32, crate::theme::ICE);
         let center = (16 * 32 + 16) * 4;
-        assert_eq!(&pixels[center..center + 4], &[245, 200, 169, 255]);
+        assert_eq!(&pixels[center..center + 3], &crate::theme::ICE);
+        assert_eq!(pixels[center + 3], 255);
         let capsule = (16 * 32 + 8) * 4;
-        assert_eq!(&pixels[capsule..capsule + 4], &[22, 24, 28, 255]);
+        assert_eq!(&pixels[capsule..capsule + 3], &crate::theme::SURFACE);
+        assert_eq!(pixels[capsule + 3], 255);
         assert_eq!(pixels[3], 0);
     }
 

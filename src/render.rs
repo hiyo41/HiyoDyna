@@ -8,7 +8,6 @@ const DEFAULT_SHADOW_OPACITY: f32 = 0.22;
 const HALO_SIGMA: f32 = 6.0;
 const HALO_MAX_DISTANCE: f32 = HALO_SIGMA * 3.0;
 const HALO_OPACITY: f32 = 0.06;
-const ICE_ACCENT: [u8; 3] = [255, 199, 143];
 const BAYER_4X4: [[f32; 4]; 4] = [
     [0.0, 8.0, 2.0, 10.0],
     [12.0, 4.0, 14.0, 6.0],
@@ -42,7 +41,7 @@ pub(crate) fn render_frame(pixels: &mut [u8], size: (u32, u32), state: ShapeStat
             scale: 1.0,
             shadow_opacity: DEFAULT_SHADOW_OPACITY,
             hover: 0.0,
-            accent: ICE_ACCENT,
+            accent: crate::theme::ICE,
         },
     );
 }
@@ -125,6 +124,7 @@ pub(crate) fn render_frame_with_margin(pixels: &mut [u8], size: (u32, u32), para
         let vertical =
             ((py - (center.1 - state.height * 0.5)) / state.height.max(1.0)).clamp(0.0, 1.0);
         let lift = hover * 4.0;
+        // The dithered neutral gradient is algorithmic shading, not a fixed UI palette.
         let colors: [[u8; 3]; 4] = std::array::from_fn(|x| {
             let dither = dither_offset(x as u32, y);
             [
@@ -151,6 +151,7 @@ pub(crate) fn render_frame_with_margin(pixels: &mut [u8], size: (u32, u32), para
                         let falloff_distance = shadow_distance.max(0.0);
                         let normalized = falloff_distance / shadow_sigma;
                         let alpha = (-0.5 * normalized * normalized).exp() * shadow_opacity;
+                        // Pure black is the exact cast-shadow compositing endpoint.
                         blend_pixel(pixel, [0, 0, 0], alpha);
                     }
                 }
@@ -168,6 +169,7 @@ pub(crate) fn render_frame_with_margin(pixels: &mut [u8], size: (u32, u32), para
 
                 let edge = (1.0 - (distance + 0.55).abs() / 0.65).clamp(0.0, 1.0);
                 if edge > 0.0 {
+                    // Pure white is the exact algorithmic rim-light compositing endpoint.
                     blend_pixel(pixel, [255, 255, 255], edge * coverage * rim_alpha);
                 }
             }
@@ -283,7 +285,7 @@ mod tests {
     use super::{RenderParams, render_frame, render_frame_with_margin};
     use crate::animation::{COMPACT, EXPANDED};
 
-    const ICE: [u8; 3] = [255, 199, 143];
+    use crate::theme::ICE;
 
     #[test]
     fn attached_top_has_continuous_body_and_outward_concave_shoulders_at_each_dpi() {
@@ -444,6 +446,7 @@ mod tests {
                         if shadow_distance < shadow_max_distance {
                             let normalized = shadow_distance.max(0.0) / shadow_sigma;
                             let alpha = (-0.5 * normalized * normalized).exp() * shadow_opacity;
+                            // Frozen scalar fixture retains the exact black shadow endpoint.
                             super::blend_pixel(&mut pixels[index..index + 4], [0, 0, 0], alpha);
                         }
                     }
@@ -460,6 +463,7 @@ mod tests {
                         .clamp(0.0, 1.0);
                     let lift = hover * 4.0;
                     let dither = super::BAYER_4X4[(y % 4) as usize][(x % 4) as usize] / 16.0 - 0.5;
+                    // Frozen gradient arithmetic checks optimized shading byte for byte.
                     let blue = (9.0 - 3.0 * vertical + lift + dither).round();
                     let green = (9.0 - 3.0 * vertical + lift + dither).round();
                     let red = (9.0 - 3.0 * vertical + lift + dither).round();
@@ -476,6 +480,7 @@ mod tests {
                     if edge > 0.0 {
                         let top_weight = 1.0 - 0.65 * vertical;
                         let rim_alpha = (0.055 + 0.025 * hover) * top_weight;
+                        // Frozen scalar fixture retains the exact white rim-light endpoint.
                         super::blend_pixel(
                             &mut pixels[index..index + 4],
                             [255, 255, 255],
@@ -578,6 +583,7 @@ mod tests {
                     params.scale = scale;
                     params.attached = attached;
                     params.shadow_opacity = shadow_opacity;
+                    // Asymmetric fixture channels expose color-order bugs in the renderer.
                     params.accent = [31, 203, 117];
                     render_frame_with_margin(&mut actual, size, params);
                     reference_frame(&mut expected, size, params);
@@ -629,6 +635,7 @@ mod tests {
                         scale: 1.5,
                         shadow_opacity: 0.22,
                         hover,
+                        // A second asymmetric fixture exercises clipping and blend rounding.
                         accent: [149, 19, 251],
                     };
                     let mut actual = vec![91; size.0 as usize * size.1 as usize * 4];

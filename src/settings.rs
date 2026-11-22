@@ -629,8 +629,8 @@ mod tests {
 
     #[test]
     fn accent_presets_map_to_bgra() {
-        assert_eq!(AccentPreset::Ice.bgra(), [245, 200, 169]);
-        assert_eq!(AccentPreset::Amber.bgra(), [168, 201, 246]);
-        assert_eq!(AccentPreset::Mint.bgra(), [200, 232, 167]);
+        assert_eq!(AccentPreset::Ice.bgra(), crate::theme::ICE);
+        assert_eq!(AccentPreset::Amber.bgra(), crate::theme::AMBER);
+        assert_eq!(AccentPreset::Mint.bgra(), crate::theme::MINT);
     }
 }
