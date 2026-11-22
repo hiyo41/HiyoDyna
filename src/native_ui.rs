@@ -717,7 +717,7 @@ pub(crate) fn button(c: &mut Canvas<'_>, label: &str, style: ButtonStyle) {
     } else if style.selected {
         BACKGROUND
     } else if style.destructive {
-        [154, 164, 244]
+        crate::theme::DANGER
     } else {
         WHITE
     };
@@ -1157,8 +1157,8 @@ mod notices {
                 WM_ERASEBKGND => 1,
                 WM_CTLCOLORSTATIC | WM_CTLCOLOREDIT => {
                     let dc = wparam as HDC;
-                    SetTextColor(dc, 0x00f8f8f8);
-                    SetBkColor(dc, 0x00080808);
+                    SetTextColor(dc, crate::theme::colorref(crate::theme::TEXT));
+                    SetBkColor(dc, crate::theme::colorref(BACKGROUND));
                     (*ptr).brush as isize
                 }
                 WM_PAINT => {
@@ -1329,7 +1329,7 @@ mod notices {
                     message: copy,
                     painter: RefCell::new(painter),
                     font: Cell::new(null_mut()),
-                    brush: CreateSolidBrush(0x00080808),
+                    brush: CreateSolidBrush(crate::theme::colorref(BACKGROUND)),
                 })) as isize,
             );
             if crate::window_chrome::install(hwnd, false, false).is_err() {
@@ -1427,6 +1427,55 @@ mod notices {
             }
         }
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn notice_control_colors_use_the_shared_palette() {
+            unsafe {
+                // A hidden host provides HWND storage without opening a notice or taking focus.
+                let hwnd = CreateWindowExW(
+                    0,
+                    wide("STATIC").as_ptr(),
+                    null(),
+                    WS_POPUP,
+                    0,
+                    0,
+                    1,
+                    1,
+                    null_mut(),
+                    null_mut(),
+                    GetModuleHandleW(null()),
+                    null(),
+                );
+                assert!(!hwnd.is_null());
+                let notice = Notice {
+                    title: String::new(),
+                    message: NoticeCopy {
+                        template: String::new(),
+                        values: Vec::new(),
+                    },
+                    painter: RefCell::new(Painter::new(1.0).unwrap()),
+                    font: Cell::new(null_mut()),
+                    brush: null_mut(),
+                };
+                let surface = WindowSurface::new().unwrap();
+                SetWindowLongPtrW(hwnd, GWLP_USERDATA, &notice as *const Notice as isize);
+                let colors = [WM_CTLCOLORSTATIC, WM_CTLCOLOREDIT].map(|message| {
+                    proc(hwnd, message, surface.dc as usize, 0);
+                    (GetTextColor(surface.dc), GetBkColor(surface.dc))
+                });
+                SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+                DestroyWindow(hwnd);
+                for (text, background) in colors {
+                    assert_eq!(text, crate::theme::colorref(crate::theme::TEXT));
+                    assert_eq!(background, crate::theme::colorref(crate::theme::BG));
+                }
+            }
+        }
+    }
 }
 
 pub(crate) use notices::{
@@ -1436,6 +1485,8 @@ pub(crate) use notices::{
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Fixed BGRA fixtures below independently check premultiplied blending, opacity and channel order.
 
     fn raster(scale: f32, draw: impl FnOnce(&mut Canvas<'_>)) -> (Vec<u8>, (u32, u32)) {
         let size = ((160.0 * scale) as u32, (100.0 * scale) as u32);
@@ -1461,6 +1512,52 @@ mod tests {
                     "ink outside bounds at ({x}, {y}), scale {scale}"
                 );
                 assert!(pixel[..3].iter().all(|channel| *channel <= pixel[3]));
+            }
+        }
+    }
+
+    #[test]
+    fn destructive_button_uses_the_shared_danger_text_color() {
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let (pixels, _) = raster(scale, |c| {
+                button(
+                    c,
+                    "Delete",
+                    ButtonStyle {
+                        destructive: true,
+                        ..Default::default()
+                    },
+                )
+            });
+            assert!(
+                pixels
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .any(|pixel| pixel[..3] == crate::theme::DANGER && pixel[3] == 255),
+                "destructive text must use DANGER at {scale}x"
+            );
+            for (selected, enabled) in [(true, true), (false, false)] {
+                let draw = |destructive| {
+                    raster(scale, |c| {
+                        button(
+                            c,
+                            "Delete",
+                            ButtonStyle {
+                                selected,
+                                enabled,
+                                destructive,
+                                ..Default::default()
+                            },
+                        )
+                    })
+                };
+                let (destructive, _) = draw(true);
+                let (ordinary, _) = draw(false);
+                assert_eq!(
+                    destructive, ordinary,
+                    "selection and disabled colors take precedence"
+                );
             }
         }
     }

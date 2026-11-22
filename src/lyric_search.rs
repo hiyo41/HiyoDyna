@@ -1793,13 +1793,15 @@ mod native {
                     let on_card =
                         field || matches!(GetDlgCtrlID(lparam as HWND), TITLE_LABEL | ARTIST_LABEL);
                     let color = if on_card { SURFACE } else { BACKGROUND };
-                    SetBkColor(
+                    SetBkColor(dc, crate::theme::colorref(color));
+                    SetTextColor(
                         dc,
-                        u32::from(color[2])
-                            | (u32::from(color[1]) << 8)
-                            | (u32::from(color[0]) << 16),
+                        crate::theme::colorref(if field {
+                            crate::theme::TEXT
+                        } else {
+                            crate::theme::MUTED
+                        }),
                     );
-                    SetTextColor(dc, if field { 0x00f5f6f8 } else { 0x009297a0 });
                     access(hwnd, |state| {
                         if on_card {
                             state.field_brush
@@ -2097,9 +2099,6 @@ mod native {
                 DestroyWindow(hwnd);
                 return None;
             };
-            let colorref = |color: [u8; 3]| {
-                u32::from(color[2]) | (u32::from(color[1]) << 8) | (u32::from(color[0]) << 16)
-            };
             let state = Box::new(RefCell::new(State {
                 owner,
                 session: Session::new(target(snapshot)),
@@ -2129,8 +2128,8 @@ mod native {
                 status: String::new(),
                 status_source: String::new(),
                 status_count: None,
-                brush: CreateSolidBrush(colorref(BACKGROUND)),
-                field_brush: CreateSolidBrush(colorref(SURFACE)),
+                brush: CreateSolidBrush(crate::theme::colorref(BACKGROUND)),
+                field_brush: CreateSolidBrush(crate::theme::colorref(SURFACE)),
                 accent: crate::settings::Settings::load().accent_bgra(),
                 focus: null_mut(),
                 results_scroll: SmoothScroll::default(),
@@ -2431,6 +2430,24 @@ mod native {
                     SelectObject(self.dc, self.previous);
                     DeleteObject(self.bitmap);
                     DeleteDC(self.dc);
+                }
+            }
+        }
+
+        #[test]
+        fn native_control_colors_use_the_shared_palette() {
+            use crate::theme;
+            unsafe {
+                let raster = NativeRaster::new((1, 1));
+                for (message, text, background) in [
+                    (WM_CTLCOLOREDIT, theme::TEXT, theme::SURFACE),
+                    (WM_CTLCOLORSTATIC, theme::MUTED, theme::BG),
+                    (WM_CTLCOLORLISTBOX, theme::MUTED, theme::BG),
+                ] {
+                    // Color messages only need a memory DC; no search window or media target is opened.
+                    proc(null_mut(), message, raster.dc as usize, 0);
+                    assert_eq!(GetTextColor(raster.dc), theme::colorref(text));
+                    assert_eq!(GetBkColor(raster.dc), theme::colorref(background));
                 }
             }
         }
@@ -2890,6 +2907,7 @@ mod native {
                         &mut Canvas::new(&mut pixels, size, painter),
                         &SearchResult::fixture("A song title", "Artist"),
                         ButtonStyle {
+                            // Fixed accent fixture isolates selection/focus raster changes from the theme.
                             accent: [220, 190, 130],
                             selected,
                             focused,
@@ -2995,6 +3013,7 @@ mod native {
                     status: String::new(),
                     status_source: String::new(),
                     status_count: None,
+                    // Black brushes and a fixed accent isolate the hidden viewport fixture from theme changes.
                     brush: CreateSolidBrush(0),
                     field_brush: CreateSolidBrush(0),
                     accent: [220, 190, 130],
