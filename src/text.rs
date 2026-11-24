@@ -1,4 +1,4 @@
-use std::mem::size_of;
+use std::mem::{MaybeUninit, size_of};
 use std::path::PathBuf;
 use std::ptr::{null, null_mut};
 
@@ -965,14 +965,19 @@ unsafe fn create_scratch_bitmap(dc: HDC, size: (u32, u32)) -> Option<(HBITMAP, *
         },
         ..Default::default()
     };
-    let mut bits = null_mut();
-    // SAFETY: info describes a valid 32-bit top-down DIB owned by the caller.
-    let bitmap = unsafe { CreateDIBSection(dc, &info, DIB_RGB_COLORS, &mut bits, null_mut(), 0) };
-    if bitmap.is_null() || bits.is_null() {
-        if !bitmap.is_null() {
-            // SAFETY: bitmap was just created and is not selected anywhere.
-            unsafe { DeleteObject(bitmap) };
-        }
+    let mut bits = MaybeUninit::uninit();
+    // SAFETY: info describes a valid 32-bit top-down DIB. On success, the call
+    // initializes `bits` with a pointer into the DIB.
+    let bitmap =
+        unsafe { CreateDIBSection(dc, &info, DIB_RGB_COLORS, bits.as_mut_ptr(), null_mut(), 0) };
+    if bitmap.is_null() {
+        return None;
+    }
+    // SAFETY: A successful CreateDIBSection call initializes the out parameter.
+    let bits = unsafe { bits.assume_init() };
+    if bits.is_null() {
+        // SAFETY: bitmap was just created and is not selected anywhere.
+        unsafe { DeleteObject(bitmap) };
         return None;
     }
     Some((bitmap, bits.cast()))

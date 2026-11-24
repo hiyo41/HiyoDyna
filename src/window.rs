@@ -50,7 +50,6 @@ const TIMER_ID_HOVER_GRACE: usize = 2;
 const TIMER_ID_HOVER_RECHECK: usize = 3;
 const TIMER_ID_CLOCK: usize = 4;
 const TIMER_ID_UPDATE: usize = 6;
-const ANIMATION_TIMER_MILLISECONDS: u32 = 16;
 const ANIMATION_TIMER_RESOLUTION_MILLISECONDS: u32 = 1;
 const CLOCK_TIMER_MILLISECONDS: u32 = 1000;
 const TOP_MARGIN: f32 = 0.0;
@@ -63,6 +62,7 @@ const WM_APP_MENU_CLOSED: u32 = WM_APP + 7;
 const HOTKEY_PASSTHROUGH: i32 = 73;
 
 static ANIMATION_FRAME_PENDING: AtomicBool = AtomicBool::new(false);
+static ANIMATION_FRAME_REQUESTED: AtomicBool = AtomicBool::new(false);
 static NEXT_ANIMATION_TIMER_GENERATION: AtomicUsize = AtomicUsize::new(0x1000);
 static ACTIVE_ANIMATION_TIMER_GENERATION: AtomicUsize = AtomicUsize::new(0);
 
@@ -242,6 +242,7 @@ fn run_loop(hwnd: HWND) -> Result<ExitAction, String> {
 
     let mut last_frame = Instant::now();
     let mut animation_timer = AnimationTimer::new(hwnd);
+    animation_timer.set_unlimited(settings.unlimited_fps)?;
     let trace_frames = std::env::var_os("HIYODYNA_TRACE_FRAMES").is_some();
     let mut trace_first_frame = None;
     let mut trace_last_frame = None;
@@ -316,6 +317,7 @@ fn run_loop(hwnd: HWND) -> Result<ExitAction, String> {
                         command,
                         &mut settings,
                         &mut animation,
+                        &mut animation_timer,
                         &mut surface,
                         tray.as_mut(),
                         scale,
@@ -364,6 +366,7 @@ fn run_loop(hwnd: HWND) -> Result<ExitAction, String> {
                         tray.as_mut(),
                         &mut settings,
                         &mut animation,
+                        &mut animation_timer,
                         &mut surface,
                         scale,
                         &mut position,
@@ -429,6 +432,7 @@ fn run_loop(hwnd: HWND) -> Result<ExitAction, String> {
                                     TrayCommand::CompactLyrics(!settings.compact_lyrics),
                                     &mut settings,
                                     &mut animation,
+                                    &mut animation_timer,
                                     &mut surface,
                                     tray.as_mut(),
                                     scale,
@@ -585,6 +589,7 @@ fn run_loop(hwnd: HWND) -> Result<ExitAction, String> {
                         TrayCommand::CompactLyrics(!settings.compact_lyrics),
                         &mut settings,
                         &mut animation,
+                        &mut animation_timer,
                         &mut surface,
                         tray.as_mut(),
                         scale,
@@ -748,9 +753,11 @@ fn run_loop(hwnd: HWND) -> Result<ExitAction, String> {
                 if message.hwnd == hwnd
                     && animation_timer.is_wakeup(message_id, message.wParam) =>
             {
-                // Keep the wakeup pending while drawing so the timer can't queue a stale frame.
+                // Keep the wakeup pending while drawing; a tick that lands
+                // during the frame requests exactly one follow-up frame.
                 let posted_frame = message_id == WM_APP_ANIMATION_FRAME;
                 let now = Instant::now();
+                let mut presented = false;
                 if animation_timer.is_active()
                     && let Some(elapsed) = take_animation_frame(now, last_frame)
                 {
@@ -785,6 +792,7 @@ fn run_loop(hwnd: HWND) -> Result<ExitAction, String> {
                         surface.draw(animation.current, scale, &settings, &clock, animation.hover);
                         let present_start = Instant::now();
                         surface.present(hwnd, position)?;
+                        presented = true;
                         present_start
                     };
                     if trace_frames {
@@ -798,6 +806,9 @@ fn run_loop(hwnd: HWND) -> Result<ExitAction, String> {
                         trace_total_present_ms +=
                             Instant::now().duration_since(present_start).as_secs_f64() * 1000.0;
                     }
+                    if presented && !animation_timer.unlimited_fps() {
+                        crate::display::wait_for_vblank();
+                    }
                     if !surface.needs_animation(moving, animation.current.progress() > 0.9) {
                         animation_timer.stop();
                         if trace_frames && trace_frame_count > 0 {
@@ -806,7 +817,10 @@ fn run_loop(hwnd: HWND) -> Result<ExitAction, String> {
                                 .map(|(first, last)| last.saturating_duration_since(first))
                                 .unwrap_or_default();
                             eprintln!(
-                                "animation elapsed_fps={:.1} wall_fps={} frames={} avg_dt_ms={:.2} max_dt_ms={:.2} avg_draw_ms={:.2} max_draw_ms={:.2} avg_present_ms={:.2} max_present_ms={:.2} frame_span_ms={:.2}",
+                                "animation refresh={}Hz interval={}ms unlimited={} elapsed_fps={:.1} wall_fps={} frames={} avg_dt_ms={:.2} max_dt_ms={:.2} avg_draw_ms={:.2} max_draw_ms={:.2} avg_present_ms={:.2} max_present_ms={:.2} frame_span_ms={:.2}",
+                                animation_timer.refresh_hz(),
+                                animation_timer.interval_millis(),
+                                animation_timer.unlimited_fps(),
                                 1000.0 / (trace_elapsed_ms / f64::from(trace_frame_count)),
                                 format_frames_per_second(trace_frame_count, wall_duration),
                                 trace_frame_count,
@@ -831,7 +845,25 @@ fn run_loop(hwnd: HWND) -> Result<ExitAction, String> {
                     }
                 }
                 if posted_frame {
-                    ANIMATION_FRAME_PENDING.store(false, Ordering::Release);
+                    let follow_up = finish_animation_frame(
+                        &ANIMATION_FRAME_PENDING,
+                        &ANIMATION_FRAME_REQUESTED,
+                    );
+                    if follow_up {
+                        if animation_timer.is_active() {
+                            // A timer tick landed while this frame was drawing.
+                            // Queue the follow-up now so the next compositor
+                            // refresh is not missed.
+                            let generation = animation_timer.generation;
+                            if unsafe { PostMessageW(hwnd, WM_APP_ANIMATION_FRAME, generation, 0) }
+                                == 0
+                            {
+                                ANIMATION_FRAME_PENDING.store(false, Ordering::Release);
+                            }
+                        } else {
+                            ANIMATION_FRAME_PENDING.store(false, Ordering::Release);
+                        }
+                    }
                 }
             }
             WM_TIMER if message.hwnd == hwnd && message.wParam == TIMER_ID_HOVER_RECHECK => {
@@ -971,6 +1003,8 @@ fn run_loop(hwnd: HWND) -> Result<ExitAction, String> {
                 surface.music_height = player_shape(hwnd, scale).height;
                 animation.target =
                     surface.display_target(animation.target, &settings, player_shape(hwnd, scale));
+                // The panel may have changed to a different refresh rate.
+                animation_timer.stop();
                 last_frame = Instant::now();
                 animation_timer.start()?;
                 position = primary_position(
@@ -1046,8 +1080,9 @@ unsafe extern "system" fn window_proc(
         }
         WM_APP_ANIMATION_FRAME => {
             // Modal loops (menus, message boxes) dispatch posted frames here instead of
-            // through the main loop, so the pending flag must be released here too.
+            // through the main loop, so the frame flags must be released here too.
             ANIMATION_FRAME_PENDING.store(false, Ordering::Release);
+            ANIMATION_FRAME_REQUESTED.store(false, Ordering::Release);
             0
         }
         crate::update::WM_APP_UPDATE_READY => 0,
@@ -2000,8 +2035,23 @@ fn apply_hover_command(
     Ok(())
 }
 
-fn queue_animation_frame(pending: &AtomicBool) -> bool {
-    !pending.swap(true, Ordering::AcqRel)
+fn queue_animation_frame(pending: &AtomicBool, requested: &AtomicBool) -> bool {
+    if pending.swap(true, Ordering::AcqRel) {
+        // A frame is already queued or drawing. Remember that another tick
+        // landed so the handler can queue exactly one follow-up frame.
+        requested.store(true, Ordering::Release);
+        false
+    } else {
+        true
+    }
+}
+
+fn finish_animation_frame(pending: &AtomicBool, requested: &AtomicBool) -> bool {
+    pending.store(false, Ordering::Release);
+    requested.swap(false, Ordering::AcqRel)
+        && pending
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
 }
 
 unsafe extern "system" fn animation_timer_callback(
@@ -2015,7 +2065,7 @@ unsafe extern "system" fn animation_timer_callback(
     if generation == 0 {
         return;
     }
-    if queue_animation_frame(&ANIMATION_FRAME_PENDING) {
+    if queue_animation_frame(&ANIMATION_FRAME_PENDING, &ANIMATION_FRAME_REQUESTED) {
         let hwnd = user as HWND;
         if unsafe { PostMessageW(hwnd, WM_APP_ANIMATION_FRAME, generation, 0) } == 0 {
             ANIMATION_FRAME_PENDING.store(false, Ordering::Release);
@@ -2027,6 +2077,10 @@ struct AnimationTimer {
     hwnd: HWND,
     generation: usize,
     source: Option<AnimationTimerSource>,
+    refresh_hz: u32,
+    interval_millis: u32,
+    period_active: bool,
+    unlimited_fps: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -2041,6 +2095,12 @@ impl AnimationTimer {
             hwnd,
             generation: 0,
             source: None,
+            refresh_hz: crate::display::FALLBACK_REFRESH_HZ,
+            interval_millis: crate::display::timer_interval_millis(
+                crate::display::FALLBACK_REFRESH_HZ,
+            ),
+            period_active: false,
+            unlimited_fps: false,
         }
     }
 
@@ -2052,20 +2112,58 @@ impl AnimationTimer {
         is_animation_wakeup(self.source, self.generation, message_id, wparam)
     }
 
+    fn refresh_hz(&self) -> u32 {
+        self.refresh_hz
+    }
+
+    fn interval_millis(&self) -> u32 {
+        self.interval_millis
+    }
+
+    fn unlimited_fps(&self) -> bool {
+        self.unlimited_fps
+    }
+
+    fn set_unlimited(&mut self, unlimited: bool) -> Result<(), String> {
+        if self.unlimited_fps == unlimited {
+            return Ok(());
+        }
+        self.unlimited_fps = unlimited;
+        if self.is_active() {
+            self.stop();
+            self.start()?;
+        }
+        Ok(())
+    }
+
     fn start(&mut self) -> Result<(), String> {
         if self.is_active() {
             return Ok(());
         }
+
+        // Re-query on every start so a display mode change cannot leave the
+        // animation locked to a previous panel rate.
+        self.refresh_hz = crate::display::refresh_hz(self.hwnd);
+        self.interval_millis = if self.unlimited_fps {
+            1
+        } else {
+            crate::display::timer_interval_millis(self.refresh_hz)
+        };
+        // A tick racing with the previous stop can leave the flags set; a new
+        // animation must be able to post its first frame.
+        ANIMATION_FRAME_PENDING.store(false, Ordering::Release);
+        ANIMATION_FRAME_REQUESTED.store(false, Ordering::Release);
 
         let generation = NEXT_ANIMATION_TIMER_GENERATION
             .fetch_add(1, Ordering::Relaxed)
             .max(1);
         self.generation = generation;
         if unsafe { timeBeginPeriod(ANIMATION_TIMER_RESOLUTION_MILLISECONDS) } == 0 {
+            self.period_active = true;
             ACTIVE_ANIMATION_TIMER_GENERATION.store(generation, Ordering::Release);
             let timer_id = unsafe {
                 timeSetEvent(
-                    ANIMATION_TIMER_MILLISECONDS,
+                    self.interval_millis,
                     ANIMATION_TIMER_RESOLUTION_MILLISECONDS,
                     Some(animation_timer_callback),
                     self.hwnd as usize,
@@ -2077,42 +2175,40 @@ impl AnimationTimer {
                 return Ok(());
             }
             ACTIVE_ANIMATION_TIMER_GENERATION.store(0, Ordering::Release);
-            unsafe { timeEndPeriod(ANIMATION_TIMER_RESOLUTION_MILLISECONDS) };
         }
 
         eprintln!("HiyoDyna high-resolution timer unavailable; using WM_TIMER fallback");
-        if unsafe {
-            SetTimer(
-                self.hwnd,
-                self.generation,
-                ANIMATION_TIMER_MILLISECONDS,
-                None,
-            )
-        } == 0
-        {
+        if unsafe { SetTimer(self.hwnd, self.generation, self.interval_millis, None) } == 0 {
             self.generation = 0;
+            self.end_period();
             return Err(last_error("SetTimer"));
         }
         self.source = Some(AnimationTimerSource::Window);
         Ok(())
     }
 
-    fn stop(&mut self) {
-        let Some(source) = self.source.take() else {
-            return;
-        };
-
-        match source {
-            AnimationTimerSource::Multimedia(timer_id) => unsafe {
-                timeKillEvent(timer_id);
-                timeEndPeriod(ANIMATION_TIMER_RESOLUTION_MILLISECONDS);
-            },
-            AnimationTimerSource::Window => unsafe {
-                KillTimer(self.hwnd, self.generation);
-            },
+    fn end_period(&mut self) {
+        if self.period_active {
+            unsafe { timeEndPeriod(ANIMATION_TIMER_RESOLUTION_MILLISECONDS) };
+            self.period_active = false;
         }
+    }
+
+    fn stop(&mut self) {
+        if let Some(source) = self.source.take() {
+            match source {
+                AnimationTimerSource::Multimedia(timer_id) => unsafe {
+                    timeKillEvent(timer_id);
+                },
+                AnimationTimerSource::Window => unsafe {
+                    KillTimer(self.hwnd, self.generation);
+                },
+            }
+        }
+        self.end_period();
         ACTIVE_ANIMATION_TIMER_GENERATION.store(0, Ordering::Release);
         ANIMATION_FRAME_PENDING.store(false, Ordering::Release);
+        ANIMATION_FRAME_REQUESTED.store(false, Ordering::Release);
         self.generation = 0;
     }
 }
@@ -2185,6 +2281,7 @@ fn apply_quick_action(
     tray: Option<&mut Tray>,
     settings: &mut Settings,
     animation: &mut Animation,
+    animation_timer: &mut AnimationTimer,
     surface: &mut Surface,
     scale: f32,
     position: &mut POINT,
@@ -2218,6 +2315,7 @@ fn apply_quick_action(
                 TrayCommand::Exit,
                 settings,
                 animation,
+                animation_timer,
                 surface,
                 tray,
                 scale,
@@ -2238,6 +2336,7 @@ fn apply_tray_command(
     command: TrayCommand,
     settings: &mut Settings,
     animation: &mut Animation,
+    animation_timer: &mut AnimationTimer,
     surface: &mut Surface,
     mut tray: Option<&mut Tray>,
     scale: f32,
@@ -2297,6 +2396,7 @@ fn apply_tray_command(
         TrayCommand::Clock(format) => settings.clock = format,
         TrayCommand::Accent(accent) => settings.accent = accent,
         TrayCommand::ShowSeconds(enabled) => settings.show_seconds = enabled,
+        TrayCommand::UnlimitedFps(enabled) => settings.unlimited_fps = enabled,
         TrayCommand::ToggleAutostart => {
             if let Err(error) = crate::autostart::toggle() {
                 eprintln!("HiyoDyna autostart: {error}");
@@ -2377,6 +2477,7 @@ fn apply_tray_command(
     {
         tray.set_accent(settings.accent);
     }
+    animation_timer.set_unlimited(settings.unlimited_fps)?;
     animation.set_tuning(settings.tuning());
     if animation.target.height <= crate::animation::COMPACT.height + 1.0 {
         animation.target = surface.compact_shape(settings);
@@ -3595,6 +3696,7 @@ mod tests {
             surface.shortcut_available = true;
             crate::preferences::show(owner, &settings, true).unwrap();
             let mut animation = Animation::new_with_tuning(settings.tuning());
+            let mut animation_timer = AnimationTimer::new(owner);
             let mut position = POINT::default();
             let mut exit_action = ExitAction::Exit;
             apply_tray_command(
@@ -3602,6 +3704,7 @@ mod tests {
                 TrayCommand::Reset,
                 &mut settings,
                 &mut animation,
+                &mut animation_timer,
                 &mut surface,
                 None,
                 1.0,
@@ -4272,13 +4375,15 @@ mod tests {
     #[test]
     fn modal_dispatch_clears_the_pending_animation_frame() {
         super::ANIMATION_FRAME_PENDING.store(true, Ordering::Release);
+        super::ANIMATION_FRAME_REQUESTED.store(true, Ordering::Release);
 
-        // SAFETY: this branch only clears an atomic and does not touch the null HWND.
+        // SAFETY: this branch only clears atomics and does not touch the null HWND.
         unsafe {
             super::window_proc(std::ptr::null_mut(), super::WM_APP_ANIMATION_FRAME, 0, 0);
         }
 
         assert!(!super::ANIMATION_FRAME_PENDING.load(Ordering::Acquire));
+        assert!(!super::ANIMATION_FRAME_REQUESTED.load(Ordering::Acquire));
     }
 
     #[test]
@@ -4314,25 +4419,29 @@ mod tests {
     }
 
     #[test]
-    fn animation_timer_delivers_every_sixteen_millisecond_tick() {
+    fn animation_timer_follows_the_display_interval() {
         use std::time::{Duration, Instant};
 
-        let start = Instant::now();
-        assert_eq!(super::ANIMATION_TIMER_MILLISECONDS, 16);
-        let mut last_frame = start;
-        let mut frames = 0;
-        let mut total_elapsed = 0.0_f32;
-        for ms in (16..=1000).step_by(16) {
-            let now = start + Duration::from_millis(ms);
-            let elapsed = super::take_animation_frame(now, last_frame)
-                .expect("each timer tick must produce a frame");
-            frames += 1;
-            total_elapsed += elapsed;
-            last_frame = now;
-        }
+        for (interval_ms, expected_frames) in [(16_u64, 62), (7, 142)] {
+            let start = Instant::now();
+            let mut last_frame = start;
+            let mut frames = 0;
+            let mut total_elapsed = 0.0_f32;
+            for ms in (interval_ms..=1000).step_by(interval_ms as usize) {
+                let now = start + Duration::from_millis(ms);
+                let elapsed = super::take_animation_frame(now, last_frame)
+                    .expect("each timer tick must produce a frame");
+                frames += 1;
+                total_elapsed += elapsed;
+                last_frame = now;
+            }
 
-        assert_eq!(frames, 62);
-        assert!((0.98..=1.0).contains(&total_elapsed));
+            assert_eq!(frames, expected_frames, "{interval_ms} ms ticks");
+            assert!(
+                (0.9..=1.01).contains(&total_elapsed),
+                "{interval_ms} ms ticks advanced {total_elapsed} s"
+            );
+        }
     }
 
     #[test]
@@ -4386,14 +4495,30 @@ mod tests {
     }
 
     #[test]
+    fn unlimited_fps_can_be_toggled_while_idle() {
+        let mut timer = super::AnimationTimer::new(std::ptr::null_mut());
+        assert!(!timer.unlimited_fps());
+        timer.set_unlimited(true).unwrap();
+        assert!(timer.unlimited_fps());
+        timer.set_unlimited(true).unwrap();
+        assert!(timer.unlimited_fps());
+        timer.set_unlimited(false).unwrap();
+        assert!(!timer.unlimited_fps());
+    }
+
+    #[test]
     fn animation_timer_coalesces_wakeups_while_the_ui_is_busy() {
         use std::sync::atomic::AtomicBool;
 
         let pending = AtomicBool::new(false);
-        assert!(super::queue_animation_frame(&pending));
-        assert!(!super::queue_animation_frame(&pending));
-        pending.store(false, std::sync::atomic::Ordering::Release);
-        assert!(super::queue_animation_frame(&pending));
+        let requested = AtomicBool::new(false);
+        assert!(super::queue_animation_frame(&pending, &requested));
+        assert!(!super::queue_animation_frame(&pending, &requested));
+        assert!(requested.load(std::sync::atomic::Ordering::Acquire));
+        assert!(super::finish_animation_frame(&pending, &requested));
+        assert!(!requested.load(std::sync::atomic::Ordering::Acquire));
+        assert!(!super::finish_animation_frame(&pending, &requested));
+        assert!(super::queue_animation_frame(&pending, &requested));
     }
 
     #[test]

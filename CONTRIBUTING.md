@@ -14,7 +14,7 @@ Include the Windows version, steps to reproduce, expected and actual behavior, a
 
 ## Development
 
-Requirements and build commands are in the [README](README.md). Run `.\scripts\check.ps1` before committing; CI runs the same formatting, Clippy, and build checks on Windows.
+Requirements and build commands are in the [README](README.md). Run `.\scripts\check.ps1` before committing; it runs formatting, Clippy, tests, and a locked build. CI runs the same Rust checks on Windows plus the site tests, type check, and build on Ubuntu.
 
 The app is Windows-only: Win32 + GDI, with no webview or JavaScript. Keep changes native and avoid new dependencies unless they are clearly justified.
 

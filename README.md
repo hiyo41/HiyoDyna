@@ -11,6 +11,8 @@ Website: [hiyo41.github.io/HiyoDyna](https://hiyo41.github.io/HiyoDyna/)
 ## Current features
 
 - Spring-animated capsule that expands on hover and collapses after a short delay
+- Frame pacing follows the monitor refresh rate (60-240 Hz) instead of a fixed 60 fps cap
+- Optional unlimited frame rate for uncapped rendering
 - Live clock with 24-hour or 12-hour format, smaller seconds, and an accent indicator
 - Bundled Inter typography, concave shoulders at the screen edge, rounded lower corners, and a soft shadow
 - Expanded panel adds the weekday and date above the larger time

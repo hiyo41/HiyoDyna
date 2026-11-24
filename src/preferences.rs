@@ -97,7 +97,7 @@ impl SettingsLayout {
         let top = section.top();
         let bottom = SettingsSection::ALL
             .get(index + 1)
-            .map_or(1275.0, |next| next.top());
+            .map_or(1312.0, |next| next.top());
         Rect::new(
             self.content.x,
             top * 1.5,
@@ -161,7 +161,7 @@ impl SettingsSection {
             Self::MusicLyrics => &[462.0, 499.0, 539.0, 578.0],
             Self::Application => &[
                 658.0, 726.0, 763.0, 800.0, 837.0, 906.0, 976.0, 1013.0, 1050.0, 1110.0, 1155.0,
-                1195.0, 1235.0,
+                1195.0, 1235.0, 1272.0,
             ],
         }
     }
@@ -271,6 +271,7 @@ impl Control {
                 | TrayCommand::Language(_)
                 | TrayCommand::Update(_)
                 | TrayCommand::ToggleAutostart
+                | TrayCommand::UnlimitedFps(_)
         )
     }
     fn accessible_name(&self) -> String {
@@ -288,6 +289,7 @@ impl Control {
             TrayCommand::Language(_) => "Language",
             TrayCommand::Update(_) => "Update channel",
             TrayCommand::ToggleAutostart => "Start with Windows",
+            TrayCommand::UnlimitedFps(_) => "Unlimited FPS",
             TrayCommand::LyricOffset(_) => "Lyrics timing offset",
             _ => "",
         };
@@ -535,6 +537,7 @@ fn button_raster(state: &mut State, item: &DRAWITEMSTRUCT, enabled: bool) -> std
                     | TrayCommand::ShowSeconds(_)
                     | TrayCommand::CompactLyrics(_)
                     | TrayCommand::ToggleAutostart
+                    | TrayCommand::UnlimitedFps(_)
             )
         }),
     };
@@ -739,7 +742,7 @@ fn draw_settings_content(c: &mut Canvas<'_>) {
         (117.0, 109.0, "Motion", "Pace & spring"),
         (234.0, 186.0, "Clock & position", "Time & placement"),
         (428.0, 191.0, "Music & lyrics", "Timing & display"),
-        (627.0, 640.0, "Application", "Startup & updates"),
+        (627.0, 677.0, "Application", "Startup & updates"),
     ] {
         crate::native_ui::card(
             c,
@@ -779,8 +782,9 @@ fn draw_settings_content(c: &mut Canvas<'_>) {
         (702.0, "Shortcut"),
         (882.0, "Language"),
         (952.0, "Updates"),
+        (1272.0, "Unlimited FPS"),
     ] {
-        let width = if matches!(y, 539.0 | 658.0) {
+        let width = if matches!(y, 539.0 | 658.0 | 1272.0) {
             207.0
         } else if matches!(y, 702.0 | 882.0 | 952.0) {
             287.0
@@ -1107,6 +1111,15 @@ fn controls_with_autostart(settings: &Settings, autostart: bool) -> Vec<Control>
             .replace("{shortcut}", &settings.shortcut.label()),
         command: TrayCommand::TogglePassthrough,
         selected: false,
+        hwnd: null_mut(),
+        action: None,
+    });
+    out.push(Control {
+        section: SettingsSection::Application,
+        rect: Rect::new(242.0, 1272.0, 77.0, 29.0),
+        label: tr(if settings.unlimited_fps { "On" } else { "Off" }).into(),
+        command: TrayCommand::UnlimitedFps(!settings.unlimited_fps),
+        selected: settings.unlimited_fps,
         hwnd: null_mut(),
         action: None,
     });
@@ -3012,7 +3025,7 @@ pub(crate) mod tests {
                 .any(|c| c.action == Some(LocalAction::CheckUpdate))
         );
         for control in controls {
-            assert!(control.rect.y >= 0.0 && control.rect.y + control.rect.h <= 1275.0);
+            assert!(control.rect.y >= 0.0 && control.rect.y + control.rect.h <= 1312.0);
         }
     }
 
@@ -4398,6 +4411,19 @@ pub(crate) mod tests {
         }
         popup.paint();
         assert_eq!(popup.pixels().len(), 720 * 800 * 4);
+    }
+
+    #[test]
+    fn unlimited_fps_control_is_inside_the_application_card() {
+        let settings = Settings::default();
+        let control = controls(&settings)
+            .into_iter()
+            .find(|control| control.command == TrayCommand::UnlimitedFps(true))
+            .expect("unlimited FPS toggle");
+        assert_eq!(control.section, SettingsSection::Application);
+        assert_eq!(control.rect.y, 1272.0);
+        assert!(control.rect.y + control.rect.h <= 1304.0);
+        assert!(SettingsLayout::new(760.0, 680.0).content_height() >= 1312.0 * 1.5);
     }
 
     #[test]

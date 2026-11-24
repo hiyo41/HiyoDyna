@@ -37,6 +37,9 @@ pub(crate) enum CheckStatus {
     Error(String),
 }
 
+const BUILD_TAG: Option<&str> = option_env!("HIYODYNA_BUILD_TAG");
+const BUILD_PUBLISHED_AT: Option<&str> = option_env!("HIYODYNA_BUILD_PUBLISHED_AT");
+
 #[derive(Default)]
 struct BuildIdentity {
     tag: Option<String>,
@@ -45,24 +48,23 @@ struct BuildIdentity {
 
 impl BuildIdentity {
     fn from_metadata(text: &str) -> Self {
+        let published = json_string(text, "releasePublishedAt")
+            .and_then(|time| parse_rfc3339(&time))
+            .or_else(|| json_string(text, "installedAt").and_then(|time| parse_rfc3339(&time)));
         Self {
             tag: json_string(text, "releaseTag").filter(|tag| !tag.trim().is_empty()),
-            published: json_string(text, "releasePublishedAt")
-                .and_then(|time| parse_rfc3339(&time)),
+            published,
         }
     }
 
     fn current() -> Self {
         let embedded = Self {
-            tag: option_env!("HIYODYNA_RELEASE_TAG")
+            tag: BUILD_TAG
                 .filter(|tag| !tag.trim().is_empty())
                 .map(str::to_owned),
-            published: option_env!("HIYODYNA_RELEASE_PUBLISHED_AT").and_then(parse_rfc3339),
+            published: BUILD_PUBLISHED_AT.and_then(parse_rfc3339),
         };
-        if embedded.tag.is_some() || embedded.published.is_some() {
-            return embedded;
-        }
-        std::env::current_exe()
+        let metadata = std::env::current_exe()
             .ok()
             .and_then(|exe| {
                 let path = exe.parent()?.join("install.json");
@@ -72,7 +74,11 @@ impl BuildIdentity {
                 file.take(64 * 1024).read_to_string(&mut text).ok()?;
                 Some(Self::from_metadata(&text))
             })
-            .unwrap_or_default()
+            .unwrap_or_default();
+        Self {
+            tag: embedded.tag.or(metadata.tag),
+            published: embedded.published.or(metadata.published),
+        }
     }
 }
 
@@ -718,7 +724,7 @@ fn stage_should_apply(
         state.applied_tag.as_deref(),
         applied_time,
         installed_time_near(&paths.installed),
-        option_env!("HIYODyna_BUILD_TAG"),
+        BUILD_TAG,
     )
 }
 
@@ -1151,9 +1157,11 @@ pub(crate) fn cleanup_old_binary() {
 }
 
 pub(crate) fn applied_tag() -> Option<String> {
-    read_state()
-        .applied_tag
-        .or_else(|| option_env!("HIYODyna_BUILD_TAG").map(std::string::ToString::to_string))
+    read_state().applied_tag.or_else(|| {
+        BUILD_TAG
+            .filter(|tag| !tag.trim().is_empty())
+            .map(std::string::ToString::to_string)
+    })
 }
 
 pub(crate) fn log_path() -> String {
@@ -1223,7 +1231,7 @@ fn perform_check(channel: UpdateChannel) -> CheckOutcome {
         state.applied_tag.as_deref(),
         applied_time,
         installed_time_near(&exe),
-        option_env!("HIYODyna_BUILD_TAG"),
+        BUILD_TAG,
     ) {
         log(&format!(
             "{} is up to date ({})",
@@ -1378,6 +1386,54 @@ fn wide(text: &str) -> Vec<u16> {
 #[cfg(test)]
 mod tests {
     use crate::settings::UpdateChannel;
+
+    #[test]
+    fn build_identity_reads_release_metadata_and_accepts_install_time() {
+        let release = super::BuildIdentity::from_metadata(
+            r#"{"releaseTag":"v0.0.1-3","releasePublishedAt":"2026-11-19T09:00:00Z","installedAt":"2026-11-20T09:00:00Z"}"#,
+        );
+        assert_eq!(release.tag.as_deref(), Some("v0.0.1-3"));
+        assert_eq!(
+            release.published,
+            super::parse_rfc3339("2026-11-19T09:00:00Z")
+        );
+
+        let installed = super::BuildIdentity::from_metadata(
+            r#"{"installDir":"C:\\HiyoDyna","installedAt":"2026-11-19T15:26:51+07:00"}"#,
+        );
+        assert_eq!(installed.tag, None);
+        assert_eq!(
+            installed.published,
+            super::parse_rfc3339("2026-11-19T15:26:51+07:00")
+        );
+    }
+
+    #[test]
+    fn manual_update_session_uses_install_time_when_the_tag_is_unknown() {
+        let release = super::Release {
+            tag: "v0.0.1-3".into(),
+            published: "2026-11-19T09:00:00Z".into(),
+        };
+        let identity =
+            super::BuildIdentity::from_metadata(r#"{"installedAt":"2026-11-18T09:00:00Z"}"#);
+        assert!(matches!(
+            super::classify(Some(release), &identity),
+            super::CheckStatus::Available { .. }
+        ));
+    }
+
+    #[test]
+    fn release_workflow_sets_the_build_identity_variables() {
+        let workflow = include_str!("../.github/workflows/release.yml");
+        assert!(
+            workflow.contains("HIYODYNA_BUILD_TAG:"),
+            "release.yml must set HIYODYNA_BUILD_TAG"
+        );
+        assert!(
+            workflow.contains("HIYODYNA_BUILD_PUBLISHED_AT:"),
+            "release.yml must set HIYODYNA_BUILD_PUBLISHED_AT"
+        );
+    }
 
     #[test]
     fn manual_update_session_reports_a_missing_build_identity() {

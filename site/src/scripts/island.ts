@@ -366,7 +366,6 @@ export function initIslands(): void {
     });
 
     root.dataset.ready = 'true';
-    root.dataset.islandId = id;
     byId.set(id, controller);
   });
 }

@@ -2,6 +2,7 @@
 import '../styles/global.css';
 import mediumFont from '../assets/fonts/Inter-Medium.woff2?url';
 import displayFont from '../assets/fonts/InterDisplay-SemiBold.woff2?url';
+import { jsonLdHtml } from '../lib/jsonld';
 
 interface Props {
   title?: string;
@@ -70,7 +71,11 @@ const jsonLd = {
     <link rel="preload" href={mediumFont} as="font" type="font/woff2" crossorigin />
     <link rel="preload" href={displayFont} as="font" type="font/woff2" crossorigin />
 
-    <script type="application/ld+json" is:inline set:html={JSON.stringify(jsonLd)}></script>
+    <script
+      type="application/ld+json"
+      is:inline
+      set:html={jsonLdHtml(jsonLd)}
+    ></script>
 
     <slot name="head" />
   </head>

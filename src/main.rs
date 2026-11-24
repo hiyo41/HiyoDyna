@@ -15,6 +15,8 @@ mod compact;
 mod compact_glow;
 #[cfg(windows)]
 mod dark_scrollbar;
+#[cfg(any(windows, test))]
+mod display;
 #[cfg(windows)]
 mod fullscreen;
 #[cfg(any(windows, test))]

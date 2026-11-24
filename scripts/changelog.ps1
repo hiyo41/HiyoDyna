@@ -9,6 +9,11 @@ $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 
 $repo = if ($env:GITHUB_REPOSITORY) { $env:GITHUB_REPOSITORY } else { "hiyo41/HiyoDyna" }
+foreach ($ref in @($FromTag, $ToTag, $CompareTag)) {
+    if ($ref -and $ref -notmatch '^[A-Za-z0-9._/-]+$') {
+        throw "Invalid git ref: $ref"
+    }
+}
 $range = if ($FromTag) { "$FromTag..$ToTag" } else { $ToTag }
 
 $raw = git log $range --no-merges --pretty=format:"%h%x09%s"

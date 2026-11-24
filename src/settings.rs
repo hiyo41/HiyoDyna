@@ -67,6 +67,7 @@ pub(crate) struct Settings {
     pub clock: ClockFormat,
     pub accent: AccentPreset,
     pub show_seconds: bool,
+    pub unlimited_fps: bool,
     pub update: UpdateChannel,
     pub lyrics: LyricsMode,
     pub lyric_offset_ms: i32,
@@ -86,6 +87,7 @@ impl Default for Settings {
             clock: ClockFormat::TwentyFourHour,
             accent: AccentPreset::Ice,
             show_seconds: true,
+            unlimited_fps: false,
             update: UpdateChannel::Build,
             lyrics: LyricsMode::Auto,
             lyric_offset_ms: 0,
@@ -135,7 +137,7 @@ impl Settings {
             ..Self::default()
         };
 
-        for line in text.lines() {
+        for line in text.trim_start_matches('\u{feff}').lines() {
             let Some((key, value)) = line.split_once('=') else {
                 continue;
             };
@@ -182,6 +184,11 @@ impl Settings {
                     "off" => settings.show_seconds = false,
                     _ => {}
                 },
+                "unlimited_fps" => match value {
+                    "on" => settings.unlimited_fps = true,
+                    "off" => settings.unlimited_fps = false,
+                    _ => {}
+                },
                 "update" => {
                     if let Some(update) = UpdateChannel::parse(value) {
                         settings.update = update;
@@ -222,7 +229,7 @@ impl Settings {
 
     pub fn serialize(&self) -> String {
         format!(
-            "motion={}\nbounce={}\nshadow={}\ntop_gap={}\ndock={}\nclock={}\naccent={}\nseconds={}\nupdate={}\nlyrics={}\nlyric_offset_ms={}\ncompact_lyrics={}\nlanguage={}\nshortcut={}\n",
+            "motion={}\nbounce={}\nshadow={}\ntop_gap={}\ndock={}\nclock={}\naccent={}\nseconds={}\nunlimited_fps={}\nupdate={}\nlyrics={}\nlyric_offset_ms={}\ncompact_lyrics={}\nlanguage={}\nshortcut={}\n",
             self.motion.as_str(),
             self.bounce.as_str(),
             if self.shadow { "soft" } else { "off" },
@@ -234,6 +241,7 @@ impl Settings {
             },
             self.accent.as_str(),
             if self.show_seconds { "on" } else { "off" },
+            if self.unlimited_fps { "on" } else { "off" },
             self.update.as_str(),
             match self.lyrics {
                 LyricsMode::Auto => "auto",
@@ -415,6 +423,28 @@ mod tests {
             super::Settings::default()
         );
     }
+    #[test]
+    fn settings_accept_a_utf8_bom() {
+        let settings = super::Settings::parse("\u{feff}unlimited_fps=on\nclock=12\n");
+        assert!(settings.unlimited_fps);
+        assert_eq!(settings.clock, ClockFormat::TwelveHour);
+    }
+
+    #[test]
+    fn unlimited_fps_round_trips_and_defaults_off() {
+        assert!(!super::Settings::default().unlimited_fps);
+
+        let settings = super::Settings::parse("unlimited_fps=on\n");
+        assert!(settings.unlimited_fps);
+        assert!(
+            settings
+                .serialize()
+                .lines()
+                .any(|line| line == "unlimited_fps=on")
+        );
+        assert!(super::Settings::parse(&settings.serialize()).unlimited_fps);
+    }
+
     #[test]
     fn dock_values_round_trip_and_old_files_default_center() {
         for (value, anchor) in [

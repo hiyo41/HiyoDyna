@@ -11,6 +11,8 @@ Website: [hiyo41.github.io/HiyoDyna](https://hiyo41.github.io/HiyoDyna/)
 ## Tính năng hiện có
 
 - Capsule mở rộng khi rê chuột và thu lại sau một khoảng ngắn với hiệu ứng lò xo
+- Nhịp khung hình bám theo tần số quét màn hình (60–240 Hz) thay vì khóa cứng 60 fps
+- Tùy chọn FPS không giới hạn để render không bị chặn
 - Đồng hồ trực tiếp với định dạng 24 giờ hoặc 12 giờ, giây nhỏ hơn và chỉ báo màu nhấn
 - Typography Inter đi kèm, góc squircle, bóng mềm và quầng sáng khi rê chuột
 - Bảng mở rộng hiển thị thứ và ngày phía trên giờ lớn
@@ -19,13 +21,19 @@ Website: [hiyo41.github.io/HiyoDyna](https://hiyo41.github.io/HiyoDyna/)
 - Bộ cập nhật trong app với kênh Build và Stable, xác minh SHA-256, kiểm tra lúc khởi động và mỗi 30 phút
 - Giao diện đen/xám/trắng thống nhất với màu nhấn pastel trên Island, các cửa sổ native và biểu tượng khay
 - Cửa sổ Cài đặt và Tìm lời bài hát native có thể đổi kích thước, cùng chuyển đổi trực tiếp giữa tiếng Anh và tiếng Việt
+- Cuộn từ đồng hồ mở rộng sang trình phát với ảnh bìa, chọn nguồn, tua và lời bài hát đồng bộ
 - Tùy chọn khởi động cùng Windows, cùng các mục khởi động lại, mở thư mục cài đặt và giới thiệu
 - Cài đặt lưu tại `%APPDATA%\HiyoDyna\settings.ini`
+- Lời bài hát dạng dòng gọn màu trắng, có quầng sáng mềm phía dưới lấy từ ảnh bìa; khi đổi kích thước mặc định vẫn căn giữa, có thể ghim trái hoặc phải
+- Phím tắt Ctrl+Alt+D mặc định, có thể đổi; tạm làm mờ Island và cho phép nhấp xuyên qua
+- Bật/tắt lời bài hát gọn được ghi nhớ, giữ trang người dùng đã chọn và tự quay về Đồng hồ sau mười giây không phát nhạc
+- Kiểm tra bản phát hành thủ công trong Cài đặt, song song với tự động tải và cài đặt
+- Tự thu lại khi có cửa sổ toàn màn hình của ứng dụng khác và hiện lại khi toàn màn hình kết thúc
 - Mặc định sát mép trên, căn giữa, không xuất hiện trên taskbar và không kích hoạt khi nhấp
 
 ## Yêu cầu
 
-- Windows 10 hoặc 11
+- Windows 10 hoặc 11; tích hợp media cần Windows 10 phiên bản 1809 trở lên
 - Rust stable hỗ trợ edition 2024 khi build từ mã nguồn
 
 ## Cài đặt

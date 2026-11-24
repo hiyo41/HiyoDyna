@@ -25,6 +25,7 @@ pub(crate) enum TrayCommand {
     Clock(ClockFormat),
     Accent(AccentPreset),
     ShowSeconds(bool),
+    UnlimitedFps(bool),
     Lyrics(LyricsMode),
     LyricOffset(i32),
     CompactLyrics(bool),

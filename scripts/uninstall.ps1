@@ -7,7 +7,8 @@ $ErrorActionPreference = "Stop"
 $InstallDir = $PSScriptRoot
 $DataDir = Join-Path $env:LOCALAPPDATA "HiyoDyna"
 $SettingsDir = Join-Path $env:APPDATA "HiyoDyna"
-$LegacyShortcut = Join-Path ([Environment]::GetFolderPath("Startup")) "HiyoDyna updater.lnk"
+$StartupDir = [Environment]::GetFolderPath("Startup")
+$LegacyShortcut = if ([string]::IsNullOrWhiteSpace($StartupDir)) { $null } else { Join-Path $StartupDir "HiyoDyna updater.lnk" }
 $LegacyPid = Join-Path $DataDir "watch-update.pid"
 $LegacyWatcher = Join-Path $InstallDir "watch-update.ps1"
 
@@ -36,7 +37,9 @@ function Stop-LegacyWatcher {
 }
 
 function Remove-LegacyWatcher {
-    Remove-Item -LiteralPath $LegacyShortcut -Force -ErrorAction SilentlyContinue
+    if ($LegacyShortcut) {
+        Remove-Item -LiteralPath $LegacyShortcut -Force -ErrorAction SilentlyContinue
+    }
     foreach ($name in @("watch-update.ps1", "watch-update.vbs", "update-state.json")) {
         Remove-Item -LiteralPath (Join-Path $InstallDir $name) -Force -ErrorAction SilentlyContinue
     }

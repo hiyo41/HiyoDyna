@@ -39,7 +39,7 @@ export function clockSnapshot(date: Date, hour12: boolean): ClockSnapshot {
 
   return {
     time: `${hours}:${minutes}`,
-    seconds: String(Math.min(date.getSeconds(), 59)).padStart(2, '0'),
+    seconds: String(date.getSeconds()).padStart(2, '0'),
     meridiem: hour12 ? (hours24 < 12 ? 'AM' : 'PM') : '',
     date: `${WEEKDAYS[date.getDay()]} · ${MONTHS[date.getMonth()]} ${date.getDate()}`,
   };

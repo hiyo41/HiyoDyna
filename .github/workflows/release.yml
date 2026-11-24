@@ -111,7 +111,8 @@ jobs:
       - name: Build
         if: env.RELEASE_NEEDS_BUILD == 'true'
         env:
-          HIYODyna_BUILD_TAG: ${{ env.RELEASE_TAG }}
+          HIYODYNA_BUILD_TAG: ${{ env.RELEASE_TAG }}
+          HIYODYNA_BUILD_PUBLISHED_AT: ${{ github.run_started_at }}
         run: cargo build --release --locked
 
       - name: Package

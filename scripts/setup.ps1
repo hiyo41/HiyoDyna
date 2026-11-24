@@ -10,7 +10,8 @@ $InstallDir = Join-Path $env:LOCALAPPDATA "Programs\HiyoDyna"
 $DataDir = Join-Path $env:LOCALAPPDATA "HiyoDyna"
 $ExePath = Join-Path $InstallDir "HiyoDyna.exe"
 $BuiltExe = Join-Path $RepoPath "target\release\hiyodyna.exe"
-$LegacyShortcut = Join-Path ([Environment]::GetFolderPath("Startup")) "HiyoDyna updater.lnk"
+$StartupDir = [Environment]::GetFolderPath("Startup")
+$LegacyShortcut = if ([string]::IsNullOrWhiteSpace($StartupDir)) { $null } else { Join-Path $StartupDir "HiyoDyna updater.lnk" }
 $LegacyPid = Join-Path $DataDir "watch-update.pid"
 $LegacyWatcher = Join-Path $InstallDir "watch-update.ps1"
 
@@ -39,7 +40,9 @@ function Stop-LegacyWatcher {
 }
 
 function Remove-LegacyWatcher {
-    Remove-Item -LiteralPath $LegacyShortcut -Force -ErrorAction SilentlyContinue
+    if ($LegacyShortcut) {
+        Remove-Item -LiteralPath $LegacyShortcut -Force -ErrorAction SilentlyContinue
+    }
     foreach ($name in @("watch-update.ps1", "watch-update.vbs", "update-state.json")) {
         Remove-Item -LiteralPath (Join-Path $InstallDir $name) -Force -ErrorAction SilentlyContinue
     }
@@ -103,14 +106,13 @@ $version = if ($versionLine) { $versionLine.Matches[0].Groups[1].Value } else { 
 
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 New-Item -ItemType Directory -Force -Path $DataDir | Out-Null
-foreach ($name in @("HiyoDyna.update.part", "HiyoDyna.update.exe", "HiyoDyna.update.txt", "HiyoDyna.exe.old")) {
+foreach ($name in @("HiyoDyna.update.part", "HiyoDyna.update.exe", "HiyoDyna.update.txt", "HiyoDyna.exe.old", "version.txt")) {
     Remove-Item -LiteralPath (Join-Path $InstallDir $name) -Force -ErrorAction SilentlyContinue
 }
 Remove-Item -LiteralPath (Join-Path $DataDir "update-state.ini") -Force -ErrorAction SilentlyContinue
 Copy-Item -LiteralPath $BuiltExe -Destination $ExePath -Force
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot "uninstall.ps1") `
     -Destination (Join-Path $InstallDir "uninstall.ps1") -Force
-$version | Set-Content -LiteralPath (Join-Path $InstallDir "version.txt") -Encoding UTF8
 [ordered]@{
     installDir = $InstallDir
     exePath = $ExePath

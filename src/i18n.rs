@@ -155,6 +155,7 @@ catalog! {
     MusicLyricsDescription => ("Timing & display", "Đồng bộ và hiển thị"),
     Application => ("Application", "Ứng dụng"),
     ApplicationDescription => ("Startup & updates", "Khởi động và cập nhật"),
+    UnlimitedFps => ("Unlimited FPS", "FPS không giới hạn"),
     PreferencesDescription => ("Appearance, motion and playback", "Giao diện, chuyển động và phát nhạc"),
     Accent => ("Accent", "Màu nhấn"),
     Ice => ("Ice", "Băng"),
