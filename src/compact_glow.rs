@@ -125,8 +125,18 @@ fn cover_color(
                 continue;
             }
             opacity = opacity.max(alpha);
-            let high = f32::from(*pixel[..3].iter().max().unwrap());
-            let low = f32::from(*pixel[..3].iter().min().unwrap());
+            let high = f32::from(
+                *pixel[..3]
+                    .iter()
+                    .max()
+                    .expect("RGB pixels have three channels"),
+            );
+            let low = f32::from(
+                *pixel[..3]
+                    .iter()
+                    .min()
+                    .expect("RGB pixels have three channels"),
+            );
             let saturation = (high - low) / high.max(1.0);
             let weight = if high >= 12.0 && saturation >= 0.08 {
                 alpha * saturation.powi(2)

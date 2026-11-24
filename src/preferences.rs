@@ -1243,7 +1243,8 @@ fn controls_with_autostart(settings: &Settings, autostart: bool) -> Vec<Control>
     });
     debug_assert!(
         out.iter()
-            .all(|control| control.section.rows().contains(&control.rect.y))
+            .all(|control| control.section.rows().contains(&control.rect.y)),
+        "control rows stay inside their section"
     );
     out
 }
