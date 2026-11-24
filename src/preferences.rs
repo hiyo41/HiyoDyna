@@ -2583,9 +2583,11 @@ unsafe extern "system" fn proc(
             }
             WM_DRAWITEM => {
                 let item = &*(lparam as *const DRAWITEMSTRUCT);
+                // A negative extent would wrap to a huge allocation; the
+                // notice window's twin handler already clamps the same value.
                 let size = (
-                    (item.rcItem.right - item.rcItem.left) as u32,
-                    (item.rcItem.bottom - item.rcItem.top) as u32,
+                    (item.rcItem.right - item.rcItem.left).max(0) as u32,
+                    (item.rcItem.bottom - item.rcItem.top).max(0) as u32,
                 );
                 let enabled =
                     windows_sys::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled(item.hwndItem)

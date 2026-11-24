@@ -1,5 +1,4 @@
-use std::time::Instant;
-
+use std::time::{Duration, Instant};
 #[derive(Clone, Debug)]
 pub(crate) struct Timeline {
     pub position: f64,
@@ -31,12 +30,48 @@ use crate::lyrics::Lyrics;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
 use windows::Media::Control::{
     GlobalSystemMediaTransportControlsSession as Session,
     GlobalSystemMediaTransportControlsSessionManager as Manager,
     GlobalSystemMediaTransportControlsSessionPlaybackStatus as PlaybackStatus,
 };
+use windows_future::{AsyncStatus, IAsyncOperation};
+
+/// Upper bound for one awaited WinRT async call. A misbehaving provider that
+/// never completes must not pin the media pipeline forever; a timeout counts
+/// as an ordinary failure so the worker keeps polling and the UI keeps running.
+const METADATA_TIMEOUT: Duration = Duration::from_secs(10);
+const TRANSPORT_TIMEOUT: Duration = Duration::from_secs(5);
+const MANAGER_TIMEOUT: Duration = Duration::from_secs(15);
+const ASYNC_POLL: Duration = Duration::from_millis(25);
+
+/// Like [`IAsyncOperation::join`] but with a deadline.
+fn wait<T: windows_core::RuntimeType>(
+    operation: &IAsyncOperation<T>,
+    timeout: Duration,
+) -> windows_core::Result<T> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match operation.Status() {
+            Ok(AsyncStatus::Completed) => return operation.GetResults(),
+            Ok(AsyncStatus::Error | AsyncStatus::Canceled) => {
+                let code = operation.ErrorCode().unwrap_or_default();
+                return Err(windows_core::Error::from_hresult(code));
+            }
+            // Started and any future status value: keep waiting until the deadline.
+            Ok(_) => {}
+            Err(error) => return Err(error),
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = operation.Cancel();
+            // ERROR_TIMEOUT (1460) reads clearly in the auto-update-style logs.
+            return Err(windows_core::Error::from_hresult(
+                windows_core::HRESULT::from_win32(1460),
+            ));
+        }
+        std::thread::sleep(ASYNC_POLL);
+    }
+}
 
 #[derive(Clone, Debug)]
 pub(crate) enum MediaCommand {
@@ -255,14 +290,14 @@ impl Drop for MediaWorker {
 
 fn artwork(session: &Session) -> Option<Arc<image::RgbaImage>> {
     use windows::Storage::Streams::{DataReader, InputStreamOptions};
-    let properties = session.TryGetMediaPropertiesAsync().ok()?.join().ok()?;
-    let stream = properties
-        .Thumbnail()
-        .ok()?
-        .OpenReadAsync()
-        .ok()?
-        .join()
-        .ok()?;
+    let properties = {
+        let operation = session.TryGetMediaPropertiesAsync().ok()?;
+        wait(&operation, METADATA_TIMEOUT).ok()?
+    };
+    let stream = {
+        let operation = properties.Thumbnail().ok()?.OpenReadAsync().ok()?;
+        wait(&operation, METADATA_TIMEOUT).ok()?
+    };
     let length = stream.Size().ok()?;
     if length == 0 || length > 4_000_000 {
         return None;
@@ -271,7 +306,10 @@ fn artwork(session: &Session) -> Option<Arc<image::RgbaImage>> {
     reader
         .SetInputStreamOptions(InputStreamOptions::None)
         .ok()?;
-    let loaded = reader.LoadAsync(length as u32).ok()?.join().ok()?;
+    let loaded = {
+        let operation = reader.LoadAsync(length as u32).ok()?;
+        wait(&operation, METADATA_TIMEOUT).ok()?
+    };
     let mut bytes = vec![0; loaded as usize];
     reader.ReadBytes(&mut bytes).ok()?;
     let decoder = image::ImageReader::new(std::io::Cursor::new(bytes))
@@ -292,7 +330,9 @@ fn artwork(session: &Session) -> Option<Arc<image::RgbaImage>> {
 }
 
 fn read_session(session: &Session, sources: Vec<String>) -> windows::core::Result<MediaSnapshot> {
-    let p = session.TryGetMediaPropertiesAsync()?.join()?;
+    let p = session
+        .TryGetMediaPropertiesAsync()
+        .and_then(|op| wait(&op, METADATA_TIMEOUT))?;
     let source = session.SourceAppUserModelId()?.to_string();
     let title = p.Title()?.to_string();
     let artist = p.Artist()?.to_string();
@@ -473,10 +513,15 @@ fn worker(
         )
     }
     .is_ok();
-    let manager = Manager::RequestAsync().and_then(|op| op.join());
+    let manager = Manager::RequestAsync().and_then(|op| wait(&op, MANAGER_TIMEOUT));
     let Ok(manager) = manager else {
         if let Ok(mut s) = output.lock() {
             s.unavailable = true;
+        }
+        if initialized {
+            unsafe {
+                windows::Win32::System::WinRT::RoUninitialize();
+            }
         }
         return;
     };
@@ -530,6 +575,9 @@ fn worker(
     let mut generation = 0_u64;
     let mut watched: Option<SessionWatch> = None;
     while !stop.load(Ordering::Acquire) {
+        // Every iteration ends in a 350 ms park (or is woken early by an event
+        // or a queued command). The `continue` paths below park too, so a
+        // repeating condition can never spin this thread without pause.
         let sessions = manager.GetSessions().ok();
         let sources = sessions
             .as_ref()
@@ -539,11 +587,15 @@ fn worker(
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        if selected.as_ref().is_some_and(|selected| {
-            !sources
-                .iter()
-                .any(|source| source.eq_ignore_ascii_case(selected))
-        }) {
+        // Only re-evaluate the manual choice against a real session list; a
+        // transient GetSessions failure must not forget the user's pick.
+        if sessions.is_some()
+            && selected.as_ref().is_some_and(|selected| {
+                !sources
+                    .iter()
+                    .any(|source| source.eq_ignore_ascii_case(selected))
+            })
+        {
             selected = None;
         }
         let current_session = manager.GetCurrentSession().ok();
@@ -585,12 +637,14 @@ fn worker(
                     {
                         match command {
                             MediaCommand::Toggle if current.can_toggle => {
-                                let _ = s.TryTogglePlayPauseAsync().and_then(|op| op.join());
+                                let _ = s
+                                    .TryTogglePlayPauseAsync()
+                                    .and_then(|op| wait(&op, TRANSPORT_TIMEOUT));
                             }
                             MediaCommand::Previous
                                 if current.can_previous
                                     && s.TrySkipPreviousAsync()
-                                        .and_then(|op| op.join())
+                                        .and_then(|op| wait(&op, TRANSPORT_TIMEOUT))
                                         .unwrap_or(false) =>
                             {
                                 generation = generation.wrapping_add(1);
@@ -600,7 +654,7 @@ fn worker(
                             MediaCommand::Next
                                 if current.can_next
                                     && s.TrySkipNextAsync()
-                                        .and_then(|op| op.join())
+                                        .and_then(|op| wait(&op, TRANSPORT_TIMEOUT))
                                         .unwrap_or(false) =>
                             {
                                 generation = generation.wrapping_add(1);
@@ -631,24 +685,35 @@ fn worker(
         }
         let read = watched.as_mut().map(SessionWatch::read);
         if matches!(read, Some(Ok(None))) {
+            // A race invalidated the cached read; retry after the usual pause.
+            std::thread::park_timeout(Duration::from_millis(350));
             continue;
         }
-        if let Some(s) = session
+        if let Some(s) = session.as_ref()
             && let Some(Ok(Some(mut snapshot))) = read
             && let Some(watch) = watched.as_mut()
-            && refresh_playback(&s, &mut snapshot).is_ok()
+            && refresh_playback(s, &mut snapshot).is_ok()
         {
             snapshot.sources = sources;
-            // Timeline bounds are a cheap additional signal that the cached track changed.
-            if snapshot.timeline.as_ref().map(|t| t.duration)
-                != watch.cache.snapshot.timeline.as_ref().map(|t| t.duration)
-            {
+            // Timeline bounds are a cheap additional signal that the cached
+            // track changed. Compare with a tolerance so live streams whose
+            // window slides cannot invalidate the cache on every pass.
+            let duration_changed = match (
+                snapshot.timeline.as_ref().map(|t| t.duration),
+                watch.cache.snapshot.timeline.as_ref().map(|t| t.duration),
+            ) {
+                (Some(next), Some(cached)) => (next - cached).abs() > 0.05,
+                (a, b) => a != b,
+            };
+            if duration_changed {
                 watch.cache.revision = None;
                 generation = generation.wrapping_add(1);
                 previous_key.clear();
+                std::thread::park_timeout(Duration::from_millis(350));
                 continue;
             }
             if !watch.cache.is_current(&watch.revision) {
+                std::thread::park_timeout(Duration::from_millis(350));
                 continue;
             }
             // The mailbox remains replaceable until identity validation has completed.
@@ -679,16 +744,18 @@ fn worker(
                 let position = start
                     .Duration
                     .saturating_add((seconds.clamp(0.0, timeline.duration) * 10_000_000.0) as i64);
-                let _ = s
-                    .TryChangePlaybackPositionAsync(position)
-                    .and_then(|op| op.join());
+                let _ = s.TryChangePlaybackPositionAsync(position).and_then(|op| {
+                    // A seek must not wait longer than the worker's cadence.
+                    wait(&op, TRANSPORT_TIMEOUT)
+                });
                 // Playback may pause or change rate while the seek is awaited.
-                if refresh_playback(&s, &mut snapshot).is_err() {
+                if refresh_playback(s, &mut snapshot).is_err() {
                     snapshot.timeline = None;
                     snapshot.can_seek = false;
                 }
             }
             if !watch.cache.is_current(&watch.revision) {
+                std::thread::park_timeout(Duration::from_millis(350));
                 continue;
             }
             snapshot.generation = generation;
@@ -715,7 +782,11 @@ fn worker(
             if let Ok(mut out) = output.lock() {
                 publish_snapshot(&mut out, snapshot, changed);
             }
-        } else {
+        } else if session.is_none() {
+            // A session that disappeared is the only reason to clear the
+            // published snapshot. A transient read or refresh failure keeps
+            // the last known state so the UI does not flash empty and lyrics
+            // are not re-fetched for a track that is still playing.
             if !previous_key.is_empty() {
                 generation = generation.wrapping_add(1);
             }

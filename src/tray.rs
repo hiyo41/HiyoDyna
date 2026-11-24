@@ -95,7 +95,9 @@ impl Drop for Tray {
 
 fn copy_wide<const N: usize>(target: &mut [u16; N], text: &str) {
     target.fill(0);
-    for (slot, value) in target.iter_mut().zip(text.encode_utf16()) {
+    // Reserve the last slot for the NUL terminator: text that exactly fills
+    // the buffer would otherwise leave the field unterminated.
+    for (slot, value) in target[..N - 1].iter_mut().zip(text.encode_utf16()) {
         *slot = value;
     }
 }

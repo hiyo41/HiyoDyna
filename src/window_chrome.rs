@@ -86,6 +86,7 @@ mod native {
         minimize: bool,
         painter: RefCell<Painter>,
         motion: RefCell<Motion>,
+        tuning: crate::animation::SpringTuning,
         return_focus: HWND,
     }
 
@@ -109,6 +110,8 @@ mod native {
                 minimize: false,
                 painter: RefCell::new(Painter::new(scale)?),
                 motion: RefCell::new(Motion::default()),
+                // Loaded once here; toggles must not read settings.ini again.
+                tuning: crate::settings::Settings::load().tuning(),
                 return_focus: windows_sys::Win32::UI::Input::KeyboardAndMouse::GetFocus(),
             });
             let ptr = Box::into_raw(chrome);
@@ -495,9 +498,7 @@ mod native {
                     )
                 }
             };
-            let mut animation = crate::animation::Animation::new_with_tuning(
-                crate::settings::Settings::load().tuning(),
-            );
+            let mut animation = crate::animation::Animation::new_with_tuning(chrome.tuning);
             animation.current = crate::animation::ShapeState {
                 width: (current.right - current.left) as f32,
                 height: (current.bottom - current.top) as f32,

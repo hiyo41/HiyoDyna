@@ -14,7 +14,15 @@ const USER_AGENT: &str = concat!("HiyoDyna/", env!("CARGO_PKG_VERSION"));
 const CONNECT_TIMEOUT_MILLISECONDS: u32 = 10_000;
 const RECEIVE_TIMEOUT_MILLISECONDS: u32 = 30_000;
 const SEND_TIMEOUT_MILLISECONDS: u32 = 30_000;
+/// Whole-request budget. The per-read receive timeout resets on every chunk,
+/// so without a total cap a dribbling server could pin the update worker
+/// (and its busy flags) indefinitely.
+const TOTAL_TIMEOUT_MILLISECONDS: u32 = 600_000;
 const READ_BUFFER_BYTES: usize = 64 * 1024;
+// WinInet values that windows-sys does not expose. Pin the policy so a
+// release URL can never redirect a secure request down to plain HTTP.
+const INTERNET_OPTION_REDIRECT_POLICY: u32 = 78;
+const INTERNET_OPTION_REDIRECT_POLICY_DISALLOW_HTTPS_TO_HTTP: u32 = 1;
 
 pub(crate) struct HttpError {
     pub status: Option<u32>,
@@ -36,7 +44,7 @@ pub(crate) fn get(url: &str, max_bytes: usize) -> Result<Vec<u8>, HttpError> {
         return Err(last_error("InternetOpenW"));
     }
 
-    for (option, milliseconds) in [
+    for (option, value) in [
         (
             INTERNET_OPTION_CONNECT_TIMEOUT,
             CONNECT_TIMEOUT_MILLISECONDS,
@@ -46,8 +54,12 @@ pub(crate) fn get(url: &str, max_bytes: usize) -> Result<Vec<u8>, HttpError> {
             RECEIVE_TIMEOUT_MILLISECONDS,
         ),
         (INTERNET_OPTION_SEND_TIMEOUT, SEND_TIMEOUT_MILLISECONDS),
+        (
+            INTERNET_OPTION_REDIRECT_POLICY,
+            INTERNET_OPTION_REDIRECT_POLICY_DISALLOW_HTTPS_TO_HTTP,
+        ),
     ] {
-        if let Err(error) = set_timeout(session, option, milliseconds) {
+        if let Err(error) = set_option(session, option, value) {
             unsafe { InternetCloseHandle(session) };
             return Err(error);
         }
@@ -83,9 +95,17 @@ fn fetch_request(request: *const c_void, max_bytes: usize) -> Result<Vec<u8>, Ht
         });
     }
 
+    let deadline = std::time::Instant::now()
+        + std::time::Duration::from_millis(TOTAL_TIMEOUT_MILLISECONDS as u64);
     let mut body = Vec::with_capacity(max_bytes.min(READ_BUFFER_BYTES));
     let mut buffer = [0u8; READ_BUFFER_BYTES];
     loop {
+        if std::time::Instant::now() >= deadline {
+            return Err(HttpError {
+                status: None,
+                message: format!("response exceeded {TOTAL_TIMEOUT_MILLISECONDS} ms"),
+            });
+        }
         let mut read = 0u32;
         let ok = unsafe {
             InternetReadFile(
@@ -130,12 +150,12 @@ fn query_status(request: *const c_void) -> Result<u32, HttpError> {
     Ok(status)
 }
 
-fn set_timeout(handle: *const c_void, option: u32, milliseconds: u32) -> Result<(), HttpError> {
+fn set_option(handle: *const c_void, option: u32, value: u32) -> Result<(), HttpError> {
     let ok = unsafe {
         InternetSetOptionW(
             handle,
             option,
-            (&milliseconds as *const u32).cast(),
+            (&value as *const u32).cast(),
             size_of::<u32>() as u32,
         )
     };

@@ -18,7 +18,9 @@ const {
 
 const rawBase = import.meta.env.BASE_URL;
 const base = rawBase.endsWith('/') ? rawBase : `${rawBase}/`;
-const canonical = new URL(Astro.url.pathname, Astro.site);
+// A noindex page (the 404) must not ship a canonical or og:url pointing at a
+// URL that search engines are told to ignore.
+const canonical = noindex ? null : new URL(Astro.url.pathname, Astro.site);
 const ogImage = new URL(`${base}og.png`, Astro.site).toString();
 
 const jsonLd = {
@@ -28,7 +30,7 @@ const jsonLd = {
   description,
   applicationCategory: 'UtilitiesApplication',
   operatingSystem: 'Windows 10, Windows 11',
-  url: canonical.toString(),
+  url: (canonical ?? new URL(`${base}`, Astro.site)).toString(),
   downloadUrl: 'https://github.com/hiyo41/HiyoDyna/releases',
   license: 'https://www.gnu.org/licenses/agpl-3.0.html',
   offers: {
@@ -50,7 +52,7 @@ const jsonLd = {
 
     <title>{title}</title>
     <meta name="description" content={description} />
-    <link rel="canonical" href={canonical} />
+    {canonical && <link rel="canonical" href={canonical} />}
     {noindex && <meta name="robots" content="noindex" />}
 
     <meta property="og:type" content="website" />
@@ -58,7 +60,7 @@ const jsonLd = {
     <meta property="og:locale" content="en_US" />
     <meta property="og:title" content={title} />
     <meta property="og:description" content={description} />
-    <meta property="og:url" content={canonical} />
+    {canonical && <meta property="og:url" content={canonical} />}
     <meta property="og:image" content={ogImage} />
     <meta property="og:image:width" content="1200" />
     <meta property="og:image:height" content="630" />

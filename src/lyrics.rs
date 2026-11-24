@@ -318,17 +318,42 @@ pub(crate) fn parse_lrc(text: &str) -> Option<Lyrics> {
             }
             remainder = after;
         }
+        // Enhanced LRC (A2) lines carry inline `<mm:ss.xx>` word markers; turn
+        // them into real word timing instead of leaking them into the text.
+        let enhanced = enhanced_words(remainder.trim(), offset);
         for start in times {
-            result.lines.push(LyricLine {
-                start,
-                end: start + 8.0,
-                word_sync: false,
-                words: vec![LyricWord {
-                    text: remainder.trim().to_owned(),
+            if let Some(segments) = &enhanced {
+                let mut words: Vec<LyricWord> = segments
+                    .iter()
+                    .map(|(text, at)| LyricWord {
+                        text: text.clone(),
+                        start: at.unwrap_or(start),
+                        end: start + 8.0,
+                    })
+                    .collect();
+                // A word runs until the next marker; the final word is closed
+                // at the line end by the post-pass below.
+                for index in 0..words.len().saturating_sub(1) {
+                    words[index].end = words[index + 1].start;
+                }
+                result.lines.push(LyricLine {
                     start,
                     end: start + 8.0,
-                }],
-            });
+                    words,
+                    word_sync: true,
+                });
+            } else {
+                result.lines.push(LyricLine {
+                    start,
+                    end: start + 8.0,
+                    word_sync: false,
+                    words: vec![LyricWord {
+                        text: remainder.trim().to_owned(),
+                        start,
+                        end: start + 8.0,
+                    }],
+                });
+            }
         }
     }
     result.lines.sort_by(|a, b| a.start.total_cmp(&b.start));
@@ -341,10 +366,62 @@ pub(crate) fn parse_lrc(text: &str) -> Option<Lyrics> {
         }
         if let Some(end) = next_start {
             line.end = end;
-            line.words[0].end = end;
+            if line.words.len() == 1 {
+                line.words[0].end = end;
+            } else if let Some(last) = line.words.last_mut() {
+                // The final word of a word-timed line runs until the next
+                // line starts; intermediate words end at the next marker.
+                last.end = end;
+            }
         }
     }
     result.finish()
+}
+
+/// Splits an enhanced-LRC (A2) body into `(text, marker-time)` segments.
+///
+/// A marker times the words that follow it; text before the first marker
+/// follows the line clock (`None`). The visible text is preserved exactly —
+/// whitespace stays inside the words, like the TTML path — and a non-timing
+/// `<...>` span is kept as literal text. Returns `None` when the line has no
+/// usable inline markers.
+fn enhanced_words(body: &str, offset: f64) -> Option<Vec<(String, Option<f64>)>> {
+    let mut segments: Vec<(String, Option<f64>)> = Vec::new();
+    let mut text = String::new();
+    let mut start: Option<f64> = None;
+    let mut rest = body;
+    let mut saw_marker = false;
+    while let Some(open) = rest.find('<') {
+        text.push_str(&rest[..open]);
+        let after = &rest[open + 1..];
+        match after
+            .find('>')
+            .and_then(|close| timestamp(&after[..close]).map(|time| (close, time)))
+        {
+            Some((close, time)) => {
+                if !text.is_empty() {
+                    segments.push((std::mem::take(&mut text), start));
+                }
+                text.clear();
+                start = Some((time + offset).max(0.0));
+                saw_marker = true;
+                rest = &after[close + 1..];
+            }
+            None => {
+                // Not a timing marker: keep the '<' as literal text.
+                text.push('<');
+                rest = after;
+            }
+        }
+    }
+    text.push_str(rest);
+    if !saw_marker {
+        return None;
+    }
+    if !text.is_empty() {
+        segments.push((text, start));
+    }
+    Some(segments)
 }
 
 #[derive(Deserialize)]
@@ -489,6 +566,38 @@ mod tests {
             vec![0.5, 2.5, 4.5]
         );
         assert!(!lyrics.lines[0].word_sync);
+    }
+
+    #[test]
+    fn enhanced_lrc_markers_become_word_timing_without_leaking_into_text() {
+        let lyrics = parse_lrc(
+            "[00:26.00]I've <00:27.17>been <00:27.40>tryna <00:27.90>call\n[00:31.00]Next",
+        )
+        .unwrap();
+        assert_eq!(lyrics.lines.len(), 2);
+        let line = &lyrics.lines[0];
+        assert_eq!(line.text(), "I've been tryna call");
+        assert!(line.word_sync);
+        let starts: Vec<_> = line.words.iter().map(|w| w.start).collect();
+        assert_eq!(starts, vec![26.0, 27.17, 27.4, 27.9]);
+        assert_eq!(line.words[0].end, 27.17);
+        // The last word runs until the next line starts.
+        assert_eq!(line.words[3].end, 31.0);
+        assert_eq!(line.end, 31.0);
+        assert!(!lyrics.lines[1].word_sync);
+        assert_eq!(lyrics.lines[1].text(), "Next");
+    }
+
+    #[test]
+    fn enhanced_lrc_lines_without_usable_markers_keep_their_text() {
+        let lyrics =
+            parse_lrc("[00:01.00]plain line\n[00:02.00]with a <b> tag\n[00:04.00]Next").unwrap();
+        assert_eq!(lyrics.lines.len(), 3);
+        assert_eq!(lyrics.lines[0].text(), "plain line");
+        assert!(!lyrics.lines[0].word_sync);
+        // "<b>" is not a timing marker, so it stays as visible text.
+        assert_eq!(lyrics.lines[1].text(), "with a <b> tag");
+        assert!(!lyrics.lines[1].word_sync);
     }
 
     #[test]

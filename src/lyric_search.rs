@@ -1262,17 +1262,25 @@ mod native {
             text(hwnd, STATUS, "Searching lyric providers...");
             let worker = std::thread::Builder::new()
                 .name("lyric-search".into())
-                .spawn(
-                    move || match lyric_provider::search(&title, &artist, || job.current()) {
-                        Ok(response) => {
+                .spawn(move || {
+                    // A worker panic must not leave the window "Searching"
+                    // forever; an error completion still unlocks the UI.
+                    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        lyric_provider::search(&title, &artist, || job.current())
+                    }));
+                    match outcome {
+                        Ok(Ok(response)) => {
                             job.deliver(Completion::Search(Ok(response.results)));
                             if !response.warnings.is_empty() {
                                 job.deliver(Completion::Warning(response.warnings.join("; ")));
                             }
                         }
-                        Err(error) => job.deliver(Completion::Search(Err(error))),
-                    },
-                );
+                        Ok(Err(error)) => job.deliver(Completion::Search(Err(error))),
+                        Err(_) => job.deliver(Completion::Search(Err(
+                            "The lyric search stopped unexpectedly. Please try again.".into(),
+                        ))),
+                    }
+                });
             if let Err(error) = worker {
                 eprintln!("Could not start lyric search: {error}");
                 text(
@@ -1315,7 +1323,13 @@ mod native {
             let worker = std::thread::Builder::new()
                 .name("lyric-selection".into())
                 .spawn(move || {
-                    let response = lyric_provider::fetch(&result, || job.current()).map(Arc::new);
+                    let response = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        lyric_provider::fetch(&result, || job.current())
+                    }))
+                    .unwrap_or(Err(
+                        "The lyric fetch stopped unexpectedly. Please try again.".into(),
+                    ))
+                    .map(Arc::new);
                     job.deliver(Completion::Fetch(response));
                 });
             if let Err(error) = worker {
@@ -1411,7 +1425,16 @@ mod native {
                         .unwrap_or(false);
                         apply_enabled(hwnd, available);
                         eprintln!("Lyrics request failed: {error}");
-                        text(hwnd, STATUS, "Lyrics request failed. Please try again.");
+                        // The specific reason (provider outage, no synchronized
+                        // lyrics, cancelled query) tells the user what to try next.
+                        text(
+                            hwnd,
+                            STATUS,
+                            &crate::i18n::format_copy(
+                                "Lyrics request failed: {error}",
+                                &[("error", &error)],
+                            ),
+                        );
                     }
                     Event::Warning(warning) => {
                         let count = access(hwnd, |state| state.session.results.len()).unwrap_or(0);
@@ -2272,8 +2295,11 @@ mod native {
                 );
                 return None;
             }
-            SendMessageW(GetDlgItem(hwnd, TITLE), EM_SETLIMITTEXT, 512, 0);
-            SendMessageW(GetDlgItem(hwnd, ARTIST), EM_SETLIMITTEXT, 512, 0);
+            // 160 UTF-16 units can never exceed the provider's 500-byte
+            // query limit, even for CJK text (3 bytes per BMP unit) or emoji
+            // surrogate pairs (2 bytes per unit).
+            SendMessageW(GetDlgItem(hwnd, TITLE), EM_SETLIMITTEXT, 160, 0);
+            SendMessageW(GetDlgItem(hwnd, ARTIST), EM_SETLIMITTEXT, 160, 0);
             set_font(hwnd);
             reset(hwnd, snapshot);
             crate::island_surface::place(hwnd, owner, (640.0, 560.0));

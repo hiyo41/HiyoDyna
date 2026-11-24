@@ -1,5 +1,5 @@
 import { clockSnapshot } from '../lib/clock';
-import { ACCENTS, DEFAULT_SETTINGS, type IslandSettings } from '../lib/settings';
+import { ACCENTS, DEFAULT_SETTINGS, normalizeSettings, type IslandSettings } from '../lib/settings';
 import { ShapeSpring, tuningFor } from '../lib/spring';
 import { COMPACT, EXPANDED, superellipsePath, type ShapeState } from '../lib/superellipse';
 
@@ -46,6 +46,7 @@ class Island implements IslandController {
   private closeTimer = 0;
   private clockTimer = 0;
   private resizeObserver?: ResizeObserver;
+  private resizeListener?: () => void;
   private dirty = true;
   private destroyed = false;
 
@@ -118,6 +119,11 @@ class Island implements IslandController {
     window.clearInterval(this.clockTimer);
     window.clearTimeout(this.closeTimer);
     this.resizeObserver?.disconnect();
+    if (this.resizeListener) {
+      // The ResizeObserver fallback must not keep writing CSS vars after the
+      // island is gone.
+      window.removeEventListener('resize', this.resizeListener);
+    }
     this.control.removeEventListener('pointerenter', this.onPointerEnter);
     this.control.removeEventListener('pointerleave', this.onPointerLeave);
     this.control.removeEventListener('focus', this.onFocus);
@@ -125,6 +131,9 @@ class Island implements IslandController {
     this.control.removeEventListener('click', this.onClick);
     this.control.removeEventListener('keydown', this.onKeyDown);
     live.delete(this);
+    for (const [id, controller] of byId) {
+      if (controller === this) byId.delete(id);
+    }
     this.root.removeAttribute('data-ready');
   }
 
@@ -196,7 +205,6 @@ class Island implements IslandController {
       ? Number(this.progress >= 0.5)
       : smoothstep(0.25, 0.7, this.progress);
 
-    this.root.style.setProperty('--p', this.progress.toFixed(3));
     this.root.style.setProperty('--compact-opacity', compactOpacity.toFixed(3));
     this.root.style.setProperty('--expanded-opacity', expandedOpacity.toFixed(3));
     setLayerVisibility(this.root, '.island__text--compact', compactOpacity);
@@ -240,6 +248,7 @@ class Island implements IslandController {
       this.resizeObserver = new ResizeObserver(resize);
       this.resizeObserver.observe(shell);
     } else {
+      this.resizeListener = resize;
       window.addEventListener('resize', resize);
     }
   }
@@ -378,7 +387,9 @@ function parseSettings(raw: string | undefined): IslandSettings {
   if (!raw) return { ...DEFAULT_SETTINGS };
 
   try {
-    return { ...DEFAULT_SETTINGS, ...(JSON.parse(raw) as Partial<IslandSettings>) };
+    // Validate every key: embedded JSON is build-time data, but a stale or
+    // hand-edited value must not produce undefined CSS custom properties.
+    return normalizeSettings(JSON.parse(raw) as Partial<IslandSettings>);
   } catch {
     return { ...DEFAULT_SETTINGS };
   }

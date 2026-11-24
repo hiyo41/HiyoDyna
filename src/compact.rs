@@ -700,11 +700,17 @@ mod tests {
                 .max()
                 .unwrap()
         };
+        // A full-string draw and a clipped per-word redraw rasterize
+        // antialiased edges slightly differently (244 vs 248 with Inter
+        // Medium). Both are visually white; MUTED is far below this bound.
+        const WHITE_TOLERANCE: u8 = 8;
+        let word_peak = brightest(&words);
         line.word_sync = false;
-        assert_eq!(
-            brightest(&render(&line, 0.0)),
-            brightest(&words),
-            "line timing must start white, without waiting for word progress"
+        let line_peak = brightest(&render(&line, 0.0));
+        assert!(
+            line_peak.abs_diff(word_peak) <= WHITE_TOLERANCE,
+            "line timing must start white, without waiting for word progress: \
+             {line_peak} vs {word_peak}"
         );
         let mut painter = crate::canvas::Painter::new(1.0).unwrap();
         let state = super::shape(&mut painter, Some(&line), 360.0);
@@ -722,10 +728,11 @@ mod tests {
                 ..Default::default()
             },
         );
-        assert_eq!(
-            brightest(&pixels),
-            brightest(&words),
-            "the Lines preference must also start white for word-timed sources"
+        let lines_peak = brightest(&pixels);
+        assert!(
+            lines_peak.abs_diff(word_peak) <= WHITE_TOLERANCE,
+            "the Lines preference must also start white for word-timed sources: \
+             {lines_peak} vs {word_peak}"
         );
     }
 

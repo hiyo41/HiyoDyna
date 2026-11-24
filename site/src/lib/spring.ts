@@ -60,17 +60,22 @@ export class ShapeSpring {
       return !this.isSettled();
     }
 
-    const expanding = this.target.width >= EXPANDED.width;
+    // Match the app: the tuning pair is chosen by the height axis.
+    const expanding = this.target.height >= EXPANDED.height;
     const response = expanding ? this.tuning.expandResponse : this.tuning.collapseResponse;
     const damping = expanding ? this.tuning.expandDamping : this.tuning.collapseDamping;
     const omega = (2 * Math.PI) / response;
+    // Collapsing to the compact capsule must approach its destination without
+    // dipping below the compact baseline or rebounding, exactly like the
+    // native spring in animation.rs.
+    const collapseHeight = this.target.height === COMPACT.height;
 
     let remaining = Math.min(dtSeconds, MAX_FRAME_SECONDS);
     while (remaining > 0) {
       const step = Math.min(remaining, SUBSTEP_SECONDS);
-      this.integrateAxis('width', step, omega, damping);
-      this.integrateAxis('height', step, omega, damping);
-      this.integrateAxis('radius', step, omega, damping);
+      this.integrateAxis('width', step, omega, damping, false);
+      this.integrateAxis('height', step, omega, damping, collapseHeight);
+      this.integrateAxis('radius', step, omega, damping, false);
       remaining -= step;
     }
 
@@ -83,15 +88,31 @@ export class ShapeSpring {
     return true;
   }
 
-  private integrateAxis(axis: keyof ShapeState, dt: number, omega: number, damping: number): void {
+  private integrateAxis(
+    axis: keyof ShapeState,
+    dt: number,
+    omega: number,
+    damping: number,
+    monotonic: boolean,
+  ): void {
     const target = this.target[axis];
+    const previous = this.state[axis];
     const min = COMPACT[axis] * OVERSHOOT_MIN;
     const max = EXPANDED[axis] * OVERSHOOT_MAX;
+    const effectiveDamping = monotonic ? Math.max(damping, 1) : damping;
     const acceleration =
-      -2 * damping * omega * this.velocity[axis] - omega * omega * (this.state[axis] - target);
+      -2 * effectiveDamping * omega * this.velocity[axis] - omega * omega * (previous - target);
 
     this.velocity[axis] += acceleration * dt;
     this.state[axis] += this.velocity[axis] * dt;
+
+    if (monotonic && previous >= target) {
+      const clamped = Math.min(Math.max(this.state[axis], target), previous);
+      if (this.state[axis] !== clamped) {
+        this.state[axis] = clamped;
+        this.velocity[axis] = 0;
+      }
+    }
 
     if (this.state[axis] < min) {
       this.state[axis] = min;

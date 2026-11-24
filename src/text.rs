@@ -313,28 +313,46 @@ pub(crate) struct TextLayer {
 }
 
 impl TextLayer {
-    pub(crate) fn label_advance(&self, text: &str, px: f32, bold: bool) -> f32 {
-        let face = wide("Inter");
-        unsafe {
-            let font = CreateFontW(
-                -(px * self.scale * SUPERSAMPLE_SCALE).round() as i32,
-                0,
-                0,
-                0,
-                if bold { 600 } else { 400 },
-                0,
-                0,
-                0,
-                DEFAULT_CHARSET as u32,
-                OUT_TT_PRECIS as u32,
-                CLIP_DEFAULT_PRECIS as u32,
-                ANTIALIASED_QUALITY as u32,
-                (DEFAULT_PITCH | FF_DONTCARE) as u32,
-                face.as_ptr(),
-            );
+    /// A font for label measurement and drawing. The bundled Inter files
+    /// register their GDI family per weight ("Inter Medium", "Inter
+    /// SemiBold"); plain "Inter" exists only as the typographic family that
+    /// `CreateFontW` never matches, so request the weight-matched family and
+    /// verify the mapper actually honored it instead of silently substituting.
+    fn label_font(&self, px: f32, bold: bool) -> HFONT {
+        let physical = px * self.scale * SUPERSAMPLE_SCALE;
+        let weight = if bold { 600 } else { 400 };
+        let candidates: [&str; 2] = if bold {
+            ["Inter SemiBold", "Inter"]
+        } else {
+            ["Inter Medium", "Inter"]
+        };
+        for name in candidates {
+            let font = create_font(physical, weight, &wide(name));
             if font.is_null() {
-                return 0.0;
+                continue;
             }
+            // SAFETY: dc is live and font was just created.
+            unsafe {
+                let previous = SelectObject(self.dc, font);
+                let face = selected_face(self.dc);
+                SelectObject(self.dc, previous);
+                if face.to_ascii_lowercase().contains("inter") {
+                    return font;
+                }
+                DeleteObject(font);
+            }
+        }
+        // Fall back to the system UI face so measurement and drawing stay
+        // consistent even without the bundled fonts.
+        create_font(physical, weight, &wide("Segoe UI"))
+    }
+
+    pub(crate) fn label_advance(&self, text: &str, px: f32, bold: bool) -> f32 {
+        let font = self.label_font(px, bold);
+        if font.is_null() {
+            return 0.0;
+        }
+        unsafe {
             let previous = SelectObject(self.dc, font);
             let width = text_extent(self.dc, text).0 as f32 / (SUPERSAMPLE_SCALE * self.scale);
             SelectObject(self.dc, previous);
@@ -343,25 +361,7 @@ impl TextLayer {
         }
     }
     pub(crate) fn label_mask(&mut self, text: &str, px: f32, bold: bool) -> Option<Mask> {
-        let face = wide("Inter");
-        let font = unsafe {
-            CreateFontW(
-                -(px * self.scale * SUPERSAMPLE_SCALE).round() as i32,
-                0,
-                0,
-                0,
-                if bold { 600 } else { 400 },
-                0,
-                0,
-                0,
-                DEFAULT_CHARSET as u32,
-                OUT_TT_PRECIS as u32,
-                CLIP_DEFAULT_PRECIS as u32,
-                ANTIALIASED_QUALITY as u32,
-                (DEFAULT_PITCH | FF_DONTCARE) as u32,
-                face.as_ptr(),
-            )
-        };
+        let font = self.label_font(px, bold);
         if font.is_null() {
             return None;
         }

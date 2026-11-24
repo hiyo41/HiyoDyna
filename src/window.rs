@@ -79,6 +79,10 @@ struct HotkeyGuard {
     shortcut: crate::hotkey::Shortcut,
 }
 impl HotkeyGuard {
+    /// Registers `shortcut`. NOTE: when `registration` short-circuits because
+    /// `current` already owns the requested binding, the returned guard owns no
+    /// OS registration; assigning it over `current` would unregister the live
+    /// binding. Callers must check `shortcut` equality first.
     fn register(
         hwnd: HWND,
         shortcut: crate::hotkey::Shortcut,
@@ -182,6 +186,15 @@ pub(crate) fn run() -> Result<(), String> {
     }
 }
 
+/// Runs a fallible steady-state action. A transient failure is logged and the
+/// overlay keeps running instead of exiting with the misleading start-up
+/// message; start-up calls before the message loop keep using `?`.
+fn tolerate<T>(context: &str, action: impl FnOnce() -> Result<T, String>) -> Option<T> {
+    action()
+        .inspect_err(|error| eprintln!("HiyoDyna {context}: {error}"))
+        .ok()
+}
+
 fn run_loop(hwnd: HWND) -> Result<ExitAction, String> {
     let mut scale = window_scale(hwnd);
     let mut settings = Settings::load();
@@ -207,6 +220,7 @@ fn run_loop(hwnd: HWND) -> Result<ExitAction, String> {
         settings.top_gap,
         settings.dock,
         animation.current.width * scale,
+        scale,
     )?;
     surface.draw(animation.current, scale, &settings, &clock, animation.hover);
     surface.present(hwnd, position)?;
@@ -237,7 +251,9 @@ fn run_loop(hwnd: HWND) -> Result<ExitAction, String> {
         {
             return Err(last_error("SetTimer"));
         }
-        SetTimer(hwnd, TIMER_ID_MEDIA, 350, None);
+        if SetTimer(hwnd, TIMER_ID_MEDIA, 350, None) == 0 {
+            return Err(last_error("SetTimer"));
+        }
     }
 
     let mut last_frame = Instant::now();
@@ -301,7 +317,7 @@ fn run_loop(hwnd: HWND) -> Result<ExitAction, String> {
                         surface.player.refresh();
                         surface.player.resume_lyrics();
                         last_frame = Instant::now();
-                        animation_timer.start()?;
+                        animation_timer.ensure_started();
                     } else {
                         show_about(
                             hwnd,
@@ -312,24 +328,26 @@ fn run_loop(hwnd: HWND) -> Result<ExitAction, String> {
             }
             crate::preferences::MESSAGE if message.hwnd == hwnd => {
                 for command in crate::preferences::take_commands() {
-                    apply_tray_command(
-                        hwnd,
-                        command,
-                        &mut settings,
-                        &mut animation,
-                        &mut animation_timer,
-                        &mut surface,
-                        tray.as_mut(),
-                        scale,
-                        &mut position,
-                        &clock,
-                        &mut exit_action,
-                    )?;
+                    tolerate("settings command", || {
+                        apply_tray_command(
+                            hwnd,
+                            command,
+                            &mut settings,
+                            &mut animation,
+                            &mut animation_timer,
+                            &mut surface,
+                            tray.as_mut(),
+                            scale,
+                            &mut position,
+                            &clock,
+                            &mut exit_action,
+                        )
+                    });
                 }
                 crate::preferences::update(&settings, surface.shortcut_available);
                 resume_hover_tracking(hwnd, &mut hover, &animation);
                 last_frame = Instant::now();
-                animation_timer.start()?;
+                animation_timer.ensure_started();
             }
             WM_HOTKEY
                 if message.hwnd == hwnd
@@ -343,10 +361,12 @@ fn run_loop(hwnd: HWND) -> Result<ExitAction, String> {
                 {
                     continue;
                 }
-                surface.set_passthrough(hwnd, !surface.passthrough)?;
+                tolerate("passthrough", || {
+                    surface.set_passthrough(hwnd, !surface.passthrough)
+                });
                 resume_hover_tracking(hwnd, &mut hover, &animation);
                 last_frame = Instant::now();
-                animation_timer.start()?;
+                animation_timer.ensure_started();
             }
             WM_APP_MENU_CLOSED if message.hwnd == hwnd => {
                 if quick_menu
@@ -360,22 +380,24 @@ fn run_loop(hwnd: HWND) -> Result<ExitAction, String> {
             WM_APP_QUICK_ACTION if message.hwnd == hwnd => {
                 if let Some(action) = crate::quick_menu::action(message.wParam) {
                     quick_menu = None;
-                    apply_quick_action(
-                        hwnd,
-                        action,
-                        tray.as_mut(),
-                        &mut settings,
-                        &mut animation,
-                        &mut animation_timer,
-                        &mut surface,
-                        scale,
-                        &mut position,
-                        &clock,
-                        &mut exit_action,
-                    )?;
+                    tolerate("quick action", || {
+                        apply_quick_action(
+                            hwnd,
+                            action,
+                            tray.as_mut(),
+                            &mut settings,
+                            &mut animation,
+                            &mut animation_timer,
+                            &mut surface,
+                            scale,
+                            &mut position,
+                            &clock,
+                            &mut exit_action,
+                        )
+                    });
                     resume_hover_tracking(hwnd, &mut hover, &animation);
                     last_frame = Instant::now();
-                    animation_timer.start()?;
+                    animation_timer.ensure_started();
                 }
             }
             crate::accessibility::MESSAGE if message.hwnd == hwnd => {
@@ -391,17 +413,21 @@ fn run_loop(hwnd: HWND) -> Result<ExitAction, String> {
                     use crate::accessibility::Action;
                     let left = (surface.logical_width() - animation.current.width) * 0.5;
                     match action {
-                        Action::Settings => show_settings_menu(
-                            hwnd,
-                            tray.as_mut(),
-                            &mut settings,
-                            &mut animation,
-                            &mut surface,
-                            scale,
-                            &mut position,
-                            &clock,
-                            &mut exit_action,
-                        )?,
+                        Action::Settings => {
+                            tolerate("settings menu", || {
+                                show_settings_menu(
+                                    hwnd,
+                                    tray.as_mut(),
+                                    &mut settings,
+                                    &mut animation,
+                                    &mut surface,
+                                    scale,
+                                    &mut position,
+                                    &clock,
+                                    &mut exit_action,
+                                )
+                            });
+                        }
                         Action::Music => {
                             surface.player.select_page(true);
                             animation.expand();
@@ -427,19 +453,21 @@ fn run_loop(hwnd: HWND) -> Result<ExitAction, String> {
                                 )
                                 .contains(x, y)
                             {
-                                apply_tray_command(
-                                    hwnd,
-                                    TrayCommand::CompactLyrics(!settings.compact_lyrics),
-                                    &mut settings,
-                                    &mut animation,
-                                    &mut animation_timer,
-                                    &mut surface,
-                                    tray.as_mut(),
-                                    scale,
-                                    &mut position,
-                                    &clock,
-                                    &mut exit_action,
-                                )?;
+                                tolerate("compact lyrics", || {
+                                    apply_tray_command(
+                                        hwnd,
+                                        TrayCommand::CompactLyrics(!settings.compact_lyrics),
+                                        &mut settings,
+                                        &mut animation,
+                                        &mut animation_timer,
+                                        &mut surface,
+                                        tray.as_mut(),
+                                        scale,
+                                        &mut position,
+                                        &clock,
+                                        &mut exit_action,
+                                    )
+                                });
                                 crate::preferences::update(&settings, surface.shortcut_available);
                             } else if Rect::new(
                                 left + animation.current.width - 52.0,
@@ -449,17 +477,19 @@ fn run_loop(hwnd: HWND) -> Result<ExitAction, String> {
                             )
                             .contains(x, y)
                             {
-                                show_settings_menu(
-                                    hwnd,
-                                    tray.as_mut(),
-                                    &mut settings,
-                                    &mut animation,
-                                    &mut surface,
-                                    scale,
-                                    &mut position,
-                                    &clock,
-                                    &mut exit_action,
-                                )?;
+                                tolerate("settings menu", || {
+                                    show_settings_menu(
+                                        hwnd,
+                                        tray.as_mut(),
+                                        &mut settings,
+                                        &mut animation,
+                                        &mut surface,
+                                        scale,
+                                        &mut position,
+                                        &clock,
+                                        &mut exit_action,
+                                    )
+                                });
                             } else if let Some(music) = crate::player::page_hit(
                                 x,
                                 y,
@@ -486,7 +516,7 @@ fn run_loop(hwnd: HWND) -> Result<ExitAction, String> {
                     crate::animation::EXPANDED
                 };
                 last_frame = Instant::now();
-                animation_timer.start()?;
+                animation_timer.ensure_started();
             }
             WM_KEYDOWN if message.hwnd == hwnd => {
                 if let Some(access) = &surface.access {
@@ -542,7 +572,7 @@ fn run_loop(hwnd: HWND) -> Result<ExitAction, String> {
                     };
                 }
                 last_frame = Instant::now();
-                animation_timer.start()?;
+                animation_timer.ensure_started();
             }
             WM_MOUSEWHEEL if message.hwnd == hwnd => {
                 if animation.current.progress() > 0.9 {
@@ -564,7 +594,7 @@ fn run_loop(hwnd: HWND) -> Result<ExitAction, String> {
                     };
                     resume_hover_tracking(hwnd, &mut hover, &animation);
                     last_frame = Instant::now();
-                    animation_timer.start()?;
+                    animation_timer.ensure_started();
                 }
             }
             WM_LBUTTONDOWN if message.hwnd == hwnd => {
@@ -579,41 +609,45 @@ fn run_loop(hwnd: HWND) -> Result<ExitAction, String> {
                         crate::animation::EXPANDED
                     };
                     last_frame = Instant::now();
-                    animation_timer.start()?;
+                    animation_timer.ensure_started();
                 } else if surface.player.music
                     && crate::player::Player::compact_lyrics_rect(left, animation.current.width)
                         .contains(x, y)
                 {
-                    apply_tray_command(
-                        hwnd,
-                        TrayCommand::CompactLyrics(!settings.compact_lyrics),
-                        &mut settings,
-                        &mut animation,
-                        &mut animation_timer,
-                        &mut surface,
-                        tray.as_mut(),
-                        scale,
-                        &mut position,
-                        &clock,
-                        &mut exit_action,
-                    )?;
+                    tolerate("compact lyrics", || {
+                        apply_tray_command(
+                            hwnd,
+                            TrayCommand::CompactLyrics(!settings.compact_lyrics),
+                            &mut settings,
+                            &mut animation,
+                            &mut animation_timer,
+                            &mut surface,
+                            tray.as_mut(),
+                            scale,
+                            &mut position,
+                            &clock,
+                            &mut exit_action,
+                        )
+                    });
                     crate::preferences::update(&settings, surface.shortcut_available);
-                    animation_timer.start()?;
+                    animation_timer.ensure_started();
                 } else if animation.current.progress() > 0.9
                     && Rect::new(left + animation.current.width - 52.0, 10.0, 36.0, 34.0)
                         .contains(x, y)
                 {
-                    show_settings_menu(
-                        hwnd,
-                        tray.as_mut(),
-                        &mut settings,
-                        &mut animation,
-                        &mut surface,
-                        scale,
-                        &mut position,
-                        &clock,
-                        &mut exit_action,
-                    )?;
+                    tolerate("settings menu", || {
+                        show_settings_menu(
+                            hwnd,
+                            tray.as_mut(),
+                            &mut settings,
+                            &mut animation,
+                            &mut surface,
+                            scale,
+                            &mut position,
+                            &clock,
+                            &mut exit_action,
+                        )
+                    });
                 } else if animation.current.progress() > 0.9
                     && let Some(music) = crate::player::page_hit(
                         x,
@@ -630,7 +664,7 @@ fn run_loop(hwnd: HWND) -> Result<ExitAction, String> {
                         crate::animation::EXPANDED
                     };
                     last_frame = Instant::now();
-                    animation_timer.start()?;
+                    animation_timer.ensure_started();
                 } else if animation.current.progress() > 0.9
                     && surface
                         .player
@@ -650,7 +684,7 @@ fn run_loop(hwnd: HWND) -> Result<ExitAction, String> {
                         crate::animation::EXPANDED
                     };
                     last_frame = Instant::now();
-                    animation_timer.start()?;
+                    animation_timer.ensure_started();
                 }
             }
             WM_LBUTTONUP if message.hwnd == hwnd => {
@@ -664,7 +698,7 @@ fn run_loop(hwnd: HWND) -> Result<ExitAction, String> {
                     surface.player.finish_seek();
                     surface.player.dirty = true;
                     last_frame = Instant::now();
-                    animation_timer.start()?;
+                    animation_timer.ensure_started();
                     unsafe {
                         windows_sys::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture();
                     }
@@ -675,7 +709,7 @@ fn run_loop(hwnd: HWND) -> Result<ExitAction, String> {
                 {
                     surface.player.cancel_seek();
                     surface.player.dirty = true;
-                    animation_timer.start()?;
+                    animation_timer.ensure_started();
                 }
             }
             WM_MOUSEMOVE if message.hwnd == hwnd => {
@@ -697,22 +731,26 @@ fn run_loop(hwnd: HWND) -> Result<ExitAction, String> {
                         (surface.logical_width() - animation.current.width) * 0.5 + 28.0,
                         animation.current.width - 56.0,
                     );
-                    animation_timer.start()?;
+                    animation_timer.ensure_started();
                 }
                 let command = hover.pointer_moved(inside);
-                set_hover(
-                    &mut animation,
-                    &mut animation_timer,
-                    &mut last_frame,
-                    inside,
-                )?;
-                apply_hover_command(
-                    hwnd,
-                    command,
-                    &mut animation,
-                    &mut animation_timer,
-                    &mut last_frame,
-                )?;
+                tolerate("hover update", || {
+                    set_hover(
+                        &mut animation,
+                        &mut animation_timer,
+                        &mut last_frame,
+                        inside,
+                    )
+                });
+                tolerate("hover command", || {
+                    apply_hover_command(
+                        hwnd,
+                        command,
+                        &mut animation,
+                        &mut animation_timer,
+                        &mut last_frame,
+                    )
+                });
             }
             WM_MOUSELEAVE if message.hwnd == hwnd => {
                 if surface.player.dragging || surface.fullscreen.hidden {
@@ -722,19 +760,23 @@ fn run_loop(hwnd: HWND) -> Result<ExitAction, String> {
                     surface.hover_contains(&animation, position, point, settings.top_gap <= 0.0)
                 });
                 let command = hover.pointer_moved(inside);
-                set_hover(
-                    &mut animation,
-                    &mut animation_timer,
-                    &mut last_frame,
-                    inside,
-                )?;
-                apply_hover_command(
-                    hwnd,
-                    command,
-                    &mut animation,
-                    &mut animation_timer,
-                    &mut last_frame,
-                )?;
+                tolerate("hover update", || {
+                    set_hover(
+                        &mut animation,
+                        &mut animation_timer,
+                        &mut last_frame,
+                        inside,
+                    )
+                });
+                tolerate("hover command", || {
+                    apply_hover_command(
+                        hwnd,
+                        command,
+                        &mut animation,
+                        &mut animation_timer,
+                        &mut last_frame,
+                    )
+                });
             }
             WM_RBUTTONUP if message.hwnd == hwnd => {
                 drop(quick_menu.take());
@@ -776,12 +818,17 @@ fn run_loop(hwnd: HWND) -> Result<ExitAction, String> {
                         animation.target = player_shape(hwnd, scale);
                     }
                     let moving = animation.advance(elapsed);
-                    position = primary_position(
-                        surface.size,
-                        settings.top_gap,
-                        settings.dock,
-                        animation.current.width * scale,
-                    )?;
+                    if let Some(next) = tolerate("island placement", || {
+                        primary_position(
+                            surface.size,
+                            settings.top_gap,
+                            settings.dock,
+                            animation.current.width * scale,
+                            scale,
+                        )
+                    }) {
+                        position = next;
+                    }
                     let draw_start = Instant::now();
                     // A Settings/Find lyrics scroll has the floor for its short
                     // motion. Advance the island state but defer drawing so the
@@ -791,7 +838,7 @@ fn run_loop(hwnd: HWND) -> Result<ExitAction, String> {
                     } else {
                         surface.draw(animation.current, scale, &settings, &clock, animation.hover);
                         let present_start = Instant::now();
-                        surface.present(hwnd, position)?;
+                        tolerate("island present", || surface.present(hwnd, position));
                         presented = true;
                         present_start
                     };
@@ -880,19 +927,23 @@ fn run_loop(hwnd: HWND) -> Result<ExitAction, String> {
                             settings.top_gap <= 0.0,
                         );
                     let command = hover.pointer_moved(inside);
-                    set_hover(
-                        &mut animation,
-                        &mut animation_timer,
-                        &mut last_frame,
-                        inside,
-                    )?;
-                    apply_hover_command(
-                        hwnd,
-                        command,
-                        &mut animation,
-                        &mut animation_timer,
-                        &mut last_frame,
-                    )?;
+                    tolerate("hover update", || {
+                        set_hover(
+                            &mut animation,
+                            &mut animation_timer,
+                            &mut last_frame,
+                            inside,
+                        )
+                    });
+                    tolerate("hover command", || {
+                        apply_hover_command(
+                            hwnd,
+                            command,
+                            &mut animation,
+                            &mut animation_timer,
+                            &mut last_frame,
+                        )
+                    });
                 }
             }
             WM_TIMER if message.hwnd == hwnd && message.wParam == TIMER_ID_HOVER_GRACE => {
@@ -913,19 +964,23 @@ fn run_loop(hwnd: HWND) -> Result<ExitAction, String> {
                         })
                         .unwrap_or(false);
                 let command = hover.grace_expired(inside);
-                set_hover(
-                    &mut animation,
-                    &mut animation_timer,
-                    &mut last_frame,
-                    inside,
-                )?;
-                apply_hover_command(
-                    hwnd,
-                    command,
-                    &mut animation,
-                    &mut animation_timer,
-                    &mut last_frame,
-                )?;
+                tolerate("hover update", || {
+                    set_hover(
+                        &mut animation,
+                        &mut animation_timer,
+                        &mut last_frame,
+                        inside,
+                    )
+                });
+                tolerate("hover command", || {
+                    apply_hover_command(
+                        hwnd,
+                        command,
+                        &mut animation,
+                        &mut animation_timer,
+                        &mut last_frame,
+                    )
+                });
             }
             WM_TIMER if message.hwnd == hwnd && message.wParam == TIMER_ID_CLOCK => {
                 if update::take_ready() && update::restart_for_update() {
@@ -942,7 +997,7 @@ fn run_loop(hwnd: HWND) -> Result<ExitAction, String> {
                 ) && surface.clock_visible(animation.current, &settings)
                 {
                     surface.draw(animation.current, scale, &settings, &clock, animation.hover);
-                    surface.present(hwnd, position)?;
+                    tolerate("island present", || surface.present(hwnd, position));
                 }
             }
             WM_TIMER if message.hwnd == hwnd && message.wParam == TIMER_ID_UPDATE => {
@@ -951,10 +1006,12 @@ fn run_loop(hwnd: HWND) -> Result<ExitAction, String> {
             WM_TIMER if message.hwnd == hwnd && message.wParam == TIMER_ID_MEDIA => {
                 let hidden = crate::fullscreen::foreground_covers_island(hwnd);
                 if hidden != surface.fullscreen.hidden {
-                    surface.set_fullscreen(hwnd, hidden)?;
+                    tolerate("fullscreen retract", || {
+                        surface.set_fullscreen(hwnd, hidden)
+                    });
                     resume_hover_tracking(hwnd, &mut hover, &animation);
                     last_frame = Instant::now();
-                    animation_timer.start()?;
+                    animation_timer.ensure_started();
                 }
                 let was_dragging = surface.player.dragging;
                 surface.player.refresh();
@@ -994,27 +1051,34 @@ fn run_loop(hwnd: HWND) -> Result<ExitAction, String> {
                     && !animation_timer.is_active()
                 {
                     last_frame = Instant::now();
-                    animation_timer.start()?;
+                    animation_timer.ensure_started();
                 }
             }
             WM_APP_REFRESH_DISPLAY if message.hwnd == hwnd => {
                 scale = window_scale(hwnd);
-                surface.resize(canvas_size(scale), scale)?;
+                tolerate("surface resize", || {
+                    surface.resize(canvas_size(scale), scale)
+                });
                 surface.music_height = player_shape(hwnd, scale).height;
                 animation.target =
                     surface.display_target(animation.target, &settings, player_shape(hwnd, scale));
                 // The panel may have changed to a different refresh rate.
                 animation_timer.stop();
                 last_frame = Instant::now();
-                animation_timer.start()?;
-                position = primary_position(
-                    surface.size,
-                    settings.top_gap,
-                    settings.dock,
-                    animation.current.width * scale,
-                )?;
+                animation_timer.ensure_started();
+                if let Some(next) = tolerate("island placement", || {
+                    primary_position(
+                        surface.size,
+                        settings.top_gap,
+                        settings.dock,
+                        animation.current.width * scale,
+                        scale,
+                    )
+                }) {
+                    position = next;
+                }
                 surface.draw(animation.current, scale, &settings, &clock, animation.hover);
-                surface.present(hwnd, position)?;
+                tolerate("island present", || surface.present(hwnd, position));
             }
             WM_APP_TRAY_MENU if message.hwnd == hwnd => {
                 let event = (message.lParam as u32) & 0xFFFF;
@@ -1441,10 +1505,13 @@ impl Surface {
         if (goal - self.visibility).abs() < 0.002 {
             self.visibility = goal;
         }
-        let candidate = self
-            .player
-            .compact_lyric(now, settings.lyric_offset_ms)
-            .map(|(line, at)| (line.clone(), at));
+        // The player borrow must end before the mutable render phase below;
+        // capture the small scalars and the rendered text here instead of
+        // cloning the whole lyric line on every frame.
+        let candidate = self.player.compact_lyric(now, settings.lyric_offset_ms);
+        let compact_pulse = candidate.as_ref().map(|(line, at)| (line.start, *at));
+        let compact_line_text = candidate.as_ref().map(|(line, _)| line.text());
+        let compact_lyric = candidate.is_some() && self.player.music && settings.compact_lyrics;
         // Content remains current while hidden. Only invalid or replaced media
         // discards the presentation, so collapse never revives a stale line.
         if candidate.is_none()
@@ -1458,10 +1525,7 @@ impl Surface {
                 fade.music = false;
             }
         }
-        let compact_lyric = candidate
-            .as_ref()
-            .filter(|_| self.player.music && settings.compact_lyrics);
-        self.compact_active = compact_lyric.is_some();
+        self.compact_active = compact_lyric;
         if let Some((line, at)) = &candidate {
             self.compact.update(
                 &self.player.snapshot.key,
@@ -1473,16 +1537,16 @@ impl Surface {
         }
         let fade = self.compact_fade.get_or_insert_with(|| {
             let mut fade = PageFade::new(now);
-            fade.music = compact_lyric.is_some();
+            fade.music = compact_lyric;
             fade.value = if fade.music { 1.0 } else { 0.0 };
             fade
         });
         // Prime the destination while compact content is fully hidden, before
         // the first compact frame of a collapse can reveal clock glyphs.
-        if compact_lyric.is_some() && state.compact_content_alpha() == 0.0 {
+        if compact_lyric && state.compact_content_alpha() == 0.0 {
             fade.snap_to_music();
         }
-        let compact_mix = fade.advance(compact_lyric.is_some(), now);
+        let compact_mix = fade.advance(compact_lyric, now);
         let length = self.size.0 as usize * self.size.1 as usize * 4;
         // SAFETY: The DIB allocated exactly size.0 * size.1 * 4 writable bytes and outlives self.
         let pixels = unsafe { std::slice::from_raw_parts_mut(self.bits, length) };
@@ -1505,7 +1569,7 @@ impl Surface {
             .update(self.player.snapshot.artwork.as_ref());
         self.cover_glow.advance(
             elapsed,
-            compact_lyric.is_some() && self.player.snapshot.playing && !self.fullscreen.hidden,
+            compact_lyric && self.player.snapshot.playing && !self.fullscreen.hidden,
         );
         if compact_mix > 0.0 {
             self.cover_glow.draw(pixels, self.size, params);
@@ -1546,9 +1610,9 @@ impl Surface {
         if compact_mix > 0.0 {
             // Countdown is hidden within the pulse window; only lyric text and
             // the note receive this opacity. Background and glow are already drawn.
-            let pulse = compact_lyric.map_or(1.0, |(line, at)| {
+            let pulse = compact_pulse.map_or(1.0, |(start, at)| {
                 crate::compact::wait_pulse(
-                    line.start - at,
+                    start - at,
                     self.player.snapshot.playing,
                     state.compact_content_alpha() > 0.0 && !self.fullscreen.hidden,
                 )
@@ -1655,11 +1719,8 @@ impl Surface {
                 nodes.clear();
             }
             access.update(
-                if let Some((line, _)) = &compact_lyric {
-                    crate::i18n::format_copy(
-                        "HiyoDyna lyrics: {lyrics}",
-                        &[("lyrics", &line.text())],
-                    )
+                if let Some(lyrics) = &compact_line_text {
+                    crate::i18n::format_copy("HiyoDyna lyrics: {lyrics}", &[("lyrics", lyrics)])
                 } else if self.player.music && state.progress() > 0.9 {
                     crate::i18n::format_copy(
                         "HiyoDyna: {title} — {artist}",
@@ -1779,6 +1840,7 @@ fn primary_position(
     top_gap: f32,
     dock: DockAnchor,
     shape_width: f32,
+    scale: f32,
 ) -> Result<POINT, String> {
     let mut monitor = MONITORINFO {
         cbSize: size_of::<MONITORINFO>() as u32,
@@ -1805,7 +1867,9 @@ fn primary_position(
             .round() as i32,
             dock,
         ),
-        y: monitor.rcMonitor.top + top_gap.round() as i32,
+        // top_gap is a logical preference; like every other metric it must
+        // scale with the display DPI or the gap shrinks on HiDPI panels.
+        y: monitor.rcMonitor.top + (top_gap * scale).round() as i32,
     })
 }
 
@@ -1993,7 +2057,7 @@ fn apply_hover_command(
             }
             animation.expand();
             *last_frame = Instant::now();
-            animation_timer.start()?;
+            animation_timer.ensure_started();
             unsafe {
                 KillTimer(hwnd, TIMER_ID_HOVER_GRACE);
             }
@@ -2015,7 +2079,7 @@ fn apply_hover_command(
             }
             animation.collapse();
             *last_frame = Instant::now();
-            animation_timer.start()?;
+            animation_timer.ensure_started();
             unsafe {
                 KillTimer(hwnd, TIMER_ID_HOVER_GRACE);
                 KillTimer(hwnd, TIMER_ID_HOVER_RECHECK);
@@ -2185,6 +2249,14 @@ impl AnimationTimer {
         }
         self.source = Some(AnimationTimerSource::Window);
         Ok(())
+    }
+
+    /// Starts the animation timer in the steady state; a failure is logged and
+    /// the next event retries instead of tearing the overlay down.
+    fn ensure_started(&mut self) {
+        if let Err(error) = self.start() {
+            eprintln!("HiyoDyna animation timer unavailable: {error}");
+        }
     }
 
     fn end_period(&mut self) {
@@ -2477,17 +2549,22 @@ fn apply_tray_command(
     {
         tray.set_accent(settings.accent);
     }
-    animation_timer.set_unlimited(settings.unlimited_fps)?;
+    tolerate("unlimited fps switch", || {
+        animation_timer.set_unlimited(settings.unlimited_fps)
+    });
     animation.set_tuning(settings.tuning());
     if animation.target.height <= crate::animation::COMPACT.height + 1.0 {
         animation.target = surface.compact_shape(settings);
     }
-    *position = primary_position(
+    if let Ok(next) = primary_position(
         surface.size,
         settings.top_gap,
         settings.dock,
         animation.current.width * scale,
-    )?;
+        scale,
+    ) {
+        *position = next;
+    }
     if unsafe {
         SetWindowPos(
             hwnd,

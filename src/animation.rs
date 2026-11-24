@@ -218,6 +218,7 @@ impl Animation {
     fn integrate_axis(&mut self, dt: f32, axis: usize, omega: f32, damping: f32) {
         let current_width = self.current.width;
         let current_height = self.current.height;
+        let current_radius = self.current.radius;
         let (position, velocity, target, min, max) = match axis {
             0 => (
                 &mut self.current.width,
@@ -238,7 +239,11 @@ impl Animation {
                 &mut self.velocity.radius,
                 self.target.radius,
                 COMPACT.radius * OVERSHOOT_MIN,
-                EXPANDED.radius * OVERSHOOT_MAX,
+                // Native-chrome windows animate radius targets above the
+                // logical EXPANDED radius (physical pixels at window DPI);
+                // the clamp must follow the target or the spring can never
+                // settle at those sizes.
+                (EXPANDED.radius.max(self.target.radius) * OVERSHOOT_MAX).max(current_radius),
             ),
         };
 
@@ -403,6 +408,35 @@ mod tests {
                 "display-sized compact widths must settle instead of continuously rendering"
             );
             assert_eq!(animation.current, target);
+        }
+    }
+
+    #[test]
+    fn hidpi_chrome_targets_settle_instead_of_animating_forever() {
+        // window_chrome animates physical pixel targets (30 * dpi scale), so
+        // the radius overshoot clamp must not cap the spring below the target.
+        for scale in [1.25_f32, 1.5, 2.0] {
+            let radius = 30.0 * scale;
+            let mut animation = Animation::new();
+            animation.current = ShapeState {
+                width: 460.0 * scale,
+                height: 380.0 * scale,
+                radius,
+            };
+            animation.target = ShapeState {
+                width: 920.0 * scale,
+                height: 760.0 * scale,
+                radius,
+            };
+            let mut moving = true;
+            for _ in 0..600 {
+                moving = animation.advance(1.0 / 120.0);
+            }
+            assert!(
+                !moving,
+                "physical-pixel chrome targets must settle at scale {scale}"
+            );
+            assert_eq!(animation.current, animation.target);
         }
     }
 

@@ -76,12 +76,14 @@ pub(crate) fn render_frame_with_margin(pixels: &mut [u8], size: (u32, u32), para
         .max(0.0) as u32;
     let right = (center.0 + state.width * 0.5 + extension + reach + 1.0)
         .ceil()
+        .max(0.0)
         .min(size.0 as f32) as u32;
     let top = (center.1 - state.height * 0.5 - reach - 1.0)
         .floor()
         .max(0.0) as u32;
     let bottom = (center.1 + state.height * 0.5 + shadow_offset + reach + 1.0)
         .ceil()
+        .max(0.0)
         .min(size.1 as f32) as u32;
 
     let columns: Vec<_> = (left..right)

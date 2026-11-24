@@ -8,6 +8,12 @@ use windows_sys::Win32::Security::Cryptography::{
 };
 
 pub(crate) fn hash_bytes(bytes: &[u8]) -> Result<[u8; 32], String> {
+    // BCryptHash takes a 32-bit length; a larger buffer would silently hash
+    // the wrong amount. The download cap keeps this far below the limit, but
+    // fail loudly instead of verifying garbage.
+    if bytes.len() > u32::MAX as usize {
+        return Err("the input is too large for a single BCryptHash call".into());
+    }
     let mut algorithm: BCRYPT_ALG_HANDLE = std::ptr::null_mut();
     let status =
         unsafe { BCryptOpenAlgorithmProvider(&mut algorithm, BCRYPT_SHA256_ALGORITHM, null(), 0) };

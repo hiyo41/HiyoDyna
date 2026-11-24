@@ -22,7 +22,13 @@ export function applyDownloadInfo(info: DownloadInfo): void {
 
 export function initDownload(): void {
   const cached = readCache();
-  if (cached) applyDownloadInfo(cached);
+  if (cached) {
+    applyDownloadInfo(cached);
+    // A fresh cache means the API was answered within the TTL; re-fetching
+    // would spend an unauthenticated request (60/h per IP) for nothing and
+    // can visibly flip the label when GitHub's list changes.
+    return;
+  }
 
   const load = () => {
     void fetchLatest();

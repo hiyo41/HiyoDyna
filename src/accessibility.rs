@@ -322,11 +322,15 @@ impl Element {
         if !d.alive || d.hidden {
             return Err(UNAVAILABLE.into());
         }
-        if d.actions.len() < 16 {
-            d.actions.push(action);
-            unsafe {
-                PostMessageW(self.hwnd as _, MESSAGE, 0, 0);
-            }
+        if d.actions.len() >= 16 {
+            // A full queue means the island is not draining actions; report
+            // the failure so assistive tools know the activation was dropped
+            // instead of seeing a silent no-op success.
+            return Err(windows::core::HRESULT(UIA_E_INVALIDOPERATION as i32).into());
+        }
+        d.actions.push(action);
+        unsafe {
+            PostMessageW(self.hwnd as _, MESSAGE, 0, 0);
         }
         Ok(())
     }
@@ -458,7 +462,25 @@ impl IRawElementProviderFragment_Impl for Element_Impl {
     fn BoundingRectangle(&self) -> Result<UiaRect> {
         let node = self.node().ok();
         let d = self.data.lock().map_err(|_| UNAVAILABLE)?;
-        let rect = node.map_or(Rect::default(), |n| n.rect);
+        // The fragment root has no node of its own; reporting a zero rect
+        // would make magnifiers and screen readers treat the whole island as
+        // a single invisible point. Its extent is the union of the nodes.
+        let rect = match (self.id, node) {
+            (None, _) if !d.nodes.is_empty() => {
+                let mut left = f32::MAX;
+                let mut top = f32::MAX;
+                let mut right = f32::MIN;
+                let mut bottom = f32::MIN;
+                for node in &d.nodes {
+                    left = left.min(node.rect.x);
+                    top = top.min(node.rect.y);
+                    right = right.max(node.rect.x + node.rect.w);
+                    bottom = bottom.max(node.rect.y + node.rect.h);
+                }
+                Rect::new(left, top, (right - left).max(0.0), (bottom - top).max(0.0))
+            }
+            (_, node) => node.map_or(Rect::default(), |n| n.rect),
+        };
         Ok(UiaRect {
             left: f64::from(d.origin.0 + rect.x * d.scale),
             top: f64::from(d.origin.1 + rect.y * d.scale),

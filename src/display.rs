@@ -41,10 +41,12 @@ fn monitor_refresh_hz(hwnd: windows_sys::Win32::Foundation::HWND) -> Option<u32>
     use std::mem::size_of;
     use windows_sys::Win32::Graphics::Gdi::{
         DEVMODEW, ENUM_CURRENT_SETTINGS, EnumDisplaySettingsW, GetMonitorInfoW,
-        MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MONITORINFOEXW, MonitorFromWindow,
+        MONITOR_DEFAULTTONEAREST, MONITORINFO, MONITORINFOEXW, MonitorFromWindow,
     };
 
-    let monitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTOPRIMARY) };
+    // NEAREST keeps the pace tied to the panel the overlay is actually on;
+    // PRIMARY would silently report the wrong rate on a secondary display.
+    let monitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
     if monitor.is_null() {
         return None;
     }

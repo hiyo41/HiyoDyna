@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::ptr::null_mut;
 
-use windows_sys::Win32::Foundation::ERROR_FILE_NOT_FOUND;
+use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_MORE_DATA};
 use windows_sys::Win32::System::Registry::{
     HKEY_CURRENT_USER, REG_SZ, RRF_RT_REG_SZ, RegDeleteKeyValueW, RegGetValueW, RegSetKeyValueW,
 };
@@ -69,10 +69,10 @@ fn format_value(target: &Path) -> String {
 fn read_value() -> Option<String> {
     let subkey = wide(RUN_KEY);
     let name = wide(VALUE_NAME);
-    let mut buffer = [0_u16; 1024];
+    let mut buffer: Box<[u16]> = vec![0; 1024].into_boxed_slice();
     let mut size = (buffer.len() * 2) as u32;
     // SAFETY: The pointers are valid for the duration of the call and the buffer is writable.
-    let status = unsafe {
+    let mut status = unsafe {
         RegGetValueW(
             HKEY_CURRENT_USER,
             subkey.as_ptr(),
@@ -83,6 +83,26 @@ fn read_value() -> Option<String> {
             &mut size,
         )
     };
+    if status == ERROR_MORE_DATA {
+        // The existing value is longer than the default buffer (a long
+        // install path); retry with the size the registry reported instead of
+        // reporting autostart as off.
+        let needed = size as usize / 2 + 1;
+        buffer = vec![0; needed].into_boxed_slice();
+        size = (buffer.len() * 2) as u32;
+        // SAFETY: The pointers are valid for the duration of the call and the buffer is writable.
+        status = unsafe {
+            RegGetValueW(
+                HKEY_CURRENT_USER,
+                subkey.as_ptr(),
+                name.as_ptr(),
+                RRF_RT_REG_SZ,
+                null_mut(),
+                buffer.as_mut_ptr().cast(),
+                &mut size,
+            )
+        };
+    }
     if status != ERROR_SUCCESS {
         return None;
     }

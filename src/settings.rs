@@ -273,7 +273,12 @@ impl Settings {
         if let Some(parent) = path.parent() {
             let _ = fs::create_dir_all(parent);
         }
-        let _ = fs::write(path, self.serialize());
+        // Write through a temp file and rename, so a concurrent load on the
+        // update thread can never read a half-written settings file.
+        let temp = path.with_extension("ini.tmp");
+        if fs::write(&temp, self.serialize()).is_ok() && fs::rename(&temp, &path).is_err() {
+            let _ = fs::remove_file(&temp);
+        }
     }
 }
 

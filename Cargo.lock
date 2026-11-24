@@ -259,6 +259,7 @@ dependencies = [
  "serde_yaml",
  "windows",
  "windows-core",
+ "windows-future",
  "windows-sys 0.61.2",
 ]
 

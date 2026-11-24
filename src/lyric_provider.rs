@@ -601,7 +601,15 @@ pub(crate) fn resolve(
         return None;
     }
     // Old caches can contain plain text or a lower-quality automatic choice.
-    let key = format!("sync-v1\n{title}\n{artist}\n{album}\n{}", duration.round());
+    // Fields are length-prefixed so metadata containing newlines cannot make
+    // ("A\nB", "C") collide with ("A", "B\nC") on the same hash.
+    let key = format!(
+        "sync-v2\n{}\n{}\n{}\n{}",
+        length_prefix(title),
+        length_prefix(artist),
+        length_prefix(album),
+        duration.round()
+    );
     let path = cache_path(&key);
     if let Some(path) = &path
         && let Ok(meta) = path.metadata()
@@ -750,15 +758,35 @@ pub(crate) fn resolve(
         if let Ok(bytes) = serde_json::to_vec(&best)
             && bytes.len() <= 2_000_000
         {
-            let _ = std::fs::write(path, bytes);
+            // Write through a temp file so a crash mid-write cannot leave a
+            // truncated entry that still counts against the 128-entry bound.
+            let temp = path.with_extension("json.tmp");
+            if std::fs::write(&temp, bytes).is_ok() && std::fs::rename(&temp, path).is_err() {
+                let _ = std::fs::remove_file(&temp);
+            }
         }
     }
     best
 }
 
+/// Disambiguates a cache-key field: a length prefix keeps values containing
+/// separators from aliasing into the same key.
+fn length_prefix(field: &str) -> String {
+    format!("{}:{field}", field.chars().count())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn length_prefixed_cache_keys_disambiguate_metadata_newlines() {
+        assert_eq!(length_prefix("A\nB"), "3:A\nB");
+        // ("A\nB", "C") and ("A", "B\nC") must not hash to the same key.
+        let left = format!("{}\n{}", length_prefix("A\nB"), length_prefix("C"));
+        let right = format!("{}\n{}", length_prefix("A"), length_prefix("B\nC"));
+        assert_ne!(left, right);
+    }
 
     #[test]
     fn synchronized_selection_rejects_plain_text_in_automatic_and_manual_paths() {

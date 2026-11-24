@@ -17,6 +17,10 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png"]
 [target.'cfg(windows)'.dependencies]
 windows-core = "0.62"
 windows = { version = "0.62", features = ["Foundation", "Foundation_Collections", "Media_Control", "Storage_Streams", "Win32_System_WinRT", "Win32_UI_Accessibility", "Win32_System_Com", "Win32_System_Ole", "Win32_System_Variant"] }
+# Media async operations are awaited with a deadline, which needs the
+# IAsyncOperation/AsyncStatus surface from this crate (already in the tree
+# through the windows dependency; the version stays locked in Cargo.lock).
+windows-future = "0.3.2"
 windows-sys = { version = "0.61.2", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",

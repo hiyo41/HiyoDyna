@@ -14,7 +14,8 @@ use windows_sys::Win32::Foundation::{
 };
 use windows_sys::Win32::System::SystemInformation::GetLocalTime;
 use windows_sys::Win32::System::Threading::{
-    CreateMutexW, OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
+    CreateMutexW, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+    QueryFullProcessImageNameW, WaitForSingleObject,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_APP};
 
@@ -501,6 +502,21 @@ fn should_apply(
     if applied_tag == Some(release.tag.as_str()) || embedded_tag == Some(release.tag.as_str()) {
         return false;
     }
+    // Comparable tags (pre-N and vX.Y.Z-N) are ordered numerically. The atom
+    // feed is sorted by last-edit time, so timestamp comparison alone would
+    // downgrade every Build user whenever an old release note is edited.
+    let mut comparable = false;
+    for reference in [applied_tag, embedded_tag].into_iter().flatten() {
+        if let Some(newer) = tag_is_newer(&release.tag, reference) {
+            comparable = true;
+            if !newer {
+                return false;
+            }
+        }
+    }
+    if comparable {
+        return true;
+    }
     let Some(published) = parse_rfc3339(&release.published) else {
         return false;
     };
@@ -510,6 +526,34 @@ fn should_apply(
     }
 }
 
+/// Numeric order for comparable tags: `pre-N` and `vX.Y.Z-N`. Returns `None`
+/// when either tag is not comparable or the two kinds differ; such pairs fall
+/// back to the timestamp comparison.
+fn tag_is_newer(candidate: &str, applied: &str) -> Option<bool> {
+    let order = |tag: &str| -> Option<(u8, u64, u64, u64, u64)> {
+        if let Some(number) = tag.strip_prefix("pre-") {
+            return number.parse::<u64>().ok().map(|n| (0, n, 0, 0, 0));
+        }
+        let rest = tag.strip_prefix('v')?;
+        let (version, build) = rest.rsplit_once('-')?;
+        let build = build.parse::<u64>().ok()?;
+        let mut parts = version.split('.');
+        let major = parts.next()?.parse::<u64>().ok()?;
+        let minor = parts.next()?.parse::<u64>().ok()?;
+        let patch = parts.next()?.parse::<u64>().ok()?;
+        if parts.next().is_some() {
+            return None;
+        }
+        Some((1, major, minor, patch, build))
+    };
+    let candidate = order(candidate)?;
+    let applied = order(applied)?;
+    if candidate.0 != applied.0 {
+        return None;
+    }
+    Some(candidate > applied)
+}
+
 fn select_release(channel: UpdateChannel) -> Result<Option<Release>, String> {
     match channel {
         UpdateChannel::Build => Ok(select_from_atom(&fetch_atom()?, channel)),
@@ -517,7 +561,15 @@ fn select_release(channel: UpdateChannel) -> Result<Option<Release>, String> {
             Ok(bytes) => {
                 let text = String::from_utf8(bytes)
                     .map_err(|error| format!("release JSON is not UTF-8: {error}"))?;
-                Ok(Some(parse_latest_json(&text)?))
+                // A non-conforming latest tag degrades to the atom feed just
+                // like a missing release instead of failing the channel.
+                match parse_latest_json(&text) {
+                    Ok(release) => Ok(Some(release)),
+                    Err(error) => {
+                        log(&format!("could not use the latest release: {error}"));
+                        Ok(stable_candidate(None, &fetch_atom()?))
+                    }
+                }
             }
             Err(error) if error.status == Some(404) => Ok(stable_candidate(None, &fetch_atom()?)),
             Err(error) => Err(error.to_string()),
@@ -636,6 +688,12 @@ fn apply_staged_update(
     let manifest = read_manifest(&paths.manifest).ok_or("staged update has no valid manifest")?;
     let actual = crate::sha256::to_hex(&crate::sha256::hash_file(&paths.staged)?);
     if !actual.eq_ignore_ascii_case(manifest.sha256.trim()) {
+        // Remember the failed tag before the manifest is discarded; otherwise
+        // record_failed after this error finds nothing and a corrupt stage is
+        // re-downloaded and re-discarded every 30 minutes forever.
+        let mut state = read_state_from(&paths.state);
+        state.failed_tag = Some(manifest.tag.clone());
+        write_state(&paths.state, &state);
         discard_stage(paths);
         return Err("staged update failed its SHA-256 check".to_string());
     }
@@ -861,8 +919,11 @@ fn download_and_stage(
     stage_bytes(installed, &bytes, &manifest)
 }
 
-pub(crate) const WM_APP_UPDATE_READY: u32 = WM_APP + 5;
-pub(crate) const WM_APP_UPDATE_STATUS: u32 = WM_APP + 6;
+// WM_APP+5/+6 are taken by the island's cancel-seek and quick-action
+// messages; the update messages must stay disjoint from window.rs so the
+// run-loop arms do not shadow each other.
+pub(crate) const WM_APP_UPDATE_READY: u32 = WM_APP + 8;
+pub(crate) const WM_APP_UPDATE_STATUS: u32 = WM_APP + 9;
 pub(crate) const UPDATE_INTERVAL_MILLISECONDS: u32 = 30 * 60 * 1000;
 const UPDATE_MUTEX_NAME: &str = "Local\\HiyoDynaUpdate";
 
@@ -1051,7 +1112,13 @@ pub(crate) fn run_apply_helper() {
     let Some(_guard) = acquire_update_mutex() else {
         return;
     };
-    let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+    let handle = unsafe {
+        OpenProcess(
+            PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+            0,
+            pid,
+        )
+    };
     if handle.is_null() {
         let error = unsafe { GetLastError() };
         if error != ERROR_INVALID_PARAMETER {
@@ -1062,6 +1129,27 @@ pub(crate) fn run_apply_helper() {
         }
         log(&format!("the previous process {pid} already exited"));
     } else {
+        // The pid arrives on the command line, so any local caller could pass
+        // an unrelated process. Only wait for a process that really is
+        // HiyoDyna; everything else refuses the swap.
+        let mut image = [0_u16; 1024];
+        let mut length = image.len() as u32;
+        let named =
+            unsafe { QueryFullProcessImageNameW(handle, 0, image.as_mut_ptr(), &mut length) } != 0;
+        let is_hiyo = named
+            .then(|| String::from_utf16_lossy(&image[..length as usize]))
+            .is_some_and(|path| {
+                path.rsplit(['\\', '/'])
+                    .next()
+                    .is_some_and(|name| name.eq_ignore_ascii_case("HiyoDyna.exe"))
+            });
+        if !is_hiyo {
+            log(&format!(
+                "process {pid} is not HiyoDyna; refusing to apply the update"
+            ));
+            unsafe { CloseHandle(handle) };
+            return;
+        }
         let wait = unsafe { WaitForSingleObject(handle, 30_000) };
         unsafe { CloseHandle(handle) };
         if wait != WAIT_OBJECT_0 {
@@ -1241,6 +1329,17 @@ fn perform_check(channel: UpdateChannel) -> CheckOutcome {
         return CheckOutcome::Status(UpdateResult::UpToDate);
     }
 
+    // A channel switch or an exiting app invalidates the work before any
+    // bytes move; these were previously checked only after the download.
+    if APP_EXITING.load(Ordering::SeqCst) {
+        log("skipping the update check because HiyoDyna is exiting");
+        return CheckOutcome::Status(UpdateResult::UpToDate);
+    }
+    if Settings::load().update != channel {
+        log("skipping the update check because the channel changed");
+        return CheckOutcome::Status(UpdateResult::UpToDate);
+    }
+
     log(&format!(
         "downloading {} from the {} channel",
         release.tag,
@@ -1253,6 +1352,8 @@ fn perform_check(channel: UpdateChannel) -> CheckOutcome {
             return CheckOutcome::Status(UpdateResult::Failed);
         }
     };
+    // The checks before the download shrink this window; these cover the
+    // seconds the download itself was in flight.
     if Settings::load().update != channel {
         discard_stage(&paths);
         log("discarded the staged update because the channel changed");
@@ -1386,6 +1487,48 @@ fn wide(text: &str) -> Vec<u16> {
 #[cfg(test)]
 mod tests {
     use crate::settings::UpdateChannel;
+
+    fn release(tag: &str, published: &str) -> super::Release {
+        super::Release {
+            tag: tag.into(),
+            published: published.into(),
+        }
+    }
+
+    #[test]
+    fn comparable_tags_order_numerically_regardless_of_feed_timestamps() {
+        // Editing an old release's notes moves it to the atom feed top with a
+        // fresh <updated> time; a newer installed pre-release must stay put.
+        let newer_published = "2026-11-24T12:00:00Z";
+        assert!(!super::should_apply(
+            &release("pre-3", newer_published),
+            Some("pre-10"),
+            Some(super::parse_rfc3339("2026-11-20T00:00:00Z").unwrap()),
+            None,
+            None,
+        ));
+        assert!(super::should_apply(
+            &release("pre-11", newer_published),
+            Some("pre-10"),
+            Some(super::parse_rfc3339("2026-11-20T00:00:00Z").unwrap()),
+            None,
+            None,
+        ));
+        // Version tags order by (major, minor, patch, build).
+        assert_eq!(super::tag_is_newer("v1.2.0-1", "v1.1.9-5"), Some(true));
+        assert_eq!(super::tag_is_newer("v1.2.0-1", "v1.2.0-1"), Some(false));
+        assert_eq!(super::tag_is_newer("v1.2.0-1", "v1.2.1-0"), Some(false));
+        // Mixed kinds are not comparable and fall through to timestamps.
+        assert_eq!(super::tag_is_newer("pre-9", "v1.0.0-1"), None);
+        // The embedded build tag blocks a downgrade even without state.
+        assert!(!super::should_apply(
+            &release("pre-4", newer_published),
+            None,
+            None,
+            None,
+            Some("pre-8"),
+        ));
+    }
 
     #[test]
     fn build_identity_reads_release_metadata_and_accepts_install_time() {
