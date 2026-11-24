@@ -35,3 +35,20 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[lints.clippy]
+unwrap_used = "warn"
+expect_used = "allow"
+missing_assert_message = "warn"
+string_add = "warn"
+dbg_macro = "warn"
+todo = "warn"
+rc_buffer = "warn"
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+module_inception = "allow"
+enum_glob_use = "allow"

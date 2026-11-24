@@ -36,7 +36,11 @@ impl<R, L> Job<R, L> {
     }
 
     fn deliver(&self, response: Completion<R, L>) {
-        let mut responses = self.mailbox.responses.lock().unwrap();
+        let mut responses = self
+            .mailbox
+            .responses
+            .lock()
+            .expect("the worker cannot panic while holding the mailbox lock");
         if self.current() {
             responses.push((self.revision, response));
         }
@@ -95,11 +99,21 @@ impl<R, L> Session<R, L> {
 
     fn close(&self) {
         self.mailbox.revision.fetch_add(1, Ordering::AcqRel);
-        self.mailbox.responses.lock().unwrap().clear();
+        self.mailbox
+            .responses
+            .lock()
+            .expect("the worker cannot panic while holding the mailbox lock")
+            .clear();
     }
 
     fn poll(&mut self) -> Vec<Event<L>> {
-        let responses = std::mem::take(&mut *self.mailbox.responses.lock().unwrap());
+        let responses = std::mem::take(
+            &mut *self
+                .mailbox
+                .responses
+                .lock()
+                .expect("the worker cannot panic while holding the mailbox lock"),
+        );
         let revision = self.mailbox.revision.load(Ordering::Acquire);
         responses
             .into_iter()
@@ -248,7 +262,10 @@ mod native {
             accent: style.accent,
         };
         if let Some(position) = state.row_cache.iter().position(|row| row.key == key) {
-            let row = state.row_cache.remove(position).unwrap();
+            let row = state
+                .row_cache
+                .remove(position)
+                .expect("row_cache position came from position()");
             let pixels = row.pixels.clone();
             state.row_cache.push_back(row);
             return pixels;
@@ -324,13 +341,16 @@ mod native {
             unsafe {
                 let name = wide(label);
                 for property in [PROPID_ACC_NAME, Name_Property_GUID] {
-                    self.service.as_ref().unwrap().SetHwndPropStr(
-                        windows::Win32::Foundation::HWND(self.list),
-                        OBJID_CLIENT as u32,
-                        0,
-                        property,
-                        windows::core::PCWSTR(name.as_ptr()),
-                    )?;
+                    self.service
+                        .as_ref()
+                        .expect("ResultsName::new initialized the accessibility service")
+                        .SetHwndPropStr(
+                            windows::Win32::Foundation::HWND(self.list),
+                            OBJID_CLIENT as u32,
+                            0,
+                            property,
+                            windows::core::PCWSTR(name.as_ptr()),
+                        )?;
                 }
                 Ok(())
             }
@@ -512,7 +532,10 @@ mod native {
                         return false;
                     };
                     if surface.resize(placement.width as u32, height as u32) {
-                        let top = previous.unwrap().offset % row;
+                        let top = previous
+                            .expect("geometry_changed is false, so a previous placement exists")
+                            .offset
+                            % row;
                         surface.copy_from(
                             dc,
                             RECT {
