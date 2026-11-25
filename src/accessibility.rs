@@ -673,6 +673,27 @@ mod tests {
     }
 
     #[test]
+    fn incidental_native_focus_does_not_hold_the_island_open() {
+        // Closing a tray menu or an owned dialog leaves native focus on the
+        // Island without focusing an accessible item. Hover treats only an
+        // accessible focus ring as keyboard navigation, so the pointer may
+        // collapse the panel afterwards.
+        let host = Host {
+            hwnd: 0,
+            data: Arc::new(Mutex::new(Data {
+                alive: true,
+                nodes: vec![Node::button(1, "Play", Rect::default(), true)],
+                native_focused: true,
+                focused: None,
+                ..Default::default()
+            })),
+        };
+        assert!(host.focus_rect().is_none());
+        host.data.lock().unwrap().focused = Some(1);
+        assert!(host.focus_rect().is_some());
+    }
+
+    #[test]
     fn accessible_focus_properties_require_native_ownership() {
         let data = Arc::new(Mutex::new(Data {
             alive: true,

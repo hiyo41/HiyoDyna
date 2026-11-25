@@ -1,7 +1,7 @@
 use std::mem::size_of;
 use std::ptr::{null, null_mut};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Foundation::{
     CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE, HWND, LPARAM, LRESULT, POINT, SIZE,
@@ -257,6 +257,8 @@ fn run_loop(hwnd: HWND) -> Result<ExitAction, String> {
     }
 
     let mut last_frame = Instant::now();
+    let mut hover_grace_deadline: Option<Instant> = None;
+    let mut last_hover_poll = Instant::now();
     let mut animation_timer = AnimationTimer::new(hwnd);
     animation_timer.set_unlimited(settings.unlimited_fps)?;
     let trace_frames = std::env::var_os("HIYODYNA_TRACE_FRAMES").is_some();
@@ -749,6 +751,7 @@ fn run_loop(hwnd: HWND) -> Result<ExitAction, String> {
                         &mut animation,
                         &mut animation_timer,
                         &mut last_frame,
+                        &mut hover_grace_deadline,
                     )
                 });
             }
@@ -775,6 +778,7 @@ fn run_loop(hwnd: HWND) -> Result<ExitAction, String> {
                         &mut animation,
                         &mut animation_timer,
                         &mut last_frame,
+                        &mut hover_grace_deadline,
                     )
                 });
             }
@@ -912,13 +916,71 @@ fn run_loop(hwnd: HWND) -> Result<ExitAction, String> {
                         }
                     }
                 }
+                // WM_TIMER is low priority and only generated for an empty
+                // queue, so a saturated render stream can postpone the hover
+                // recheck and grace for a long time. Drive both from the
+                // frame loop while frames are flowing; the timers remain the
+                // idle-period fallback.
+                if !surface.passthrough && !surface.fullscreen.hidden && quick_menu.is_none() {
+                    if now.saturating_duration_since(last_hover_poll)
+                        >= Duration::from_millis(u64::from(HOVER_RECHECK_MILLISECONDS))
+                    {
+                        last_hover_poll = now;
+                        let inside =
+                            hover_inside(hwnd, &mut surface, &animation, position, &settings);
+                        let command = hover.pointer_moved(inside);
+                        tolerate("hover update", || {
+                            set_hover(
+                                &mut animation,
+                                &mut animation_timer,
+                                &mut last_frame,
+                                inside,
+                            )
+                        });
+                        tolerate("hover command", || {
+                            apply_hover_command(
+                                hwnd,
+                                command,
+                                &mut animation,
+                                &mut animation_timer,
+                                &mut last_frame,
+                                &mut hover_grace_deadline,
+                            )
+                        });
+                    }
+                    if hover_grace_deadline.is_some_and(|deadline| now >= deadline) {
+                        hover_grace_deadline = None;
+                        let inside =
+                            hover_inside(hwnd, &mut surface, &animation, position, &settings);
+                        let command = hover.grace_expired(inside);
+                        tolerate("hover update", || {
+                            set_hover(
+                                &mut animation,
+                                &mut animation_timer,
+                                &mut last_frame,
+                                inside,
+                            )
+                        });
+                        tolerate("hover command", || {
+                            apply_hover_command(
+                                hwnd,
+                                command,
+                                &mut animation,
+                                &mut animation_timer,
+                                &mut last_frame,
+                                &mut hover_grace_deadline,
+                            )
+                        });
+                    }
+                }
             }
             WM_TIMER if message.hwnd == hwnd && message.wParam == TIMER_ID_HOVER_RECHECK => {
                 if surface.passthrough || surface.fullscreen.hidden || quick_menu.is_some() {
                     continue;
                 }
                 if let Some((x, y)) = pointer_position(hwnd) {
-                    let inside = keyboard_focused(hwnd)
+                    let navigation = keyboard_navigation_active(surface.access.as_ref());
+                    let inside = navigation
                         || surface.player.dragging
                         || surface.hover_contains(
                             &animation,
@@ -942,16 +1004,19 @@ fn run_loop(hwnd: HWND) -> Result<ExitAction, String> {
                             &mut animation,
                             &mut animation_timer,
                             &mut last_frame,
+                            &mut hover_grace_deadline,
                         )
                     });
                 }
             }
             WM_TIMER if message.hwnd == hwnd && message.wParam == TIMER_ID_HOVER_GRACE => {
                 unsafe { KillTimer(hwnd, TIMER_ID_HOVER_GRACE) };
+                hover_grace_deadline = None;
                 if surface.passthrough || surface.fullscreen.hidden || quick_menu.is_some() {
                     continue;
                 }
-                let inside = keyboard_focused(hwnd)
+                let navigation = keyboard_navigation_active(surface.access.as_ref());
+                let inside = navigation
                     || surface.player.dragging
                     || pointer_position(hwnd)
                         .map(|(x, y)| {
@@ -979,6 +1044,7 @@ fn run_loop(hwnd: HWND) -> Result<ExitAction, String> {
                         &mut animation,
                         &mut animation_timer,
                         &mut last_frame,
+                        &mut hover_grace_deadline,
                     )
                 });
             }
@@ -1844,6 +1910,30 @@ fn keyboard_focused(hwnd: HWND) -> bool {
 fn keyboard_focused_from_access(access: &crate::accessibility::Host) -> bool {
     access.focus_rect().is_some()
 }
+/// A closing menu or owned dialog can leave native keyboard focus on the
+/// Island; `GetFocus` keeps reporting it for the thread even after the user
+/// moves to another app. Only accessibility navigation tracks a focused item
+/// and draws the focus ring, so that is the state that holds the Island open.
+fn keyboard_navigation_active(access: Option<&crate::accessibility::Host>) -> bool {
+    access.is_some_and(keyboard_focused_from_access)
+}
+fn hover_inside(
+    hwnd: HWND,
+    surface: &mut Surface,
+    animation: &Animation,
+    position: POINT,
+    settings: &Settings,
+) -> bool {
+    if surface.passthrough || surface.fullscreen.hidden {
+        return false;
+    }
+    if keyboard_navigation_active(surface.access.as_ref()) || surface.player.dragging {
+        return true;
+    }
+    pointer_position(hwnd).is_some_and(|point| {
+        surface.hover_contains(animation, position, point, settings.top_gap <= 0.0)
+    })
+}
 
 impl Drop for Surface {
     fn drop(&mut self) {
@@ -2070,9 +2160,11 @@ fn apply_hover_command(
     animation: &mut Animation,
     animation_timer: &mut AnimationTimer,
     last_frame: &mut Instant,
+    grace_deadline: &mut Option<Instant>,
 ) -> Result<(), String> {
     match command {
         HoverCommand::Expand => {
+            *grace_deadline = None;
             if animation_timer.is_active() {
                 animation.advance(last_frame.elapsed().as_secs_f32());
             }
@@ -2095,6 +2187,7 @@ fn apply_hover_command(
             }
         }
         HoverCommand::Collapse => {
+            *grace_deadline = None;
             if animation_timer.is_active() {
                 animation.advance(last_frame.elapsed().as_secs_f32());
             }
@@ -2107,14 +2200,21 @@ fn apply_hover_command(
             }
         }
         HoverCommand::ArmGrace => {
+            // The animation frame loop also enforces this deadline because a
+            // saturated render queue can postpone WM_TIMER for a long time.
+            *grace_deadline =
+                Some(Instant::now() + Duration::from_millis(u64::from(HOVER_GRACE_MILLISECONDS)));
             if unsafe { SetTimer(hwnd, TIMER_ID_HOVER_GRACE, HOVER_GRACE_MILLISECONDS, None) } == 0
             {
                 return Err(last_error("SetTimer"));
             }
         }
-        HoverCommand::CancelGrace => unsafe {
-            KillTimer(hwnd, TIMER_ID_HOVER_GRACE);
-        },
+        HoverCommand::CancelGrace => {
+            *grace_deadline = None;
+            unsafe {
+                KillTimer(hwnd, TIMER_ID_HOVER_GRACE);
+            }
+        }
         HoverCommand::None => {}
     }
     Ok(())
