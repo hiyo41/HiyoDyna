@@ -36,11 +36,14 @@ impl<R, L> Job<R, L> {
     }
 
     fn deliver(&self, response: Completion<R, L>) {
+        // Poison recovery matches the update-state convention: a panicked
+        // holder must not turn a recoverable worker panic into a UI-thread
+        // panic on the next delivery.
         let mut responses = self
             .mailbox
             .responses
             .lock()
-            .expect("the worker cannot panic while holding the mailbox lock");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if self.current() {
             responses.push((self.revision, response));
         }
@@ -102,7 +105,7 @@ impl<R, L> Session<R, L> {
         self.mailbox
             .responses
             .lock()
-            .expect("the worker cannot panic while holding the mailbox lock")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clear();
     }
 
@@ -112,7 +115,7 @@ impl<R, L> Session<R, L> {
                 .mailbox
                 .responses
                 .lock()
-                .expect("the worker cannot panic while holding the mailbox lock"),
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
         );
         let revision = self.mailbox.revision.load(Ordering::Acquire);
         responses

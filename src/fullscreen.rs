@@ -20,6 +20,11 @@ impl Transition {
             return;
         }
         let goal = f32::from(self.hidden);
+        if crate::animation::reduced_motion() {
+            // Fullscreen retract lands instantly; no morph under reduced motion.
+            self.amount = goal;
+            return;
+        }
         let response = if self.hidden { 0.06 } else { 0.085 };
         self.amount += (goal - self.amount) * (1.0 - (-dt.min(0.1) / response).exp());
         if (goal - self.amount).abs() < 0.002 {

@@ -13,9 +13,12 @@ pub(crate) struct CoverGlow {
 
 impl CoverGlow {
     pub fn advance(&mut self, elapsed: f32, playing: bool) {
-        if playing && elapsed.is_finite() {
-            self.phase = (self.phase + elapsed.max(0.0) * 0.32) % std::f32::consts::TAU;
+        // The glow's slow color sweep is ambient animation; hold it still
+        // when the OS asks for reduced motion (DESIGN.md motion policy).
+        if crate::animation::reduced_motion() || !playing || !elapsed.is_finite() {
+            return;
         }
+        self.phase = (self.phase + elapsed.max(0.0) * 0.32) % std::f32::consts::TAU;
     }
     pub fn update(&mut self, artwork: Option<&Arc<image::RgbaImage>>) {
         if self

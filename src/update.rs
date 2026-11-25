@@ -415,7 +415,10 @@ fn parse_atom(text: &str) -> Vec<Release> {
                 .split_once("/releases/tag/")
                 .and_then(|(_, rest)| rest.split('"').next())
                 .map(str::trim)
-                .filter(|tag| !tag.is_empty())?;
+                // Only tags matching the release convention may ever stage a
+                // binary; a malformed or hostile feed entry must not reach the
+                // download URL below.
+                .filter(|tag| is_valid_tag(tag))?;
             let published = between(entry, "<updated>", "</updated>")?;
             Some(Release {
                 tag: tag.to_string(),
@@ -626,7 +629,6 @@ fn is_official_tag(tag: &str) -> bool {
     parts.next().is_none()
 }
 
-#[cfg(test)]
 fn is_valid_tag(tag: &str) -> bool {
     is_pre_release(tag) || is_official_tag(tag)
 }
@@ -890,10 +892,12 @@ fn download_and_stage(
         return Ok(paths);
     }
     discard_stage(&paths);
+    // encode_tag keeps the asset URL canonical even if a future tag gains
+    // reserved characters; classify() already uses it for the release page.
     let base = format!(
         "https://github.com/{}/releases/download/{}",
         repo_slug(),
-        release.tag
+        encode_tag(&release.tag)
     );
     let hash = crate::net::get(&format!("{base}/HiyoDyna.exe.sha256"), 1024)
         .map_err(|error| format!("could not download the update hash: {error}"))?;

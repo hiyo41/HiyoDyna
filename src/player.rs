@@ -32,7 +32,13 @@ pub(crate) struct Player {
     last_lyric_frame: Instant,
     anchor_line: usize,
     last_lyric_position: Option<f64>,
+    artwork_shown: Option<usize>,
+    artwork_fade_started: Option<Instant>,
 }
+
+/// Crossfade window when one artwork replaces another. The first artwork of
+/// a session does not fade: the page fade already reveals the whole panel.
+const ARTWORK_FADE_SECONDS: f32 = 0.22;
 
 struct SeekPreview {
     seconds: f64,
@@ -150,6 +156,8 @@ impl Player {
             last_lyric_frame: Instant::now(),
             anchor_line: 0,
             last_lyric_position: None,
+            artwork_shown: None,
+            artwork_fade_started: None,
         }
     }
     pub fn refresh(&mut self) {
@@ -629,8 +637,37 @@ impl Player {
             );
             return;
         }
+        // Crossfade between artworks. Pointer identity is safe here: the
+        // Arc clone cached in `layout_lyrics`/the snapshot keeps each image
+        // alive, so a matching address always means the same image.
+        let artwork_key = s
+            .artwork
+            .as_ref()
+            .map(|art| std::sync::Arc::as_ptr(art) as usize);
+        if artwork_key != self.artwork_shown {
+            self.artwork_fade_started = match (self.artwork_shown, artwork_key) {
+                (Some(_), Some(_)) if !crate::animation::reduced_motion() => Some(now),
+                _ => None,
+            };
+            self.artwork_shown = artwork_key;
+        }
+        let artwork_alpha = match self.artwork_fade_started {
+            Some(started) => {
+                let elapsed = now.saturating_duration_since(started).as_secs_f32();
+                if elapsed >= ARTWORK_FADE_SECONDS {
+                    self.artwork_fade_started = None;
+                    1.0
+                } else {
+                    (elapsed / ARTWORK_FADE_SECONDS).min(1.0)
+                }
+            }
+            None => 1.0,
+        };
         if let Some(art) = &s.artwork {
+            let opacity = c.opacity;
+            c.opacity *= artwork_alpha;
             c.artwork(art, artwork_rect, 14.0);
+            c.opacity = opacity;
         } else {
             c.rect(artwork_rect, 14.0, accent, 0.14);
             c.text(
@@ -825,7 +862,13 @@ impl Player {
                     > f64::from(elapsed) * s.timeline.as_ref().map_or(1.0, |t| t.rate.abs()) + 0.75
             });
             self.last_lyric_position = Some(at);
-            if layout_changed || jumped || self.seek_preview.is_some() {
+            if layout_changed
+                || jumped
+                || self.seek_preview.is_some()
+                || crate::animation::reduced_motion()
+            {
+                // Reduced motion: the lyric view follows the position without
+                // the eased scroll.
                 self.smooth_line = target as f32;
                 self.smooth_offset = target_offset;
             } else {
@@ -1056,6 +1099,7 @@ impl Player {
         self.dirty
             || self.following
             || self.seek_preview.is_some()
+            || self.artwork_fade_started.is_some()
             || self.snapshot.timeline.as_ref().is_some_and(|t| t.playing)
     }
     pub fn compact_drawn(&mut self) {

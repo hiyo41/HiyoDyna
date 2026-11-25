@@ -263,7 +263,13 @@ impl MediaWorker {
         self.thread.unpark();
     }
     pub fn snapshot(&self) -> MediaSnapshot {
-        self.state.lock().map(|s| s.clone()).unwrap_or_default()
+        // Poison recovery keeps the last published state visible instead of
+        // flashing the UI empty after a (recovered) worker panic; the worker
+        // itself republishes on its next pass.
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
     pub fn use_lyrics(&self, key: &str, generation: u64, lyrics: Arc<Lyrics>) -> bool {
         let Ok(mut state) = self.state.lock() else {

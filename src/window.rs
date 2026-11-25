@@ -1042,8 +1042,11 @@ fn run_loop(hwnd: HWND) -> Result<ExitAction, String> {
                     || (surface.player.music && animation.current.progress() > 0.9)
                     || collapsed;
                 let needs_frame = surface.player.needs_frame();
-                unsafe {
-                    SetTimer(hwnd, TIMER_ID_MEDIA, 100, None);
+                // A failed re-arm would silently freeze the media poll and the
+                // lyrics/progress with it; surface the failure the same way as
+                // the other transient steady-state errors.
+                if unsafe { SetTimer(hwnd, TIMER_ID_MEDIA, 100, None) } == 0 {
+                    eprintln!("HiyoDyna media poll re-arm: {}", last_error("SetTimer"));
                 }
                 if visible
                     && !surface.fullscreen.hidden
@@ -1213,11 +1216,17 @@ impl PageFade {
             .as_secs_f32()
             .min(0.1);
         self.updated = now;
+        let goal = if music { 1.0 } else { 0.0 };
+        if crate::animation::reduced_motion() {
+            // Page switches land instantly; no crossfade under reduced motion.
+            self.music = music;
+            self.value = goal;
+            return self.value;
+        }
         if music != self.music {
             self.music = music;
             return self.value;
         }
-        let goal = if music { 1.0 } else { 0.0 };
         self.value += (goal - self.value) * (1.0 - (-elapsed / 0.055).exp());
         if (goal - self.value).abs() < 0.002 {
             self.value = goal;
@@ -1493,6 +1502,14 @@ impl Surface {
         hover: f32,
     ) {
         let now = Instant::now();
+        // DESIGN.md: reduced motion removes the automatic spring, overshoot,
+        // and halo. The shadow lift and rim brightening ride on hover too, so
+        // zeroing it here keeps the resting look under reduced motion.
+        let hover = if crate::animation::reduced_motion() {
+            0.0
+        } else {
+            hover
+        };
         let goal = if self.passthrough { 0.16 } else { 1.0 };
         let elapsed = now
             .saturating_duration_since(self.visibility_updated)
@@ -1501,9 +1518,13 @@ impl Surface {
         self.visibility_updated = now;
         self.fullscreen.advance(elapsed);
         let state = self.fullscreen.shape(state);
-        self.visibility += (goal - self.visibility) * (1.0 - (-elapsed / 0.045).exp());
-        if (goal - self.visibility).abs() < 0.002 {
+        if crate::animation::reduced_motion() {
             self.visibility = goal;
+        } else {
+            self.visibility += (goal - self.visibility) * (1.0 - (-elapsed / 0.045).exp());
+            if (goal - self.visibility).abs() < 0.002 {
+                self.visibility = goal;
+            }
         }
         // The player borrow must end before the mutable render phase below;
         // capture the small scalars and the rendered text here instead of

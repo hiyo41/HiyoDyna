@@ -1,4 +1,8 @@
 use std::f32::consts::PI;
+#[cfg(not(test))]
+use std::sync::OnceLock;
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, Ordering};
 
 const EXPAND_DAMPING: f32 = 0.55;
 const EXPAND_RESPONSE_SECONDS: f32 = 0.28;
@@ -10,6 +14,54 @@ pub(crate) const OVERSHOOT_MIN: f32 = 0.92;
 pub(crate) const OVERSHOOT_MAX: f32 = 1.08;
 const MAX_FRAME_DELTA_SECONDS: f32 = 0.1;
 const MAX_SUBSTEP_SECONDS: f32 = 1.0 / 240.0;
+
+#[cfg(not(test))]
+static REDUCED_MOTION: OnceLock<bool> = OnceLock::new();
+
+#[cfg(test)]
+thread_local! {
+    /// Per-thread override so reduced-motion tests stay hermetic while the
+    /// rest of the suite runs in parallel.
+    static REDUCED_MOTION_OVERRIDE: AtomicBool = const { AtomicBool::new(false) };
+}
+
+/// Test-only hook: exercises the reduced-motion paths deterministically.
+#[cfg(test)]
+pub(crate) fn force_reduced_motion(enabled: bool) {
+    REDUCED_MOTION_OVERRIDE.with(|flag| flag.store(enabled, Ordering::Release));
+}
+
+/// The Windows "Show animations" accessibility preference
+/// (SPI_GETCLIENTAREAANIMATION). DESIGN.md promises that reduced motion
+/// removes the automatic spring, overshoot, and halo; every animated
+/// surface consults this before easing.
+///
+/// A failed query keeps animations on: the setting is informational and a
+/// missing answer must not freeze the overlay's transitions.
+pub(crate) fn reduced_motion() -> bool {
+    #[cfg(test)]
+    {
+        REDUCED_MOTION_OVERRIDE.with(|flag| flag.load(Ordering::Acquire))
+    }
+    #[cfg(not(test))]
+    {
+        *REDUCED_MOTION.get_or_init(|| {
+            use windows_sys::Win32::UI::WindowsAndMessaging::{
+                SPI_GETCLIENTAREAANIMATION, SystemParametersInfoW,
+            };
+            let mut enabled = 0_i32;
+            let ok = unsafe {
+                SystemParametersInfoW(
+                    SPI_GETCLIENTAREAANIMATION,
+                    0,
+                    (&mut enabled as *mut i32).cast(),
+                    0,
+                )
+            };
+            ok != 0 && enabled == 0
+        })
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct SpringTuning {
@@ -146,6 +198,18 @@ impl Animation {
     pub fn advance(&mut self, dt_seconds: f32) -> bool {
         if !dt_seconds.is_finite() || dt_seconds <= 0.0 {
             return self.is_active();
+        }
+
+        if reduced_motion() {
+            // DESIGN.md: reduced motion removes the automatic spring and its
+            // overshoot. Land on the target in one frame; the caller then
+            // stops the animation timer because this reports "not moving".
+            self.current = self.target;
+            self.velocity = ShapeVelocity::default();
+            self.previous_target = self.target;
+            self.hover = self.hover_target;
+            self.hover_velocity = 0.0;
+            return false;
         }
 
         if self.target != self.previous_target {
@@ -441,6 +505,41 @@ mod tests {
     }
 
     use super::{Animation, COMPACT, EXPANDED, ShapeState, ShapeVelocity, SpringTuning};
+
+    #[test]
+    fn reduced_motion_lands_on_target_in_one_frame_without_overshoot() {
+        super::force_reduced_motion(true);
+        let mut animation = Animation::new_with_tuning(SpringTuning {
+            expand_damping: 0.30, // would overshoot hard without the snap
+            ..SpringTuning::default()
+        });
+        animation.set_hover(true);
+        animation.expand();
+        let moving = animation.advance(1.0 / 120.0);
+        super::force_reduced_motion(false);
+        assert!(!moving, "reduced motion must report the animation idle");
+        assert_eq!(animation.current, EXPANDED);
+        assert_eq!(animation.velocity, ShapeVelocity::default());
+        assert_eq!(animation.hover, 1.0);
+        // The snap must not corrupt the next retarget's monotonic-shrink flags.
+        animation.collapse();
+        for _ in 0..600 {
+            animation.advance(1.0 / 120.0);
+        }
+        assert_eq!(animation.current, COMPACT);
+    }
+
+    #[test]
+    fn hover_snaps_instead_of_springing_under_reduced_motion() {
+        super::force_reduced_motion(true);
+        let mut animation = Animation::new();
+        animation.advance(1.0 / 120.0);
+        animation.set_hover(true);
+        animation.advance(1.0 / 120.0);
+        super::force_reduced_motion(false);
+        assert_eq!(animation.hover, 1.0);
+        assert_eq!(animation.hover_target, 1.0);
+    }
 
     #[test]
     fn player_to_clock_shrinks_monotonically_without_crossing_the_destination() {
