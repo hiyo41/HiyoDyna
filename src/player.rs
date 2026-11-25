@@ -1491,7 +1491,7 @@ mod tests {
         assert!(player.lines.is_empty());
     }
     #[test]
-    fn selected_music_returns_after_pause_when_spotify_resumes() {
+    fn paused_timed_lyrics_keep_the_music_page_across_pause_and_resume() {
         let mut player = player_at_gap(1.5);
         let now = Instant::now();
         player.snapshot.source = "Spotify.exe".into();
@@ -1499,14 +1499,14 @@ mod tests {
         player.snapshot.playing = false;
         player.update_selection(now, 0);
         player.update_selection(now + std::time::Duration::from_secs(11), 0);
-        assert!(!player.music);
+        assert!(
+            player.music,
+            "paused timed lyrics must stay visible instead of returning to the clock"
+        );
         player.snapshot.playing = true;
         assert!(player.compact_lyric(now, 0).is_some());
         player.update_selection(now + std::time::Duration::from_secs(12), 0);
-        assert!(
-            player.music,
-            "choosing Music must not permanently latch the clock after a pause"
-        );
+        assert!(player.music);
     }
 
     #[test]

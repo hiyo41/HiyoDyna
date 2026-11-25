@@ -25,11 +25,13 @@ impl Selection {
             self.source = source.to_owned();
             self.inactive_since = None;
         }
-        if playing {
+        if !self.manual && lyric_ready {
+            // Timed lyrics make the media page the better default, whether
+            // the track is playing or paused for reading and browsing.
             self.inactive_since = None;
-            if !self.manual && lyric_ready {
-                self.music = true;
-            }
+            self.music = true;
+        } else if playing {
+            self.inactive_since = None;
         } else if now.saturating_duration_since(*self.inactive_since.get_or_insert(now))
             >= Duration::from_secs(10)
         {
@@ -66,18 +68,22 @@ mod tests {
     }
 
     #[test]
-    fn continuous_pause_returns_to_clock_at_ten_seconds_without_snapshot_drift() {
+    fn paused_timed_lyrics_stay_until_the_source_stops_offering_them() {
         let now = Instant::now();
         let mut selection = Selection::default();
         selection.update(true, "Spotify", true, now);
         selection.update(false, "Spotify", true, now);
-        for millis in [100, 9000, 9999] {
-            selection.update(false, "Spotify", true, now + Duration::from_millis(millis));
-            assert!(selection.music());
+        for secs in [10, 60, 3600] {
+            assert!(
+                !selection.update(false, "Spotify", true, now + Duration::from_secs(secs)),
+                "paused timed lyrics must not toggle the page"
+            );
+            assert!(selection.music(), "paused timed lyrics must stay visible");
         }
-        assert!(selection.update(false, "Spotify", true, now + Duration::from_secs(10)));
+        assert!(!selection.update(false, "Spotify", false, now + Duration::from_secs(3601)));
+        assert!(selection.music());
+        assert!(selection.update(false, "Spotify", false, now + Duration::from_secs(3611)));
         assert!(!selection.music());
-        assert!(!selection.update(false, "Spotify", true, now + Duration::from_secs(20)));
     }
 
     #[test]
@@ -119,9 +125,12 @@ mod tests {
         let mut selection = Selection::default();
         selection.update(true, "Spotify", true, now);
         selection.update(false, "Spotify", true, now);
-        selection.update(false, "Spotify", true, now + Duration::from_secs(10));
+        assert!(selection.music(), "paused timed lyrics keep the music page");
+        assert!(!selection.update(false, "Spotify", false, now + Duration::from_secs(10)));
+        assert!(selection.music());
+        assert!(selection.update(false, "Spotify", false, now + Duration::from_secs(20)));
         assert!(!selection.music());
-        assert!(selection.update(true, "Spotify", true, now + Duration::from_secs(11)));
+        assert!(selection.update(true, "Spotify", true, now + Duration::from_secs(21)));
         assert!(selection.music());
     }
 

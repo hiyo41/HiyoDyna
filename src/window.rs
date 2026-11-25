@@ -259,6 +259,10 @@ fn run_loop(hwnd: HWND) -> Result<ExitAction, String> {
     let mut last_frame = Instant::now();
     let mut hover_grace_deadline: Option<Instant> = None;
     let mut last_hover_poll = Instant::now();
+    let mut pending_wheel: i32 = 0;
+    let mut pending_wheel_control = false;
+    let mut pending_wheel_point = (0.0_f32, 0.0_f32);
+    let mut pending_wheel_since = Instant::now();
     let mut animation_timer = AnimationTimer::new(hwnd);
     animation_timer.set_unlimited(settings.unlimited_fps)?;
     let trace_frames = std::env::var_os("HIYODYNA_TRACE_FRAMES").is_some();
@@ -577,24 +581,38 @@ fn run_loop(hwnd: HWND) -> Result<ExitAction, String> {
                 animation_timer.ensure_started();
             }
             WM_MOUSEWHEEL if message.hwnd == hwnd => {
-                if animation.current.progress() > 0.9 {
-                    let down = ((message.wParam >> 16) as u16 as i16) < 0;
+                let down = ((message.wParam >> 16) as u16 as i16) < 0;
+                let control = message.wParam & 0x0008 != 0;
+                let layout_ready = animation.current.progress() > 0.9
+                    && (!surface.player.music
+                        || animation.current.height >= 400.0_f32.min(animation.target.height));
+                if layout_ready {
                     let (x, y) = wheel_position(message.lParam, position, scale);
                     let left = (surface.logical_width() - animation.current.width) * 0.5;
-                    surface.player.wheel_at(
-                        down,
-                        message.wParam & 0x0008 != 0,
-                        x,
-                        y,
-                        left,
-                        animation.current.width,
-                    );
+                    surface
+                        .player
+                        .wheel_at(down, control, x, y, left, animation.current.width);
                     animation.target = if surface.player.music {
                         player_shape(hwnd, scale)
                     } else {
                         crate::animation::EXPANDED
                     };
                     resume_hover_tracking(hwnd, &mut hover, &animation);
+                    last_frame = Instant::now();
+                    animation_timer.ensure_started();
+                } else {
+                    // The wheel often arrives while the panel is still
+                    // expanding. Remember the notches and apply them once the
+                    // lyrics layout exists instead of dropping the scroll.
+                    pending_wheel = (pending_wheel + if down { 1 } else { -1 }).clamp(-10, 10);
+                    pending_wheel_control |= control;
+                    pending_wheel_point = mouse_position(message.lParam);
+                    pending_wheel_since = Instant::now();
+                    animation.target = if surface.player.music {
+                        player_shape(hwnd, scale)
+                    } else {
+                        crate::animation::EXPANDED
+                    };
                     last_frame = Instant::now();
                     animation_timer.ensure_started();
                 }
@@ -915,6 +933,44 @@ fn run_loop(hwnd: HWND) -> Result<ExitAction, String> {
                             ANIMATION_FRAME_PENDING.store(false, Ordering::Release);
                         }
                     }
+                }
+                if pending_wheel != 0
+                    && now.saturating_duration_since(pending_wheel_since)
+                        >= Duration::from_millis(3000)
+                {
+                    pending_wheel = 0;
+                    pending_wheel_control = false;
+                }
+                let wheel_ready = pending_wheel != 0
+                    && animation.current.progress() > 0.9
+                    && (!surface.player.music
+                        || animation.current.height >= 400.0_f32.min(animation.target.height));
+                if wheel_ready {
+                    let down = pending_wheel > 0;
+                    let steps = pending_wheel.unsigned_abs().min(10);
+                    let x = (pending_wheel_point.0 - position.x as f32) / scale;
+                    let y = (pending_wheel_point.1 - position.y as f32) / scale;
+                    let left = (surface.logical_width() - animation.current.width) * 0.5;
+                    for _ in 0..steps {
+                        surface.player.wheel_at(
+                            down,
+                            pending_wheel_control,
+                            x,
+                            y,
+                            left,
+                            animation.current.width,
+                        );
+                    }
+                    pending_wheel = 0;
+                    pending_wheel_control = false;
+                    animation.target = if surface.player.music {
+                        player_shape(hwnd, scale)
+                    } else {
+                        crate::animation::EXPANDED
+                    };
+                    resume_hover_tracking(hwnd, &mut hover, &animation);
+                    last_frame = Instant::now();
+                    animation_timer.ensure_started();
                 }
                 // WM_TIMER is low priority and only generated for an empty
                 // queue, so a saturated render stream can postpone the hover
