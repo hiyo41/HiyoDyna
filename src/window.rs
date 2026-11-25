@@ -24,7 +24,7 @@ use windows_sys::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForWindow, SetProcessDpiAwarenessContext,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
+    GetAsyncKeyState, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VK_LBUTTON, VK_RBUTTON,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
@@ -50,8 +50,10 @@ const TIMER_ID_HOVER_GRACE: usize = 2;
 const TIMER_ID_HOVER_RECHECK: usize = 3;
 const TIMER_ID_CLOCK: usize = 4;
 const TIMER_ID_UPDATE: usize = 6;
+const TIMER_ID_MENU_WATCH: usize = 7;
 const ANIMATION_TIMER_RESOLUTION_MILLISECONDS: u32 = 1;
 const CLOCK_TIMER_MILLISECONDS: u32 = 1000;
+const MENU_WATCH_MILLISECONDS: u32 = 15;
 const TOP_MARGIN: f32 = 0.0;
 const WM_APP_REFRESH_DISPLAY: u32 = WM_APP + 1;
 const WM_APP_TRAY_MENU: u32 = WM_APP + 3;
@@ -261,7 +263,6 @@ fn run_loop(hwnd: HWND) -> Result<ExitAction, String> {
     let mut last_hover_poll = Instant::now();
     let mut pending_wheel: i32 = 0;
     let mut pending_wheel_control = false;
-    let mut pending_wheel_point = (0.0_f32, 0.0_f32);
     let mut pending_wheel_since = Instant::now();
     let mut animation_timer = AnimationTimer::new(hwnd);
     animation_timer.set_unlimited(settings.unlimited_fps)?;
@@ -286,6 +287,8 @@ fn run_loop(hwnd: HWND) -> Result<ExitAction, String> {
     update::request_check(hwnd, settings.update, false);
     let mut message = MSG::default();
     let mut quick_menu: Option<crate::quick_menu::Menu> = None;
+    let mut closing_menu: Option<crate::quick_menu::Menu> = None;
+    let mut menu_button_latched = false;
     loop {
         // At rest the message loop sleeps between input, display and clock messages.
         let received = unsafe { GetMessageW(&mut message, null_mut(), 0, 0) };
@@ -375,17 +378,35 @@ fn run_loop(hwnd: HWND) -> Result<ExitAction, String> {
                 animation_timer.ensure_started();
             }
             WM_APP_MENU_CLOSED if message.hwnd == hwnd => {
-                if quick_menu
-                    .as_ref()
-                    .is_some_and(|menu| menu.handle() as usize == message.wParam)
-                {
+                // WM_UNINITMENUPOPUP can arrive while the modeless popup is
+                // still visible. Only clear state for a menu that really is
+                // gone; a visible popup stays under the pointer watchdog.
+                if quick_menu.as_ref().is_some_and(|menu| !menu.is_open()) {
                     quick_menu = None;
+                }
+                if closing_menu.as_ref().is_some_and(|menu| !menu.is_open()) {
+                    closing_menu = None;
+                }
+                if quick_menu.is_none() && closing_menu.is_none() {
+                    unsafe {
+                        KillTimer(hwnd, TIMER_ID_MENU_WATCH);
+                    }
                     resume_hover_tracking(hwnd, &mut hover, &animation);
+                    last_frame = Instant::now();
+                    animation_timer.ensure_started();
                 }
             }
             WM_APP_QUICK_ACTION if message.hwnd == hwnd => {
                 if let Some(action) = crate::quick_menu::action(message.wParam) {
-                    quick_menu = None;
+                    finish_quick_menu(
+                        hwnd,
+                        &mut quick_menu,
+                        &mut closing_menu,
+                        &mut hover,
+                        &animation,
+                        &mut animation_timer,
+                        &mut last_frame,
+                    );
                     tolerate("quick action", || {
                         apply_quick_action(
                             hwnd,
@@ -433,6 +454,10 @@ fn run_loop(hwnd: HWND) -> Result<ExitAction, String> {
                                     &mut exit_action,
                                 )
                             });
+                        }
+                        Action::Clock => {
+                            surface.player.select_page(false);
+                            animation.expand();
                         }
                         Action::Music => {
                             surface.player.select_page(true);
@@ -496,13 +521,9 @@ fn run_loop(hwnd: HWND) -> Result<ExitAction, String> {
                                         &mut exit_action,
                                     )
                                 });
-                            } else if let Some(music) = crate::player::page_hit(
-                                x,
-                                y,
-                                left,
-                                animation.current.width,
-                                animation.current.height,
-                            ) {
+                            } else if let Some(music) =
+                                page_hit_any(x, y, left, animation.current.width, &animation)
+                            {
                                 surface.player.select_page(music);
                             } else if surface
                                 .player
@@ -553,8 +574,12 @@ fn run_loop(hwnd: HWND) -> Result<ExitAction, String> {
                         }
                         33 => surface.player.wheel(false, false),
                         34 => surface.player.wheel(true, false),
-                        38 => surface.player.browse_lines(false),
-                        40 => surface.player.browse_lines(true),
+                        38 => {
+                            surface.player.browse_lines(false);
+                        }
+                        40 => {
+                            surface.player.browse_lines(true);
+                        }
                         37 | 39 => {
                             let delta = if message.wParam == 37 { -5.0 } else { 5.0 };
                             surface.player.seek_relative(delta);
@@ -581,17 +606,18 @@ fn run_loop(hwnd: HWND) -> Result<ExitAction, String> {
                 animation_timer.ensure_started();
             }
             WM_MOUSEWHEEL if message.hwnd == hwnd => {
-                let down = ((message.wParam >> 16) as u16 as i16) < 0;
+                let (down, steps) = wheel_notches(message.wParam);
+                if steps == 0 {
+                    continue;
+                }
                 let control = message.wParam & 0x0008 != 0;
                 let layout_ready = animation.current.progress() > 0.9
                     && (!surface.player.music
                         || animation.current.height >= 400.0_f32.min(animation.target.height));
                 if layout_ready {
-                    let (x, y) = wheel_position(message.lParam, position, scale);
-                    let left = (surface.logical_width() - animation.current.width) * 0.5;
-                    surface
-                        .player
-                        .wheel_at(down, control, x, y, left, animation.current.width);
+                    for _ in 0..steps {
+                        surface.player.wheel_at(down, control);
+                    }
                     animation.target = if surface.player.music {
                         player_shape(hwnd, scale)
                     } else {
@@ -604,9 +630,10 @@ fn run_loop(hwnd: HWND) -> Result<ExitAction, String> {
                     // The wheel often arrives while the panel is still
                     // expanding. Remember the notches and apply them once the
                     // lyrics layout exists instead of dropping the scroll.
-                    pending_wheel = (pending_wheel + if down { 1 } else { -1 }).clamp(-10, 10);
+                    let notches = i32::try_from(steps).unwrap_or(i32::MAX);
+                    pending_wheel =
+                        (pending_wheel + if down { notches } else { -notches }).clamp(-10, 10);
                     pending_wheel_control |= control;
-                    pending_wheel_point = mouse_position(message.lParam);
                     pending_wheel_since = Instant::now();
                     animation.target = if surface.player.music {
                         player_shape(hwnd, scale)
@@ -669,13 +696,8 @@ fn run_loop(hwnd: HWND) -> Result<ExitAction, String> {
                         )
                     });
                 } else if animation.current.progress() > 0.9
-                    && let Some(music) = crate::player::page_hit(
-                        x,
-                        y,
-                        left,
-                        animation.current.width,
-                        animation.current.height,
-                    )
+                    && let Some(music) =
+                        page_hit_any(x, y, left, animation.current.width, &animation)
                 {
                     surface.player.select_page(music);
                     animation.target = if music {
@@ -801,17 +823,30 @@ fn run_loop(hwnd: HWND) -> Result<ExitAction, String> {
                 });
             }
             WM_RBUTTONUP if message.hwnd == hwnd => {
-                drop(quick_menu.take());
-                quick_menu = crate::quick_menu::show(
-                    hwnd,
-                    surface.player.music,
-                    surface.player.browse.is_some(),
-                    surface.passthrough,
-                    surface
+                if quick_menu.is_some() || closing_menu.is_some() {
+                    dismiss_quick_menu(
+                        hwnd,
+                        &mut quick_menu,
+                        &mut closing_menu,
+                        &mut hover,
+                        &animation,
+                        &mut animation_timer,
+                        &mut last_frame,
+                    );
+                } else {
+                    let shortcut = surface
                         .shortcut_available
-                        .then(|| settings.shortcut.label())
-                        .as_deref(),
-                );
+                        .then(|| settings.shortcut.label());
+                    open_quick_menu(
+                        hwnd,
+                        &mut quick_menu,
+                        &mut menu_button_latched,
+                        surface.player.music,
+                        surface.player.browse.is_some(),
+                        surface.passthrough,
+                        shortcut.as_deref(),
+                    );
+                }
             }
             message_id
                 if message.hwnd == hwnd
@@ -948,18 +983,8 @@ fn run_loop(hwnd: HWND) -> Result<ExitAction, String> {
                 if wheel_ready {
                     let down = pending_wheel > 0;
                     let steps = pending_wheel.unsigned_abs().min(10);
-                    let x = (pending_wheel_point.0 - position.x as f32) / scale;
-                    let y = (pending_wheel_point.1 - position.y as f32) / scale;
-                    let left = (surface.logical_width() - animation.current.width) * 0.5;
                     for _ in 0..steps {
-                        surface.player.wheel_at(
-                            down,
-                            pending_wheel_control,
-                            x,
-                            y,
-                            left,
-                            animation.current.width,
-                        );
+                        surface.player.wheel_at(down, pending_wheel_control);
                     }
                     pending_wheel = 0;
                     pending_wheel_control = false;
@@ -972,6 +997,16 @@ fn run_loop(hwnd: HWND) -> Result<ExitAction, String> {
                     last_frame = Instant::now();
                     animation_timer.ensure_started();
                 }
+                poll_quick_menu(
+                    hwnd,
+                    &mut quick_menu,
+                    &mut closing_menu,
+                    &mut menu_button_latched,
+                    &mut hover,
+                    &animation,
+                    &mut animation_timer,
+                    &mut last_frame,
+                );
                 // WM_TIMER is low priority and only generated for an empty
                 // queue, so a saturated render stream can postpone the hover
                 // recheck and grace for a long time. Drive both from the
@@ -1029,6 +1064,18 @@ fn run_loop(hwnd: HWND) -> Result<ExitAction, String> {
                         });
                     }
                 }
+            }
+            WM_TIMER if message.hwnd == hwnd && message.wParam == TIMER_ID_MENU_WATCH => {
+                poll_quick_menu(
+                    hwnd,
+                    &mut quick_menu,
+                    &mut closing_menu,
+                    &mut menu_button_latched,
+                    &mut hover,
+                    &animation,
+                    &mut animation_timer,
+                    &mut last_frame,
+                );
             }
             WM_TIMER if message.hwnd == hwnd && message.wParam == TIMER_ID_HOVER_RECHECK => {
                 if surface.passthrough || surface.fullscreen.hidden || quick_menu.is_some() {
@@ -1208,17 +1255,30 @@ fn run_loop(hwnd: HWND) -> Result<ExitAction, String> {
             WM_APP_TRAY_MENU if message.hwnd == hwnd => {
                 let event = (message.lParam as u32) & 0xFFFF;
                 if event == WM_RBUTTONUP || event == WM_CONTEXTMENU {
-                    drop(quick_menu.take());
-                    quick_menu = crate::quick_menu::show(
-                        hwnd,
-                        surface.player.music,
-                        surface.player.browse.is_some(),
-                        surface.passthrough,
-                        surface
+                    if quick_menu.is_some() || closing_menu.is_some() {
+                        dismiss_quick_menu(
+                            hwnd,
+                            &mut quick_menu,
+                            &mut closing_menu,
+                            &mut hover,
+                            &animation,
+                            &mut animation_timer,
+                            &mut last_frame,
+                        );
+                    } else {
+                        let shortcut = surface
                             .shortcut_available
-                            .then(|| settings.shortcut.label())
-                            .as_deref(),
-                    );
+                            .then(|| settings.shortcut.label());
+                        open_quick_menu(
+                            hwnd,
+                            &mut quick_menu,
+                            &mut menu_button_latched,
+                            surface.player.music,
+                            surface.player.browse.is_some(),
+                            surface.passthrough,
+                            shortcut.as_deref(),
+                        );
+                    }
                 }
             }
             update::WM_APP_UPDATE_READY if message.hwnd == hwnd => {
@@ -1821,7 +1881,8 @@ impl Surface {
         crate::player::draw_page_dots(&mut canvas, left, state.width, state.height, music_mix);
         if let Some(access) = &self.access {
             let mut nodes = if self.player.music && state.progress() > 0.9 {
-                self.player.accessible_nodes(left, state.width)
+                self.player
+                    .accessible_nodes(left, state.width, state.height)
             } else {
                 let mut nodes = vec![];
                 if state.progress() > 0.9 {
@@ -1846,6 +1907,7 @@ impl Surface {
             }
             nodes.retain(|n| n.id != 20 && n.id != 21);
             let mut pages = crate::player::page_nodes(left, state.width, state.height);
+            pages[0].action = crate::accessibility::Action::Clock;
             pages[1].action = crate::accessibility::Action::Music;
             if state.progress() > 0.9 {
                 nodes.extend(pages);
@@ -1874,9 +1936,7 @@ impl Surface {
                 nodes.clear();
             }
             access.update(
-                if let Some(lyrics) = &compact_line_text {
-                    crate::i18n::format_copy("HiyoDyna lyrics: {lyrics}", &[("lyrics", lyrics)])
-                } else if self.player.music && state.progress() > 0.9 {
+                if self.player.music && state.progress() > 0.9 {
                     crate::i18n::format_copy(
                         "HiyoDyna: {title} — {artist}",
                         &[
@@ -1884,6 +1944,8 @@ impl Surface {
                             ("artist", &self.player.snapshot.artist),
                         ],
                     )
+                } else if compact_lyric && let Some(lyrics) = &compact_line_text {
+                    crate::i18n::format_copy("HiyoDyna lyrics: {lyrics}", &[("lyrics", lyrics)])
                 } else {
                     crate::i18n::tr("HiyoDyna clock").into()
                 },
@@ -2156,9 +2218,22 @@ fn mouse_position(lparam: LPARAM) -> (f32, f32) {
     (x, y)
 }
 
-fn wheel_position(lparam: LPARAM, origin: POINT, scale: f32) -> (f32, f32) {
-    let (x, y) = mouse_position(lparam);
-    ((x - origin.x as f32) / scale, (y - origin.y as f32) / scale)
+fn page_hit_any(x: f32, y: f32, left: f32, width: f32, animation: &Animation) -> Option<bool> {
+    crate::player::page_hit(x, y, left, width, animation.current.height).or_else(|| {
+        // While the spring is still moving, the dots are drawn between the
+        // current and target panels. Accept the target position so a click
+        // aimed at the settled dots does not miss.
+        crate::player::page_hit(x, y, left, width, animation.target.height)
+    })
+}
+
+fn wheel_notches(wparam: WPARAM) -> (bool, usize) {
+    let delta = ((wparam >> 16) as u16 as i16) as i32;
+    if delta == 0 {
+        return (false, 0);
+    }
+    let notches = (delta.unsigned_abs() as usize / 120).clamp(1, 10);
+    (delta < 0, notches)
 }
 
 fn pointer_position(hwnd: HWND) -> Option<(f32, f32)> {
@@ -2204,6 +2279,161 @@ fn resume_hover_tracking(hwnd: HWND, hover: &mut HoverTracker, animation: &Anima
             KillTimer(hwnd, TIMER_ID_HOVER_RECHECK);
         }
     }
+}
+
+fn mouse_button_states() -> (bool, bool) {
+    let mut down = false;
+    let mut pressed = false;
+    for key in [VK_LBUTTON, VK_RBUTTON] {
+        let state = unsafe { GetAsyncKeyState(i32::from(key)) };
+        down |= state < 0;
+        // The low bit latches a press that was released between polls, so a
+        // quick click cannot slip through a 15 ms watchdog interval.
+        pressed |= state & 1 != 0;
+    }
+    (down, pressed)
+}
+
+fn mouse_buttons_down() -> bool {
+    mouse_button_states().0
+}
+
+fn cursor_point() -> Option<POINT> {
+    let mut point = POINT { x: 0, y: 0 };
+    // SAFETY: point is a valid writable POINT.
+    (unsafe { GetCursorPos(&mut point) } != 0).then_some(point)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn open_quick_menu(
+    hwnd: HWND,
+    quick_menu: &mut Option<crate::quick_menu::Menu>,
+    menu_button_latched: &mut bool,
+    music: bool,
+    browsing: bool,
+    passthrough: bool,
+    shortcut: Option<&str>,
+) {
+    *quick_menu = crate::quick_menu::show(hwnd, music, browsing, passthrough, shortcut);
+    if quick_menu.is_some() {
+        // The click that opened the menu is still down on some devices. Treat
+        // it as already handled so the watchdog waits for the next press.
+        // Read once to clear latched presses from before the menu opened.
+        let _ = mouse_button_states();
+        *menu_button_latched = mouse_buttons_down();
+        unsafe {
+            SetTimer(hwnd, TIMER_ID_MENU_WATCH, MENU_WATCH_MILLISECONDS, None);
+        }
+    }
+}
+
+fn resume_after_menu(
+    hwnd: HWND,
+    hover: &mut HoverTracker,
+    animation: &Animation,
+    animation_timer: &mut AnimationTimer,
+    last_frame: &mut Instant,
+) {
+    resume_hover_tracking(hwnd, hover, animation);
+    *last_frame = Instant::now();
+    animation_timer.ensure_started();
+}
+
+#[allow(clippy::too_many_arguments)]
+fn dismiss_quick_menu(
+    hwnd: HWND,
+    quick_menu: &mut Option<crate::quick_menu::Menu>,
+    closing_menu: &mut Option<crate::quick_menu::Menu>,
+    hover: &mut HoverTracker,
+    animation: &Animation,
+    animation_timer: &mut AnimationTimer,
+    last_frame: &mut Instant,
+) {
+    if let Some(menu) = quick_menu.take() {
+        menu.dismiss();
+        // Keep the menu handle alive until the popup finishes closing; the
+        // menu manager is still tracking it.
+        *closing_menu = Some(menu);
+    }
+    resume_after_menu(hwnd, hover, animation, animation_timer, last_frame);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finish_quick_menu(
+    hwnd: HWND,
+    quick_menu: &mut Option<crate::quick_menu::Menu>,
+    closing_menu: &mut Option<crate::quick_menu::Menu>,
+    hover: &mut HoverTracker,
+    animation: &Animation,
+    animation_timer: &mut AnimationTimer,
+    last_frame: &mut Instant,
+) {
+    *quick_menu = None;
+    *closing_menu = None;
+    unsafe {
+        KillTimer(hwnd, TIMER_ID_MENU_WATCH);
+    }
+    resume_after_menu(hwnd, hover, animation, animation_timer, last_frame);
+}
+
+fn outside_press_dismisses(latched: bool, buttons: bool, inside: bool) -> bool {
+    !latched && buttons && !inside
+}
+
+/// A modeless menu owned by a layered, non-activating window never sees a
+/// click outside itself, so it can stay on screen forever. Poll the real
+/// pointer buttons and dismiss the popup on the first outside press.
+#[allow(clippy::too_many_arguments)]
+fn poll_quick_menu(
+    hwnd: HWND,
+    quick_menu: &mut Option<crate::quick_menu::Menu>,
+    closing_menu: &mut Option<crate::quick_menu::Menu>,
+    menu_button_latched: &mut bool,
+    hover: &mut HoverTracker,
+    animation: &Animation,
+    animation_timer: &mut AnimationTimer,
+    last_frame: &mut Instant,
+) {
+    if closing_menu.as_ref().is_some_and(|menu| !menu.is_open()) {
+        *closing_menu = None;
+    }
+    let Some(menu) = quick_menu.as_ref() else {
+        if closing_menu.is_none() {
+            unsafe {
+                KillTimer(hwnd, TIMER_ID_MENU_WATCH);
+            }
+        }
+        return;
+    };
+    if !menu.is_open() {
+        finish_quick_menu(
+            hwnd,
+            quick_menu,
+            closing_menu,
+            hover,
+            animation,
+            animation_timer,
+            last_frame,
+        );
+        return;
+    }
+    let (down, pressed) = mouse_button_states();
+    let buttons = down || pressed;
+    let inside = cursor_point().is_none_or(|point| menu.contains(point));
+    if outside_press_dismisses(*menu_button_latched, buttons, inside) {
+        dismiss_quick_menu(
+            hwnd,
+            quick_menu,
+            closing_menu,
+            hover,
+            animation,
+            animation_timer,
+            last_frame,
+        );
+        *menu_button_latched = buttons;
+        return;
+    }
+    *menu_button_latched = buttons;
 }
 
 fn set_hover(
@@ -2807,6 +3037,41 @@ mod tests {
     use windows_sys::Win32::UI::WindowsAndMessaging::{WM_DISPLAYCHANGE, WM_DPICHANGED, WM_TIMER};
 
     #[test]
+    fn menu_watchdog_ignores_the_opening_press_and_clicks_inside() {
+        // The press that opened the menu (or was already down) must not close
+        // it, and neither must a press on a menu item.
+        assert!(!super::outside_press_dismisses(true, true, false));
+        assert!(!super::outside_press_dismisses(false, true, true));
+        assert!(!super::outside_press_dismisses(false, false, false));
+        // The next press outside the popup is the one that dismisses it.
+        assert!(super::outside_press_dismisses(false, true, false));
+    }
+
+    #[test]
+    fn page_dot_hit_accepts_the_target_position_mid_expansion() {
+        use super::*;
+        let mut animation = Animation::new();
+        animation.current = ShapeState {
+            height: 300.0,
+            ..crate::animation::EXPANDED
+        };
+        animation.target = ShapeState {
+            height: 500.0,
+            ..crate::animation::EXPANDED
+        };
+        assert_eq!(
+            page_hit_any(400.0, 238.0, 0.0, 420.0, &animation),
+            Some(false),
+            "a click on the settled Clock dot must not miss while expanding"
+        );
+        assert_eq!(
+            page_hit_any(400.0, 262.0, 0.0, 420.0, &animation),
+            Some(true),
+            "a click on the settled Music dot must not miss while expanding"
+        );
+    }
+
+    #[test]
     fn page_fade_starts_at_current_page_and_reverses_without_jumping() {
         let now = std::time::Instant::now();
         let mut fade = super::PageFade::new(now);
@@ -3390,12 +3655,22 @@ mod tests {
     }
 
     #[test]
-    fn wheel_coordinates_use_screen_origin_and_display_scale() {
-        let origin = windows_sys::Win32::Foundation::POINT { x: -1700, y: -120 };
-        let packed = (((480_i16 as u16 as u32) << 16) | (-1400_i16 as u16 as u32)) as isize;
-        assert_eq!(super::wheel_position(packed, origin, 1.5), (200.0, 400.0));
-        let packed = (((0_i16 as u16 as u32) << 16) | (-1700_i16 as u16 as u32)) as isize;
-        assert_eq!(super::wheel_position(packed, origin, 2.0), (0.0, 60.0));
+    fn wheel_notches_decode_direction_and_high_resolution_deltas() {
+        let up = (120_usize) << 16;
+        let down = ((-120_i16 as u16 as usize) << 16) | 0x0008;
+        assert_eq!(super::wheel_notches(up), (false, 1));
+        assert_eq!(super::wheel_notches(down), (true, 1));
+        let fast_up = (240_usize) << 16;
+        let fast_down = (-360_i16 as u16 as usize) << 16;
+        assert_eq!(super::wheel_notches(fast_up), (false, 2));
+        assert_eq!(super::wheel_notches(fast_down), (true, 3));
+        let touchpad_up = (40_usize) << 16;
+        assert_eq!(
+            super::wheel_notches(touchpad_up),
+            (false, 1),
+            "sub-notch touchpad deltas must still scroll one step"
+        );
+        assert_eq!(super::wheel_notches(0), (false, 0));
     }
 
     #[test]
@@ -3435,10 +3710,7 @@ mod tests {
                 true
             ));
             surface.player.music = true;
-            let left = (surface.logical_width() - 420.0) * 0.5;
-            surface
-                .player
-                .wheel_at(true, false, center, 300.0, left, 420.0);
+            surface.player.wheel_at(true, false);
             assert!(surface.player.music && surface.player.browse.is_some());
         }
     }
@@ -4216,8 +4488,10 @@ mod tests {
                     0
                 );
                 assert_ne!(SetCursorPos(lyric_point.x, lyric_point.y), 0);
-                use windows_sys::Win32::UI::Input::KeyboardAndMouse::MOUSEEVENTF_WHEEL;
-                for delta in [120_i32, -120] {
+                use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+                    INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_WHEEL, MOUSEINPUT, SendInput,
+                };
+                let send_wheel = |delta: i32| {
                     let input = INPUT {
                         r#type: INPUT_MOUSE,
                         Anonymous: INPUT_0 {
@@ -4229,11 +4503,16 @@ mod tests {
                         },
                     };
                     assert_eq!(SendInput(1, &input, size_of::<INPUT>() as i32), 1);
+                };
+                let assert_music = |reason: &str| {
                     let started = Instant::now();
                     while started.elapsed().as_millis() < 500 {
                         assert!(
-                            root.CurrentName().unwrap() != "HiyoDyna clock",
-                            "wheel over lyrics must not navigate to Clock"
+                            root.CurrentName()
+                                .unwrap()
+                                .to_string()
+                                .starts_with("HiyoDyna: "),
+                            "{reason}"
                         );
                         let bounds = page.CurrentBoundingRectangle().unwrap();
                         assert!(
@@ -4242,11 +4521,37 @@ mod tests {
                         );
                         std::thread::park_timeout(std::time::Duration::from_millis(20));
                     }
+                };
+                // The wheel anywhere on the music page scrolls lyrics. An up
+                // notch only returns to Clock when the lyrics are already at
+                // their first line (or missing), so scroll down first and
+                // verify that browsing does not change pages.
+                send_wheel(-120);
+                assert_music("wheel over lyrics must not navigate to Clock");
+                let browsing = root
+                    .FindFirst(
+                        TreeScope_Children,
+                        &automation
+                            .CreatePropertyCondition(
+                                windows::Win32::UI::Accessibility::UIA_NamePropertyId,
+                                &windows::Win32::System::Variant::VARIANT::from(
+                                    "Resume following lyrics",
+                                ),
+                            )
+                            .unwrap(),
+                    )
+                    .is_ok();
+                if browsing {
+                    send_wheel(120);
+                    assert_music("a lyric browse notch must not navigate to Clock");
                 }
                 PostMessageW(hwnd, WM_MOUSEWHEEL, ((120_usize) << 16) | 0x0008, 0);
                 std::thread::park_timeout(std::time::Duration::from_millis(100));
                 assert!(
-                    root.CurrentName().unwrap() != "HiyoDyna clock",
+                    root.CurrentName()
+                        .unwrap()
+                        .to_string()
+                        .starts_with("HiyoDyna: "),
                     "Ctrl+wheel must browse without changing pages"
                 );
                 let nodes = root
@@ -4359,26 +4664,19 @@ mod tests {
                     );
                     std::thread::park_timeout(std::time::Duration::from_millis(10));
                 }
-                use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-                    INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
-                    MOUSEINPUT, SendInput,
+                let mut menu_rect = windows_sys::Win32::Foundation::RECT::default();
+                assert_ne!(GetWindowRect(menu, &mut menu_rect), 0);
+                let client = POINT {
+                    x: point.x - menu_rect.left,
+                    y: point.y - menu_rect.top,
                 };
-                let inputs = [MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP].map(|dw_flags| INPUT {
-                    r#type: INPUT_MOUSE,
-                    Anonymous: INPUT_0 {
-                        mi: MOUSEINPUT {
-                            dwFlags: dw_flags,
-                            ..Default::default()
-                        },
-                    },
-                });
-                let sent = SendInput(2, inputs.as_ptr(), size_of::<INPUT>() as i32);
-                assert_eq!(
-                    sent,
-                    2,
-                    "native mouse injection error {}",
-                    windows_sys::Win32::Foundation::GetLastError()
-                );
+                let lparam = (((client.y as isize) << 16) | (client.x as isize & 0xffff)) as LPARAM;
+                // Post the click to the popup itself. Synthetic desktop input
+                // is unreliable on a shared interactive desktop, but the menu
+                // command path and hit target are the same.
+                assert_ne!(PostMessageW(menu, WM_MOUSEMOVE, 0, lparam), 0);
+                assert_ne!(PostMessageW(menu, WM_LBUTTONDOWN, 1, lparam), 0);
+                assert_ne!(PostMessageW(menu, WM_LBUTTONUP, 0, lparam), 0);
                 let started = Instant::now();
                 while root.CurrentName().unwrap() != "HiyoDyna clock" {
                     assert!(
@@ -4431,10 +4729,15 @@ mod tests {
                 std::thread::park_timeout(std::time::Duration::from_millis(700));
                 let popup = FindWindowW(wide("HiyoDynaPreferences").as_ptr(), null());
                 assert!(!popup.is_null(), "gear must open settings");
-                assert_ne!(
+                assert_eq!(
                     GetWindowLongW(popup, GWL_STYLE) as u32 & WS_CAPTION,
                     0,
-                    "settings must have a native caption"
+                    "settings must use the custom drawn frame"
+                );
+                assert_ne!(
+                    GetWindowLongW(popup, GWL_STYLE) as u32 & WS_POPUP,
+                    0,
+                    "settings must be a popup host"
                 );
                 assert_ne!(
                     GetWindowLongW(popup, GWL_STYLE) as u32 & WS_THICKFRAME,

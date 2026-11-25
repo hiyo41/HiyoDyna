@@ -145,6 +145,11 @@ impl QueuedCommand {
             *source == current.source && *key == current.key && *expected == generation
         })
     }
+    fn matches_track(&self, current: &MediaSnapshot) -> bool {
+        self.target
+            .as_ref()
+            .is_some_and(|(source, key, _)| *source == current.source && *key == current.key)
+    }
 }
 
 #[derive(Default)]
@@ -238,6 +243,10 @@ impl MediaWorker {
             MediaCommand::Seek(seconds) => Some(seconds),
             _ => None,
         }
+    }
+    #[cfg(test)]
+    pub(crate) fn set_test_snapshot(&self, snapshot: MediaSnapshot) {
+        *self.state.lock().unwrap() = snapshot;
     }
     pub fn start() -> Self {
         let commands = Arc::new(Mutex::new(CommandQueue::default()));
@@ -639,35 +648,46 @@ fn worker(
                 command => {
                     if let Some(s) = &session
                         && let Ok(current) = read_session(s, Vec::new())
-                        && queued.matches(&current, generation)
                     {
-                        match command {
-                            MediaCommand::Toggle if current.can_toggle => {
-                                let _ = s
-                                    .TryTogglePlayPauseAsync()
-                                    .and_then(|op| wait(&op, TRANSPORT_TIMEOUT));
+                        let matched = match command {
+                            // Transport commands stay valid across metadata
+                            // revisions of the same track; dropping a pause or
+                            // skip because the generation moved makes the
+                            // controls look dead for a moment.
+                            MediaCommand::Toggle | MediaCommand::Previous | MediaCommand::Next => {
+                                queued.matches_track(&current)
                             }
-                            MediaCommand::Previous
-                                if current.can_previous
-                                    && s.TrySkipPreviousAsync()
-                                        .and_then(|op| wait(&op, TRANSPORT_TIMEOUT))
-                                        .unwrap_or(false) =>
-                            {
-                                generation = generation.wrapping_add(1);
-                                previous_key.clear();
-                                watched = None;
+                            _ => queued.matches(&current, generation),
+                        };
+                        if matched {
+                            match command {
+                                MediaCommand::Toggle if current.can_toggle => {
+                                    let _ = s
+                                        .TryTogglePlayPauseAsync()
+                                        .and_then(|op| wait(&op, TRANSPORT_TIMEOUT));
+                                }
+                                MediaCommand::Previous
+                                    if current.can_previous
+                                        && s.TrySkipPreviousAsync()
+                                            .and_then(|op| wait(&op, TRANSPORT_TIMEOUT))
+                                            .unwrap_or(false) =>
+                                {
+                                    generation = generation.wrapping_add(1);
+                                    previous_key.clear();
+                                    watched = None;
+                                }
+                                MediaCommand::Next
+                                    if current.can_next
+                                        && s.TrySkipNextAsync()
+                                            .and_then(|op| wait(&op, TRANSPORT_TIMEOUT))
+                                            .unwrap_or(false) =>
+                                {
+                                    generation = generation.wrapping_add(1);
+                                    previous_key.clear();
+                                    watched = None;
+                                }
+                                _ => {}
                             }
-                            MediaCommand::Next
-                                if current.can_next
-                                    && s.TrySkipNextAsync()
-                                        .and_then(|op| wait(&op, TRANSPORT_TIMEOUT))
-                                        .unwrap_or(false) =>
-                            {
-                                generation = generation.wrapping_add(1);
-                                previous_key.clear();
-                                watched = None;
-                            }
-                            _ => {}
                         }
                     }
                 }
@@ -1219,6 +1239,34 @@ mod tests {
             queue.seek.take().unwrap().command,
             MediaCommand::Seek(120.0)
         ));
+    }
+
+    #[test]
+    fn transport_commands_survive_metadata_revisions_of_the_same_track() {
+        let snapshot = MediaSnapshot {
+            source: "A".into(),
+            key: "track A".into(),
+            generation: 7,
+            ..Default::default()
+        };
+        let mut queue = CommandQueue::default();
+        queue.push(MediaCommand::Toggle, &snapshot);
+        let queued = queue.take().pop_front().unwrap();
+        let next_generation = MediaSnapshot {
+            generation: 8,
+            ..snapshot.clone()
+        };
+        assert!(queued.matches_track(&next_generation));
+        assert!(
+            !queued.matches(&next_generation, 8),
+            "a metadata revision must not discard a pause press"
+        );
+        let other_track = MediaSnapshot {
+            key: "track B".into(),
+            generation: 8,
+            ..snapshot
+        };
+        assert!(!queued.matches_track(&other_track));
     }
 
     #[test]

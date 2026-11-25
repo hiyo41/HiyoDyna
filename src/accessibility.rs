@@ -21,6 +21,7 @@ pub(crate) const MESSAGE: u32 = WM_APP + 41;
 #[derive(Clone, Debug)]
 pub(crate) enum Action {
     Click(f32, f32),
+    Clock,
     Music,
     Settings,
     Seek(f64),

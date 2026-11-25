@@ -2,11 +2,15 @@ use crate::canvas::{Canvas, DIM, MUTED, Rect, WHITE};
 use crate::i18n::{format_copy, tr};
 use crate::media::{MediaCommand, MediaSnapshot, MediaWorker};
 use crate::settings::{LyricsMode, Settings};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 const LYRIC_SIZE: f32 = 20.0;
 const LYRIC_ROW: f32 = 26.0;
 const LYRIC_FADE: f32 = 16.0;
+/// How long an optimistic play/pause flip may outlive the media app's report.
+/// The media session can take seconds to publish its new status; the button
+/// must not wait for it or every second click looks ignored.
+const TOGGLE_CONFIRM_GRACE: Duration = Duration::from_millis(1500);
 
 pub(crate) struct Player {
     pub worker: MediaWorker,
@@ -34,6 +38,13 @@ pub(crate) struct Player {
     last_lyric_position: Option<f64>,
     artwork_shown: Option<usize>,
     artwork_fade_started: Option<Instant>,
+    pending_toggle: Option<PendingToggle>,
+}
+
+#[derive(Clone, Copy)]
+struct PendingToggle {
+    requested: bool,
+    since: Instant,
 }
 
 /// Crossfade window when one artwork replaces another. The first artwork of
@@ -158,16 +169,42 @@ impl Player {
             last_lyric_position: None,
             artwork_shown: None,
             artwork_fade_started: None,
+            pending_toggle: None,
         }
     }
     pub fn refresh(&mut self) {
-        let next = self.worker.snapshot();
+        let mut next = self.worker.snapshot();
+        if let Some(pending) = self.pending_toggle {
+            if next.playing == pending.requested {
+                self.pending_toggle = None;
+            } else if pending.since.elapsed() < TOGGLE_CONFIRM_GRACE {
+                // Keep the optimistic state while the media app catches up so
+                // the button, the progress clock, and the next command all
+                // agree with what the user just pressed.
+                next.playing = pending.requested;
+                let now = Instant::now();
+                if let Some(timeline) = next.timeline.as_mut() {
+                    let position = self
+                        .snapshot
+                        .timeline
+                        .as_ref()
+                        .and_then(|timeline| timeline.position_at(now))
+                        .unwrap_or(timeline.position);
+                    timeline.position = position;
+                    timeline.playing = pending.requested;
+                    timeline.sampled = now;
+                }
+            } else {
+                self.pending_toggle = None;
+            }
+        }
         self.reconcile_seek(&next, Instant::now());
         self.dirty |= !same_visual(&self.snapshot, &next);
         self.snapshot = next;
         self.clamp_sources();
         if self.key != self.snapshot.key {
             self.key = self.snapshot.key.clone();
+            self.pending_toggle = None;
             self.browse = None;
             self.smooth_line = 0.0;
             self.browse_offset = 0.0;
@@ -178,6 +215,7 @@ impl Player {
     }
     pub fn reset(&mut self) {
         self.cancel_seek();
+        self.pending_toggle = None;
         self.browse = None;
         self.source_picker = false;
         self.dragging = false;
@@ -229,13 +267,16 @@ impl Player {
                 .saturating_sub(self.source_capacity()),
         );
     }
-    pub fn wheel_at(&mut self, down: bool, control: bool, x: f32, y: f32, left: f32, width: f32) {
-        if !control
-            && self.music
-            && !self.source_picker
-            && self.lyric_viewport(left, width).contains(x, y)
-        {
-            self.browse_lines(down);
+    /// Routes a pointer wheel over the expanded music page to lyric browsing.
+    /// The whole page scrolls lyrics; only the source picker keeps its own
+    /// scrolling. Scrolling up above the first line returns to the Clock page,
+    /// so the wheel that opened Music can always close it again.
+    pub fn wheel_at(&mut self, down: bool, control: bool) {
+        if self.music && !self.source_picker {
+            let moved = self.browse_lines(down);
+            if !moved && !down && !control {
+                self.select_page(false);
+            }
         } else {
             self.wheel(down, control);
         }
@@ -259,59 +300,66 @@ impl Player {
         }
         self.select_page(down);
     }
-    pub fn browse_lines(&mut self, down: bool) {
+    /// Moves the lyric viewport one notch. Returns false when the viewport is
+    /// already clamped at that bound, which lets the wheel fall through to
+    /// page navigation instead of swallowing the notch.
+    pub fn browse_lines(&mut self, down: bool) -> bool {
         if self.source_picker {
             self.wheel(down, false);
-            return;
+            return false;
         }
         if !self.music {
-            return;
+            return false;
         }
         self.dirty = true;
         let count = self.snapshot.lyrics.as_ref().map_or(0, |l| l.lines.len());
-        let current = self
-            .browse
-            .unwrap_or(self.anchor_line)
-            .min(count.saturating_sub(1));
-        if count > 0 {
-            let viewport_height = self.lyric_viewport(0.0, 420.0).h;
-            let max_offset = |index: usize| {
-                self.layout.get(index).map_or(0.0, |layout| {
-                    (layout.fragments.len() as f32 * LYRIC_ROW - viewport_height).max(0.0)
-                })
-            };
-            if self.browse.is_none() {
-                self.browse_offset = self.smooth_offset.min(max_offset(current));
-            }
-            let previous_offset = self.browse_offset;
-            let target = if down && self.browse_offset < max_offset(current) {
-                self.browse_offset = (self.browse_offset + LYRIC_ROW).min(max_offset(current));
-                current
-            } else if !down && self.browse_offset > 0.0 {
-                self.browse_offset = (self.browse_offset - LYRIC_ROW).max(0.0);
-                current
-            } else if down {
-                self.browse_offset = if current + 1 < count {
-                    0.0
-                } else {
-                    self.browse_offset
-                };
-                (current + 1).min(count - 1)
-            } else {
-                self.browse_offset = if current > 0 {
-                    max_offset(current - 1)
-                } else {
-                    0.0
-                };
-                current.saturating_sub(1)
-            };
-            if (target != current || previous_offset != self.browse_offset) && !self.following {
-                self.last_lyric_frame = Instant::now();
-            }
-            self.browse = Some(target);
-            self.following =
-                self.smooth_line != target as f32 || self.smooth_offset != self.browse_offset;
+        if count == 0 {
+            return false;
         }
+        let current = self.browse.unwrap_or(self.anchor_line).min(count - 1);
+        let viewport_height = self.lyric_viewport(0.0, 420.0).h;
+        let max_offset = |index: usize| {
+            self.layout.get(index).map_or(0.0, |layout| {
+                (layout.fragments.len() as f32 * LYRIC_ROW - viewport_height).max(0.0)
+            })
+        };
+        if self.browse.is_none() {
+            self.browse_offset = self.smooth_offset.min(max_offset(current));
+        }
+        let previous_offset = self.browse_offset;
+        let target = if down && self.browse_offset < max_offset(current) {
+            self.browse_offset = (self.browse_offset + LYRIC_ROW).min(max_offset(current));
+            current
+        } else if !down && self.browse_offset > 0.0 {
+            self.browse_offset = (self.browse_offset - LYRIC_ROW).max(0.0);
+            current
+        } else if down {
+            self.browse_offset = if current + 1 < count {
+                0.0
+            } else {
+                self.browse_offset
+            };
+            (current + 1).min(count - 1)
+        } else {
+            self.browse_offset = if current > 0 {
+                max_offset(current - 1)
+            } else {
+                0.0
+            };
+            current.saturating_sub(1)
+        };
+        let moved = target != current || previous_offset != self.browse_offset;
+        if moved {
+            self.last_lyric_frame = Instant::now();
+        }
+        self.browse = Some(target);
+        // Wheel and key browsing is direct manipulation. Easing it here is
+        // read as input lag, especially when several notches arrive in a
+        // row while the playback clock is also easing the follow view.
+        self.smooth_line = target as f32;
+        self.smooth_offset = self.browse_offset;
+        self.following = false;
+        moved
     }
     fn position(&self) -> f64 {
         self.position_at(Instant::now())
@@ -448,6 +496,23 @@ impl Player {
         }
         self.dragging = false;
     }
+    fn apply_optimistic_toggle(&mut self) {
+        let now = Instant::now();
+        let playing = !self.snapshot.playing;
+        self.snapshot.playing = playing;
+        if let Some(timeline) = self.snapshot.timeline.as_mut() {
+            timeline.position = timeline.position_at(now).unwrap_or(timeline.position);
+            timeline.playing = playing;
+            timeline.sampled = now;
+        }
+        self.pending_toggle = Some(PendingToggle {
+            requested: playing,
+            since: now,
+        });
+        // The clock just changed direction; do not treat that as a seek jump.
+        self.last_lyric_position = None;
+        self.dirty = true;
+    }
     pub fn click(&mut self, x: f32, y: f32, left: f32, width: f32) -> bool {
         self.dirty = true;
         if Rect::new(left + width - 132.0, 12.0, 76.0, 28.0).contains(x, y) {
@@ -502,6 +567,9 @@ impl Player {
             .contains(x, y)
                 && enabled
             {
+                if matches!(command, MediaCommand::Toggle) {
+                    self.apply_optimistic_toggle();
+                }
                 self.worker.command(command, &self.snapshot);
                 return true;
             }
@@ -1116,9 +1184,16 @@ impl Player {
         self.dirty = true;
     }
 
-    pub fn accessible_nodes(&self, left: f32, width: f32) -> Vec<crate::accessibility::Node> {
+    pub fn accessible_nodes(
+        &self,
+        left: f32,
+        width: f32,
+        page_height: f32,
+    ) -> Vec<crate::accessibility::Node> {
         use crate::accessibility::Node;
-        let mut nodes = page_nodes(left, width, self.height);
+        // Page dots follow the drawn panel height, not the full player page, so
+        // the automation rects stay clickable while the spring is still moving.
+        let mut nodes = page_nodes(left, width, page_height);
         nodes.extend([Node::button(
             2,
             tr("Settings"),
@@ -1626,7 +1701,7 @@ mod tests {
         let mut player = seekable_player();
         player.music = true;
         let rect = Player::compact_lyrics_rect(0.0, 420.0);
-        let nodes = player.accessible_nodes(0.0, 420.0);
+        let nodes = player.accessible_nodes(0.0, 420.0, player.height);
         for id in [2, 3] {
             let other = nodes.iter().find(|node| node.id == id).unwrap().rect;
             assert!(
@@ -1813,7 +1888,7 @@ mod tests {
         player.music = true;
         for height in [300.0, 500.0] {
             draw_test_player(&mut player, height);
-            let nodes = player.accessible_nodes(50.0, 420.0);
+            let nodes = player.accessible_nodes(50.0, 420.0, player.height);
             let button = nodes
                 .iter()
                 .find(|node| node.id == 23)
@@ -1876,7 +1951,7 @@ mod tests {
             assert!(!player.search_hit(400.0, 475.0, 50.0, 420.0));
             assert!(
                 !player
-                    .accessible_nodes(50.0, 420.0)
+                    .accessible_nodes(50.0, 420.0, player.height)
                     .iter()
                     .any(|node| node.id == 23 && node.enabled)
             );
@@ -1884,25 +1959,55 @@ mod tests {
     }
 
     #[test]
-    fn pointer_wheel_browses_at_both_lyric_bounds_without_leaving_music() {
+    fn pointer_wheel_clamps_at_the_last_line_and_returns_up_to_the_clock() {
         let mut player = player_at_gap(1.5);
         player.music = true;
         draw_test_player(&mut player, 500.0);
-        for (down, expected) in [(false, 0), (true, 1), (true, 1), (false, 0)] {
-            player.wheel_at(down, false, 100.0, 330.0, 0.0, 420.0);
-            assert!(player.music, "lyric wheel must keep Music at either bound");
-            assert_eq!(player.browse, Some(expected));
-        }
-        player.snapshot.lyrics = None;
-        player.wheel_at(false, false, 100.0, 330.0, 0.0, 420.0);
+        player.wheel_at(true, false);
+        assert!(player.music);
+        assert_eq!(player.browse, Some(1));
+        player.wheel_at(true, false);
         assert!(
             player.music,
-            "an empty lyric viewport must not switch pages"
+            "the last lyric line clamps instead of leaving Music"
+        );
+        assert_eq!(player.browse, Some(1));
+        player.wheel_at(false, false);
+        assert!(
+            player.music,
+            "browsing back inside the lyrics must stay on Music"
+        );
+        assert_eq!(player.browse, Some(0));
+        player.wheel_at(false, true);
+        assert!(
+            player.music,
+            "Ctrl+wheel is explicit browsing and must not switch pages"
+        );
+        player.wheel_at(false, false);
+        assert!(
+            !player.music,
+            "an up notch above the first line must scroll back to the Clock page"
         );
     }
 
     #[test]
-    fn pointer_wheel_outside_viewport_retains_page_navigation() {
+    fn wheel_up_on_a_music_page_without_lyrics_returns_to_the_clock() {
+        let mut player = player_at_gap(1.5);
+        player.music = true;
+        player.snapshot.lyrics = None;
+        player.wheel_at(false, false);
+        assert!(
+            !player.music,
+            "an empty music page must not swallow the way back to Clock"
+        );
+    }
+
+    #[test]
+    fn pointer_wheel_anywhere_on_the_music_page_browses_lyrics() {
+        // A notch that lands on the card, a margin, the progress bar, or the
+        // footer must scroll the lyrics instead of replacing the player with
+        // the clock. The old viewport-only routing made scrolling depend on a
+        // few pixels of pointer position and on the spring's current width.
         for (x, y) in [
             (23.0, 330.0),
             (396.0, 330.0),
@@ -1912,10 +2017,9 @@ mod tests {
             let mut player = player_at_gap(1.5);
             player.music = true;
             draw_test_player(&mut player, 500.0);
-            player.wheel_at(false, false, x + 50.0, y, 50.0, 420.0);
-            assert!(!player.music, "outside point ({x}, {y}) must route pages");
-            player.wheel_at(true, false, x + 50.0, y, 50.0, 420.0);
-            assert!(player.music);
+            player.wheel_at(true, false);
+            assert!(player.music, "wheel at ({x}, {y}) must keep Music");
+            assert!(player.browse.is_some());
         }
     }
 
@@ -1923,16 +2027,61 @@ mod tests {
     fn pointer_wheel_keeps_control_and_source_picker_routing() {
         let mut player = player_at_gap(1.5);
         player.music = true;
-        player.wheel_at(true, true, 0.0, 0.0, 0.0, 420.0);
+        player.wheel_at(true, true);
         assert_eq!(player.browse, Some(1));
         player.source_picker = true;
         player.snapshot.sources = (0..30).map(|i| format!("Source {i}")).collect();
-        player.wheel_at(true, false, 100.0, 330.0, 0.0, 420.0);
+        player.wheel_at(true, false);
         assert_eq!(player.source_scroll, 1);
-        player.wheel_at(true, true, 100.0, 330.0, 0.0, 420.0);
+        player.wheel_at(true, true);
         assert_eq!(player.source_scroll, 1);
         assert!(player.music);
         assert_eq!(player.browse, Some(1));
+    }
+
+    #[test]
+    fn wheel_browsing_snaps_the_viewport_instead_of_easing_behind_the_input() {
+        let mut player = player_at_gap(1.5);
+        player.music = true;
+        draw_test_player(&mut player, 500.0);
+        player.browse_lines(true);
+        assert_eq!(
+            player.smooth_line,
+            player.browse.unwrap() as f32,
+            "the rendered line must follow the wheel immediately"
+        );
+        assert_eq!(
+            player.smooth_offset, player.browse_offset,
+            "the rendered row must follow the wheel immediately"
+        );
+        assert!(!player.following);
+    }
+
+    #[test]
+    fn play_pause_flips_before_the_media_app_reports_the_new_state() {
+        let mut player = seekable_player();
+        player.snapshot.key = "track".into();
+        player.snapshot.can_toggle = true;
+        player.snapshot.playing = false;
+        player.worker.set_test_snapshot(player.snapshot.clone());
+        player.music = true;
+        player.refresh();
+        assert!(player.click(210.0, 160.0, 0.0, 420.0));
+        assert!(
+            player.snapshot.playing,
+            "the icon and the next command must see the new state at once"
+        );
+        player.refresh();
+        assert!(
+            player.snapshot.playing,
+            "a media report from before the press must not revert the icon"
+        );
+        player.pending_toggle.as_mut().unwrap().since = Instant::now() - TOGGLE_CONFIRM_GRACE;
+        player.refresh();
+        assert!(
+            !player.snapshot.playing,
+            "after the grace the media app's state wins again"
+        );
     }
 
     fn raster_player(player: &mut Player, settings: &Settings, scale: f32) -> Vec<u8> {
@@ -2297,9 +2446,10 @@ mod tests {
         player.last_lyric_frame = Instant::now() - std::time::Duration::from_secs(2);
         player.wheel(true, true);
         draw_test_player(&mut player, 500.0);
-        assert!(
-            player.smooth_line < 0.3,
-            "idle time must not advance a new scroll animation"
+        assert_eq!(
+            player.smooth_line,
+            player.browse.unwrap() as f32,
+            "idle time must not postpone a new scroll"
         );
     }
 
@@ -2310,18 +2460,12 @@ mod tests {
         draw_test_player(&mut player, 500.0);
         player.wheel(true, true);
         draw_test_player(&mut player, 500.0);
-        assert!(player.following);
-        let previous_frame = Instant::now() - std::time::Duration::from_millis(16);
-        player.last_lyric_frame = previous_frame;
+        assert_eq!(player.smooth_line, player.browse.unwrap() as f32);
         player.wheel(true, true);
         assert_eq!(
-            player.last_lyric_frame, previous_frame,
-            "boundary input must not restart animation"
-        );
-        player.wheel(false, true);
-        assert_eq!(
-            player.last_lyric_frame, previous_frame,
-            "direction changes must preserve elapsed frame time"
+            player.smooth_line,
+            player.browse.unwrap() as f32,
+            "each notch must land on its line without easing behind the input"
         );
     }
 
@@ -2426,7 +2570,7 @@ mod tests {
     #[test]
     fn player_navigation_uses_page_dots_instead_of_back() {
         let player = Player::with_worker(MediaWorker::test_worker());
-        let nodes = player.accessible_nodes(0.0, 420.0);
+        let nodes = player.accessible_nodes(0.0, 420.0, player.height);
         assert!(nodes.iter().any(|n| n.name == "Clock page"));
         assert!(nodes.iter().any(|n| n.name == "Music page"));
         assert!(!nodes.iter().any(|n| n.name.contains("Back")));
@@ -2659,7 +2803,7 @@ mod tests {
         draw_test_player(&mut player, 500.0);
         assert!(
             player
-                .accessible_nodes(0.0, 420.0)
+                .accessible_nodes(0.0, 420.0, player.height)
                 .iter()
                 .any(|n| n.name == "Use Spotify")
         );
@@ -2672,7 +2816,7 @@ mod tests {
         player.snapshot.playing = true;
         assert!(
             player
-                .accessible_nodes(0.0, 420.0)
+                .accessible_nodes(0.0, 420.0, player.height)
                 .iter()
                 .any(|n| n.name == "Pause")
         );

@@ -1,10 +1,15 @@
+use std::cell::Cell;
 use std::mem::size_of;
-use windows_sys::Win32::Foundation::{HWND, POINT};
+use std::time::{Duration, Instant};
+use windows_sys::Win32::Foundation::{HWND, POINT, RECT};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::VK_ESCAPE;
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 use crate::i18n::{self, Language};
 
 const FIRST_COMMAND: usize = 0x6001;
+/// How long a just-opened modeless menu may take to create its popup window.
+const WINDOW_DISCOVERY_GRACE: Duration = Duration::from_millis(250);
 const ACTIONS: [Action; 7] = [
     Action::Clock,
     Action::Music,
@@ -27,18 +32,97 @@ pub(crate) enum Action {
 }
 
 /// Keep alive until the owner processes the queued WM_UNINITMENUPOPUP notification.
-pub(crate) struct Menu(HMENU);
+pub(crate) struct Menu {
+    menu: HMENU,
+    window: Cell<HWND>,
+    shown_at: Instant,
+}
 
 impl Menu {
     pub(crate) fn handle(&self) -> HMENU {
-        self.0
+        self.menu
     }
+
+    /// The popup window is created by the menu manager after tracking starts.
+    /// Resolve it lazily so a slow first frame cannot make the menu look closed.
+    fn window(&self) -> Option<HWND> {
+        let mut window = self.window.get();
+        if window.is_null() {
+            window = find_menu_window();
+            self.window.set(window);
+        }
+        (!window.is_null()).then_some(window)
+    }
+
+    pub(crate) fn is_open(&self) -> bool {
+        self.window().map_or(
+            self.shown_at.elapsed() < WINDOW_DISCOVERY_GRACE,
+            |window| unsafe { IsWindow(window) != 0 && IsWindowVisible(window) != 0 },
+        )
+    }
+
+    /// A click inside the popup belongs to the menu; a click anywhere else
+    /// must dismiss it. Layered owners such as the Island cannot become the
+    /// foreground window, so the menu manager never sees that outside click.
+    pub(crate) fn contains(&self, point: POINT) -> bool {
+        let Some(window) = self.window() else {
+            return false;
+        };
+        let mut rect = RECT::default();
+        unsafe {
+            GetWindowRect(window, &mut rect) != 0
+                && rect.left <= point.x
+                && point.x < rect.right
+                && rect.top <= point.y
+                && point.y < rect.bottom
+        }
+    }
+
+    pub(crate) fn dismiss(&self) {
+        if let Some(window) = self.window() {
+            // A modeless menu closes on Escape. WM_CANCELMODE on the owner is
+            // ignored while the menu is modeless.
+            unsafe {
+                PostMessageW(window, WM_KEYDOWN, VK_ESCAPE as usize, 0);
+            }
+        }
+    }
+}
+
+fn find_menu_window() -> HWND {
+    let class = wide("#32768");
+    let process = std::process::id();
+    let mut window: HWND = std::ptr::null_mut();
+    loop {
+        window = unsafe {
+            FindWindowExW(
+                std::ptr::null_mut(),
+                window,
+                class.as_ptr(),
+                std::ptr::null(),
+            )
+        };
+        if window.is_null() {
+            return window;
+        }
+        let mut owner = 0_u32;
+        unsafe {
+            GetWindowThreadProcessId(window, &mut owner);
+        }
+        if owner == process && unsafe { IsWindowVisible(window) } != 0 {
+            return window;
+        }
+    }
+}
+
+fn wide(text: &str) -> Vec<u16> {
+    text.encode_utf16().chain(Some(0)).collect()
 }
 
 impl Drop for Menu {
     fn drop(&mut self) {
         unsafe {
-            DestroyMenu(self.0);
+            DestroyMenu(self.menu);
         }
     }
 }
@@ -94,7 +178,11 @@ fn create_in(
         if menu.is_null() {
             return None;
         }
-        let menu = Menu(menu);
+        let menu = Menu {
+            menu,
+            window: Cell::new(std::ptr::null_mut()),
+            shown_at: Instant::now(),
+        };
         // Modeless tracking returns to the application loop. Keep WM_COMMAND
         // delivery so the owner can queue actions without borrowing UI state.
         let info = MENUINFO {
@@ -136,7 +224,7 @@ pub(crate) fn show(
     passthrough: bool,
     shortcut: Option<&str>,
 ) -> Option<Menu> {
-    let menu = create(music, browsing, passthrough, shortcut)?;
+    let mut menu = create(music, browsing, passthrough, shortcut)?;
     unsafe {
         let mut cursor = POINT::default();
         if GetCursorPos(&mut cursor) == 0 {
@@ -155,6 +243,8 @@ pub(crate) fn show(
             return None;
         }
         PostMessageW(hwnd, WM_NULL, 0, 0);
+        menu.shown_at = Instant::now();
+        menu.window.set(find_menu_window());
     }
     Some(menu)
 }
