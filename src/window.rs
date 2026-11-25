@@ -1363,6 +1363,18 @@ impl Surface {
             });
             return inside;
         }
+        // A fast pointer can reach the target panel before the spring has drawn
+        // it there. Holding only the current shape would collapse the Island
+        // mid-expansion, leaving the lower controls and lyrics unreachable.
+        let inside = inside
+            || pointer_inside_shape(
+                self.size,
+                scale_shape(animation.target, scale),
+                TOP_MARGIN * scale,
+                point.0,
+                point.1,
+                attached,
+            );
         // Expansion may narrow a long compact sentence. Keep its entry footprint
         // in screen coordinates, including while edge docking moves the window.
         let inside = inside
@@ -3423,6 +3435,22 @@ mod tests {
                 assert_eq!(hover.grace_expired(outside), HoverCommand::Collapse);
             }
         }
+    }
+
+    #[test]
+    fn pointer_reaching_the_target_panel_mid_expansion_keeps_the_island_open() {
+        use super::*;
+        let mut surface = Surface::new((1920, 600), 1.0).unwrap();
+        let mut animation = Animation::new();
+        // The capsule was hovered; the spring has not drawn the panel yet.
+        animation.target = crate::animation::EXPANDED;
+        let center = surface.size.0 as f32 * 0.5;
+        let origin = POINT { x: 0, y: 0 };
+        assert!(
+            surface.hover_contains(&animation, origin, (center, 120.0), true),
+            "the target panel must hold the Island open while the spring catches up"
+        );
+        assert!(!surface.hover_contains(&animation, origin, (center, 400.0), true));
     }
 
     #[test]
