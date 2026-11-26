@@ -20,7 +20,7 @@ windows = { version = "0.62", features = ["Foundation", "Foundation_Collections"
 # Media async operations are awaited with a deadline, which needs the
 # IAsyncOperation/AsyncStatus surface from this crate (already in the tree
 # through the windows dependency; the version stays locked in Cargo.lock).
-windows-future = "0.3.2"
+windows-future = "0.100.0"
 windows-sys = { version = "0.61.2", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
